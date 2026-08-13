@@ -2,8 +2,10 @@
 
 use bullet_math::Aabb;
 
+mod axis_sweep3;
 mod brute_force;
 
+pub use axis_sweep3::AxisSweep3;
 pub use brute_force::BruteForceBroadPhase;
 
 /// A broad-phase structure producing candidate overlapping pairs.

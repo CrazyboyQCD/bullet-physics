@@ -1,4 +1,4 @@
-use bullet_collision::broadphase::{BroadPhase, BruteForceBroadPhase};
+use bullet_collision::broadphase::{AxisSweep3, BroadPhase};
 use bullet_collision::narrowphase;
 use bullet_collision::raycast::{self, RayHit};
 use crate::body::RigidBody;
@@ -8,7 +8,7 @@ use crate::solver::sequential_impulse::{self, ContactConstraint};
 /// A discrete rigid-body simulation world, mirroring `btDiscreteDynamicsWorld`.
 pub struct PhysicsWorld {
     bodies: Vec<RigidBody>,
-    broadphase: BruteForceBroadPhase,
+    broadphase: AxisSweep3,
     gravity: Vector3,
     iterations: u32,
 }
@@ -23,7 +23,7 @@ impl PhysicsWorld {
     pub fn new() -> Self {
         Self {
             bodies: Vec::new(),
-            broadphase: BruteForceBroadPhase::new(),
+            broadphase: AxisSweep3::new(),
             gravity: Vector3::new(0.0, -9.81, 0.0),
             iterations: 10,
         }
