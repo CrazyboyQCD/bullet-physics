@@ -1,0 +1,18 @@
+[package]
+name = "bullet-collision"
+description = "Collision detection for the bullet physics engine: shapes, broad phase, narrow phase, and contact manifolds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["f32"]
+f32 = ["bullet-math/f32"]
+f64 = ["bullet-math/f64"]
+
+[dependencies]
+bullet-math = { path = "../bullet-math", default-features = false }
+
+[dev-dependencies]
+approx = { workspace = true }
