@@ -14,9 +14,9 @@ const RESTITUTION_THRESHOLD: Real = 1.0;
 
 /// A pre-built contact constraint between two bodies.
 pub struct ContactConstraint {
-    body_a: usize,
-    body_b: usize,
-    normal: Vector3,
+    pub(crate) body_a: usize,
+    pub(crate) body_b: usize,
+    pub(crate) normal: Vector3,
     tangent1: Vector3,
     tangent2: Vector3,
     r_a: Vector3,
@@ -28,12 +28,13 @@ pub struct ContactConstraint {
     normal_mass: Real,
     tangent1_mass: Real,
     tangent2_mass: Real,
+    pub(crate) position: Vector3,
     penetration: Real,
     restitution: Real,
     friction: Real,
-    normal_impulse: Real,
-    tangent1_impulse: Real,
-    tangent2_impulse: Real,
+    pub(crate) normal_impulse: Real,
+    pub(crate) tangent1_impulse: Real,
+    pub(crate) tangent2_impulse: Real,
 }
 
 impl ContactConstraint {
@@ -72,12 +73,16 @@ impl ContactConstraint {
             normal_mass,
             tangent1_mass,
             tangent2_mass,
+            position: cp.position,
             penetration: cp.penetration,
             restitution,
             friction,
-            normal_impulse: 0.0,
-            tangent1_impulse: 0.0,
-            tangent2_impulse: 0.0,
+            // The impulses inherited from the persistent contact cache (if any)
+            // are re-applied by the warm-start pass below; new contacts start
+            // from zero, exactly like Bullet's persistent-manifold flow.
+            normal_impulse: cp.normal_impulse,
+            tangent1_impulse: cp.tangent_impulse[0],
+            tangent2_impulse: cp.tangent_impulse[1],
         }
     }
 }
@@ -126,6 +131,16 @@ fn two_bodies(bodies: &mut [RigidBody], a: usize, b: usize) -> (&mut RigidBody, 
 
 /// Solve all contact constraints with sequential-impulse (PGS) iterations.
 pub fn solve(bodies: &mut [RigidBody], constraints: &mut [ContactConstraint], iterations: u32, inv_dt: Real) {
+    // Warm start: re-apply the impulses accumulated by the previous step
+    // (Bullet's `SOLVER_USE_WARMSTARTING` pass), so resting contacts reach a
+    // converged solution in a few iterations instead of rebuilding from zero.
+    for c in constraints.iter_mut() {
+        let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
+        apply_impulse(a, b, c, c.normal * c.normal_impulse);
+        apply_impulse(a, b, c, c.tangent1 * c.tangent1_impulse);
+        apply_impulse(a, b, c, c.tangent2 * c.tangent2_impulse);
+    }
+
     for _ in 0..iterations {
         for c in constraints.iter_mut() {
             solve_contact(bodies, c, inv_dt);

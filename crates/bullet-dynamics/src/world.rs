@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bullet_collision::broadphase::{AxisSweep3, BroadPhase};
 use bullet_collision::narrowphase;
 use bullet_collision::raycast::{self, RayHit};
@@ -5,12 +7,33 @@ use crate::body::RigidBody;
 use bullet_math::{Real, Vector3};
 use crate::solver::sequential_impulse::{self, ContactConstraint};
 
+/// Scale applied to a cached impulse before the warm-start pass (Bullet's
+/// `m_warmstartingFactor`): old impulses are faded slightly so the solver can
+/// correct drift instead of blindly trusting the previous step.
+const WARM_STARTING_FACTOR: Real = 0.85;
+/// Distance below which a fresh contact point is the same physical contact as
+/// a cached one (Bullet's `gContactBreakingThreshold`), keeping its impulse.
+const CONTACT_BREAKING_THRESHOLD: Real = 0.02;
+
+/// A cached contact point from the previous step: the accumulated normal
+/// impulse is re-applied on the next step's warm-start pass (the
+/// persistent-manifold `m_appliedImpulse` cache in Bullet). Friction impulses
+/// are deliberately not cached — see [`warm_start_impulses`].
+struct CachedContact {
+    position: Vector3,
+    normal: Vector3,
+    normal_impulse: Real,
+}
+
 /// A discrete rigid-body simulation world, mirroring `btDiscreteDynamicsWorld`.
 pub struct PhysicsWorld {
     bodies: Vec<RigidBody>,
     broadphase: AxisSweep3,
     gravity: Vector3,
     iterations: u32,
+    /// Accumulated contact impulses from the previous step, keyed by body
+    /// pair; the cache is rebuilt every step from the solved constraints.
+    contact_cache: HashMap<(usize, usize), Vec<CachedContact>>,
 }
 
 impl Default for PhysicsWorld {
@@ -26,6 +49,7 @@ impl PhysicsWorld {
             broadphase: AxisSweep3::new(),
             gravity: Vector3::new(0.0, -9.81, 0.0),
             iterations: 10,
+            contact_cache: HashMap::new(),
         }
     }
 
@@ -122,7 +146,7 @@ impl PhysicsWorld {
         for &(i, j) in &pairs {
             let a = &self.bodies[i];
             let b = &self.bodies[j];
-            if let Some(manifold) = narrowphase::collide(
+            if let Some(mut manifold) = narrowphase::collide(
                 &a.shape,
                 predicted[i],
                 a.orientation,
@@ -130,6 +154,12 @@ impl PhysicsWorld {
                 predicted[j],
                 b.orientation,
             ) {
+                // Inherit the previous step's accumulated impulses for contact
+                // points that persist (Bullet's persistent manifolds).
+                warm_start_impulses(
+                    &mut manifold.points,
+                    self.contact_cache.get(&(i, j)).map(Vec::as_slice),
+                );
                 for cp in &manifold.points {
                     constraints.push(ContactConstraint::prepare(i, j, cp, a, b));
                 }
@@ -139,6 +169,21 @@ impl PhysicsWorld {
         // 6. Solve constraints (correct velocities).
         sequential_impulse::solve(&mut self.bodies, &mut constraints, self.iterations, inv_dt);
 
+        // 6b. Write back the solved impulses so the next step can warm start
+        // from them (the cache is rebuilt every step, dropping stale pairs).
+        let mut next_cache: HashMap<(usize, usize), Vec<CachedContact>> = HashMap::new();
+        for c in &constraints {
+            next_cache
+                .entry((c.body_a, c.body_b))
+                .or_default()
+                .push(CachedContact {
+                    position: c.position,
+                    normal: c.normal,
+                    normal_impulse: c.normal_impulse,
+                });
+        }
+        self.contact_cache = next_cache;
+
         // 7. Integrate positions with the corrected velocities.
         for body in &mut self.bodies {
             body.integrate_position(dt);
@@ -147,6 +192,53 @@ impl PhysicsWorld {
         // 8. Clear accumulated forces for the next step.
         for body in &mut self.bodies {
             body.clear_forces();
+        }
+    }
+}
+
+/// Inherit the previous step's accumulated normal impulse for each fresh
+/// contact point. A new point within [`CONTACT_BREAKING_THRESHOLD`] of a
+/// cached one is the same physical contact (Bullet's `getCacheEntry` +
+/// `replaceContactPoint` persistence) and keeps its impulse, scaled by
+/// [`WARM_STARTING_FACTOR`] so the solver can correct small drift (Bullet's
+/// `m_warmstartingFactor`).
+///
+/// Two guards protect against the point set changing between steps (which
+/// Bullet's persistent manifolds smooth out and we rebuild per step):
+/// - the contact normal must stay (nearly) the same: our mesh narrow phase
+///   generates one normal per triangle, so a cached impulse applied along a
+///   newly rotated normal would kick the body sideways;
+/// - friction impulses are **not** inherited: the tangent basis rotates with
+///   the point set, and stale friction kicks make a resting body on a mesh
+///   oscillate instead of settling (observed with `falling_mesh`). Friction
+///   rebuilds from zero inside the solver iterations, exactly as on the first
+///   contact frame.
+fn warm_start_impulses(points: &mut [bullet_collision::manifold::ContactPoint], cache: Option<&[CachedContact]>) {
+    const NORMAL_EPS: Real = 0.9;
+    let breaking_sq = CONTACT_BREAKING_THRESHOLD * CONTACT_BREAKING_THRESHOLD;
+    let Some(cache) = cache else {
+        return;
+    };
+    let mut used = vec![false; cache.len()];
+    for p in points {
+        let mut best: Option<usize> = None;
+        let mut best_d2 = Real::INFINITY;
+        for (i, c) in cache.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
+            let d2 = (p.position - c.position).length_squared();
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = Some(i);
+            }
+        }
+        let Some(i) = best else {
+            continue;
+        };
+        if best_d2 <= breaking_sq && p.normal.dot(cache[i].normal) >= NORMAL_EPS {
+            p.normal_impulse = cache[i].normal_impulse * WARM_STARTING_FACTOR;
+            used[i] = true;
         }
     }
 }
@@ -200,5 +292,69 @@ mod tests {
             Vector3::new(0.6, 0.6, 0.6),
         );
         assert!(hit.is_none());
+    }
+
+    /// A fresh contact point near a cached one keeps its impulse (scaled by
+    /// the warm-starting factor); a distant point is a new contact from zero.
+    #[test]
+    fn warm_start_inherits_cached_impulses() {
+        let cache = [CachedContact {
+            position: Vector3::ZERO,
+            normal: Vector3::Y,
+            normal_impulse: 10.0,
+        }];
+        let mut near = [bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.01, 0.0, 0.0),
+            Vector3::Y,
+            0.1,
+        )];
+        warm_start_impulses(&mut near, Some(&cache));
+        assert_relative_eq!(near[0].normal_impulse, 8.5, epsilon = 1e-4);
+        // Friction is not inherited (rebuilds from zero each step).
+        assert_eq!(near[0].tangent_impulse, [0.0, 0.0]);
+
+        let mut far = [bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(5.0, 0.0, 0.0),
+            Vector3::Y,
+            0.1,
+        )];
+        warm_start_impulses(&mut far, Some(&cache));
+        assert_eq!(far[0].normal_impulse, 0.0);
+        assert_eq!(far[0].tangent_impulse, [0.0, 0.0]);
+
+        // A nearby point whose normal rotated too much (e.g. a box crossing a
+        // triangle-mesh ridge) must not inherit the cached impulse.
+        let mut rotated = [bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.01, 0.0, 0.0),
+            Vector3::X,
+            0.1,
+        )];
+        warm_start_impulses(&mut rotated, Some(&cache));
+        assert_eq!(rotated[0].normal_impulse, 0.0);
+    }
+
+    /// A resting body keeps a supporting contact impulse in the cache across
+    /// steps (the warm-start input for the next step).
+    #[test]
+    fn step_simulation_persists_contact_impulses() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        for _ in 0..90 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        let cached: Vec<&CachedContact> = world.contact_cache.values().flatten().collect();
+        assert!(!cached.is_empty());
+        assert!(cached.iter().any(|c| c.normal_impulse > 0.0));
+        let sphere = world.body(1);
+        assert_relative_eq!(sphere.position.y, 0.5, epsilon = 0.05);
+        assert!(sphere.linear_velocity.length() < 0.1);
     }
 }
