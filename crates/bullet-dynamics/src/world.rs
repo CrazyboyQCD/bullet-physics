@@ -69,11 +69,15 @@ impl PhysicsWorld {
     /// Cast a ray against every body and return the closest hit together with
     /// the body index (Bullet's `rayTest` with a closest-result callback).
     ///
-    /// Bodies are tested in insertion order with a brute-force walk; an
-    /// `AxisSweep3` broad phase can later prune candidates via its ray test.
+    /// The broad phase first prunes proxies whose AABB the segment does not
+    /// cross, so the (more expensive) exact per-shape test only runs on
+    /// candidates — mirroring `btAxisSweep3::rayTest` feeding a
+    /// `ClosestRayResultCallback`. The AABB test is conservative, so the
+    /// result is identical to testing every body.
     pub fn raycast_closest(&self, ray_from: Vector3, ray_to: Vector3) -> Option<(usize, RayHit)> {
         let mut best: Option<(usize, RayHit)> = None;
-        for (i, body) in self.bodies.iter().enumerate() {
+        for i in self.broadphase.raycast_candidates(ray_from, ray_to) {
+            let body = &self.bodies[i];
             if let Some(hit) = raycast::raycast(
                 &body.shape,
                 body.position,
@@ -178,5 +182,23 @@ mod tests {
         assert!(world
             .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
             .is_none());
+    }
+
+    /// The broad-phase AABB test is conservative: a ray crossing a proxy's
+    /// AABB corner must not produce a hit when the exact shape test misses.
+    #[test]
+    fn raycast_closest_prunes_aabb_only_hits() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        ));
+        // Starts on the AABB corner (0.5, 0.5, 0.5), which is outside the
+        // radius-0.5 sphere: the AABB filter keeps it, the sphere test drops it.
+        let hit = world.raycast_closest(
+            Vector3::new(0.5, 0.5, 0.5),
+            Vector3::new(0.6, 0.6, 0.6),
+        );
+        assert!(hit.is_none());
     }
 }

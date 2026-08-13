@@ -61,6 +61,10 @@ pub fn convex_mesh(
     if manifold.is_empty() {
         None
     } else {
+        // One contact per candidate triangle can easily exceed the manifold
+        // cap; reduce to four well-separated points (Bullet manifold
+        // reduction) before handing the contact set to the solver.
+        manifold.reduce(4);
         Some(manifold)
     }
 }
@@ -134,6 +138,31 @@ mod tests {
             Quaternion::IDENTITY,
         )
         .unwrap();
+        let p = m.points[0];
+        assert_relative_eq!(p.normal.y, -1.0, epsilon = 1e-3);
+        assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-3);
+    }
+
+    /// A box straddling four heightfield cells yields one contact per touched
+    /// triangle; the merged manifold must be reduced to the manifold cap.
+    #[test]
+    fn box_over_many_triangles_reduces_contacts() {
+        let hf = CollisionShape::heightfield(vec![0.0; 25], 5, 5, Vector3::ONE);
+        let CollisionShape::Heightfield(hf) = &hf else {
+            unreachable!()
+        };
+        let box_shape = CollisionShape::box_shape(Vector3::splat(0.5));
+        let m = convex_mesh(
+            &box_shape,
+            Vector3::new(2.0, 0.4, 2.0),
+            Quaternion::IDENTITY,
+            hf.as_mesh(),
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+        )
+        .unwrap();
+        assert!(m.points.len() <= 4);
+        // The deepest contact is still reported first with the -Y normal.
         let p = m.points[0];
         assert_relative_eq!(p.normal.y, -1.0, epsilon = 1e-3);
         assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-3);

@@ -1,6 +1,6 @@
-use bullet_math::Aabb;
+use bullet_math::{Aabb, Vector3};
 
-use super::BroadPhase;
+use super::{aabb_raycast_candidates, BroadPhase};
 
 /// O(n^2) broad phase. Correctness baseline for tests; replace with a
 /// `DbvtBroadPhase` for real workloads.
@@ -54,6 +54,10 @@ impl BroadPhase for BruteForceBroadPhase {
             }
         }
         pairs
+    }
+
+    fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize> {
+        aabb_raycast_candidates(&self.aabbs, ray_from, ray_to)
     }
 }
 
