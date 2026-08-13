@@ -20,10 +20,12 @@
 pub use bullet_collision as collision;
 pub use bullet_dynamics as dynamics;
 pub use bullet_math as math;
+pub use bullet_collision::raycast;
 pub use bullet_collision::shapes;
 
 /// Convenience re-exports for common imports.
 pub mod prelude {
+    pub use bullet_collision::raycast::RayHit;
     pub use bullet_collision::shapes::CollisionShape;
     pub use bullet_dynamics::{PhysicsWorld, RigidBody};
     pub use bullet_math::{Quaternion, Real, Vector3};

@@ -4,6 +4,7 @@
 pub mod broadphase;
 pub mod manifold;
 pub mod narrowphase;
+pub mod raycast;
 pub mod shapes;
 
 pub use shapes::{

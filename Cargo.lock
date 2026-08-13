@@ -38,6 +38,7 @@ dependencies = [
 name = "bullet-dynamics"
 version = "0.1.0"
 dependencies = [
+ "approx",
  "bullet-collision",
  "bullet-math",
 ]

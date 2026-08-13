@@ -1,5 +1,6 @@
 use bullet_collision::broadphase::{BroadPhase, BruteForceBroadPhase};
 use bullet_collision::narrowphase;
+use bullet_collision::raycast::{self, RayHit};
 use crate::body::RigidBody;
 use bullet_math::{Real, Vector3};
 use crate::solver::sequential_impulse::{self, ContactConstraint};
@@ -65,6 +66,28 @@ impl PhysicsWorld {
         &self.bodies
     }
 
+    /// Cast a ray against every body and return the closest hit together with
+    /// the body index (Bullet's `rayTest` with a closest-result callback).
+    ///
+    /// Bodies are tested in insertion order with a brute-force walk; an
+    /// `AxisSweep3` broad phase can later prune candidates via its ray test.
+    pub fn raycast_closest(&self, ray_from: Vector3, ray_to: Vector3) -> Option<(usize, RayHit)> {
+        let mut best: Option<(usize, RayHit)> = None;
+        for (i, body) in self.bodies.iter().enumerate() {
+            if let Some(hit) = raycast::raycast(
+                &body.shape,
+                body.position,
+                body.orientation,
+                ray_from,
+                ray_to,
+            ) && best.is_none_or(|(_, b)| hit.fraction < b.fraction)
+            {
+                best = Some((i, hit));
+            }
+        }
+        best
+    }
+
     /// Advance the simulation by `dt` seconds.
     pub fn step_simulation(&mut self, dt: Real) {
         let inv_dt = 1.0 / dt;
@@ -121,5 +144,39 @@ impl PhysicsWorld {
         for body in &mut self.bodies {
             body.clear_forces();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn raycast_closest_returns_the_nearest_body() {
+        let mut world = PhysicsWorld::new();
+        // Near sphere at x = 1, far sphere at x = 3.
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(3.0, 0.0, 0.0),
+        ));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(1.0, 0.0, 0.0),
+        ));
+        let (index, hit) = world
+            .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+            .unwrap();
+        assert_eq!(index, 1);
+        assert_relative_eq!(hit.fraction, 0.1, epsilon = 1e-4);
+        assert_relative_eq!(hit.normal.x, -1.0, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn raycast_closest_misses_empty_world() {
+        let world = PhysicsWorld::new();
+        assert!(world
+            .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+            .is_none());
     }
 }

@@ -14,3 +14,6 @@ f64 = ["bullet-math/f64", "bullet-collision/f64"]
 [dependencies]
 bullet-math = { path = "../bullet-math", default-features = false }
 bullet-collision = { path = "../bullet-collision", default-features = false }
+
+[dev-dependencies]
+approx = { workspace = true }
