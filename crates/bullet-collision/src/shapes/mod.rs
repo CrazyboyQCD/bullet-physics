@@ -6,9 +6,21 @@
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
 
 mod box_shape;
+mod capsule;
+mod compound;
+mod cone;
+mod convex_hull;
+mod cylinder;
+mod plane;
 mod sphere;
 
 pub use box_shape::BoxShape;
+pub use capsule::Capsule;
+pub use compound::{Compound, CompoundChild};
+pub use cone::Cone;
+pub use convex_hull::ConvexHull;
+pub use cylinder::Cylinder;
+pub use plane::Plane;
 pub use sphere::Sphere;
 
 /// Shape category, mirroring Bullet's `BroadphaseProxyTypes`.
@@ -31,6 +43,12 @@ pub enum ShapeType {
 pub enum CollisionShape {
     Sphere(Sphere),
     BoxShape(BoxShape),
+    Capsule(Capsule),
+    Cylinder(Cylinder),
+    Cone(Cone),
+    ConvexHull(ConvexHull),
+    Compound(Compound),
+    Plane(Plane),
 }
 
 impl CollisionShape {
@@ -44,18 +62,70 @@ impl CollisionShape {
         Self::BoxShape(BoxShape::new(half_extents))
     }
 
+    /// A capsule with the given radius and half height along its Y axis.
+    #[inline]
+    pub fn capsule(radius: Real, half_height: Real) -> Self {
+        Self::Capsule(Capsule::new(radius, half_height))
+    }
+
+    /// A cylinder with the given radius and half height along its Y axis.
+    #[inline]
+    pub fn cylinder(radius: Real, half_height: Real) -> Self {
+        Self::Cylinder(Cylinder::new(radius, half_height))
+    }
+
+    /// A cone with the given radius and half height along its Y axis.
+    #[inline]
+    pub fn cone(radius: Real, half_height: Real) -> Self {
+        Self::Cone(Cone::new(radius, half_height))
+    }
+
+    /// A convex hull from a set of vertices (must be convex).
+    #[inline]
+    pub fn convex_hull(points: Vec<Vector3>) -> Self {
+        Self::ConvexHull(ConvexHull::new(points))
+    }
+
+    /// A compound shape from a list of positioned children.
+    #[inline]
+    pub fn compound(children: Vec<CompoundChild>) -> Self {
+        Self::Compound(Compound::new(children))
+    }
+
+    /// An infinite plane `normal . x = constant`.
+    #[inline]
+    pub fn plane(normal: Vector3, constant: Real) -> Self {
+        Self::Plane(Plane::new(normal, constant))
+    }
+
     #[inline]
     pub fn shape_type(&self) -> ShapeType {
         match self {
             Self::Sphere(_) => ShapeType::Sphere,
             Self::BoxShape(_) => ShapeType::Box,
+            Self::Capsule(_) => ShapeType::Capsule,
+            Self::Cylinder(_) => ShapeType::Cylinder,
+            Self::Cone(_) => ShapeType::Cone,
+            Self::ConvexHull(_) => ShapeType::ConvexHull,
+            Self::Compound(_) => ShapeType::Compound,
+            Self::Plane(_) => ShapeType::Plane,
         }
     }
 
-    /// True if the shape is convex (usable with GJK/EPA).
+    /// True if the shape is convex (usable with GJK/EPA). A compound is convex
+    /// when all of its children are.
     #[inline]
     pub fn is_convex(&self) -> bool {
-        matches!(self, Self::Sphere(_) | Self::BoxShape(_))
+        match self {
+            Self::Sphere(_)
+            | Self::BoxShape(_)
+            | Self::Capsule(_)
+            | Self::Cylinder(_)
+            | Self::Cone(_)
+            | Self::ConvexHull(_) => true,
+            Self::Compound(c) => c.is_convex(),
+            Self::Plane(_) => false,
+        }
     }
 
     /// Suggested contact margin (Bullet's `CONVEX_DISTANCE_MARGIN` semantics).
@@ -64,6 +134,12 @@ impl CollisionShape {
         match self {
             Self::Sphere(s) => s.margin(),
             Self::BoxShape(b) => b.margin(),
+            Self::Capsule(c) => c.margin(),
+            Self::Cylinder(c) => c.margin(),
+            Self::Cone(c) => c.margin(),
+            Self::ConvexHull(h) => h.margin(),
+            Self::Compound(c) => c.margin(),
+            Self::Plane(p) => p.margin(),
         }
     }
 
@@ -73,6 +149,12 @@ impl CollisionShape {
         match self {
             Self::Sphere(s) => s.local_aabb(),
             Self::BoxShape(b) => b.local_aabb(),
+            Self::Capsule(c) => c.local_aabb(),
+            Self::Cylinder(c) => c.local_aabb(),
+            Self::Cone(c) => c.local_aabb(),
+            Self::ConvexHull(h) => h.local_aabb(),
+            Self::Compound(c) => c.local_aabb(),
+            Self::Plane(p) => p.local_aabb(),
         }
     }
 
@@ -82,6 +164,13 @@ impl CollisionShape {
         match self {
             Self::Sphere(s) => s.support_local(dir),
             Self::BoxShape(b) => b.support_local(dir),
+            Self::Capsule(c) => c.support_local(dir),
+            Self::Cylinder(c) => c.support_local(dir),
+            Self::Cone(c) => c.support_local(dir),
+            Self::ConvexHull(h) => h.support_local(dir),
+            Self::Compound(c) => c.support_local(dir),
+            // Planes are not convex and never reach GJK support queries.
+            Self::Plane(_) => Vector3::ZERO,
         }
     }
 
@@ -104,6 +193,12 @@ impl CollisionShape {
         match self {
             Self::Sphere(s) => s.world_aabb(position),
             Self::BoxShape(b) => b.world_aabb(position, orientation),
+            Self::Capsule(c) => c.world_aabb(position, orientation),
+            Self::Cylinder(c) => c.world_aabb(position, orientation),
+            Self::Cone(c) => c.world_aabb(position, orientation),
+            Self::ConvexHull(h) => h.world_aabb(position, orientation),
+            Self::Compound(c) => c.world_aabb(position, orientation),
+            Self::Plane(p) => p.world_aabb(position, orientation),
         }
     }
 
@@ -113,6 +208,40 @@ impl CollisionShape {
         match self {
             Self::Sphere(s) => s.local_inertia(mass),
             Self::BoxShape(b) => b.local_inertia(mass),
+            Self::Capsule(c) => c.local_inertia(mass),
+            Self::Cylinder(c) => c.local_inertia(mass),
+            Self::Cone(c) => c.local_inertia(mass),
+            Self::ConvexHull(h) => h.local_inertia(mass),
+            Self::Compound(c) => c.local_inertia(mass),
+            Self::Plane(p) => p.local_inertia(mass),
         }
     }
+}
+
+/// AABB of a convex shape from its support projections along the three world
+/// axes. Exact for any convex shape (the projected half-width is
+/// `support(u) . u` along each world axis `u` in local space), and cheaper
+/// than sweeping corners for shapes without explicit formulas.
+#[inline]
+pub(crate) fn support_projected_aabb(
+    support: impl Fn(Vector3) -> Vector3,
+    position: Vector3,
+    orientation: Quaternion,
+) -> Aabb {
+    let ux = orientation.inverse().mul_vec3(Vector3::X);
+    let uy = orientation.inverse().mul_vec3(Vector3::Y);
+    let uz = orientation.inverse().mul_vec3(Vector3::Z);
+    // min projection along `u` equals `support(-u) . u` (the farthest point
+    // along `-u`, projected back onto `u`).
+    let min = Vector3::new(
+        position.x + support(-ux).dot(ux),
+        position.y + support(-uy).dot(uy),
+        position.z + support(-uz).dot(uz),
+    );
+    let max = Vector3::new(
+        position.x + support(ux).dot(ux),
+        position.y + support(uy).dot(uy),
+        position.z + support(uz).dot(uz),
+    );
+    Aabb::new(min, max)
 }
