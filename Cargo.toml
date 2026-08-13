@@ -12,6 +12,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["CrazyboyQCD <yzc13697716338@gmail.com>"]
+repository = "https://github.com/CrazyboyQCD/bullet_physics"
 
 [workspace.dependencies]
 glam = "0.33"
