@@ -6,13 +6,16 @@
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
 
 mod box_shape;
+mod bvh;
 mod capsule;
 mod compound;
 mod cone;
 mod convex_hull;
 mod cylinder;
+mod heightfield;
 mod plane;
 mod sphere;
+mod triangle_mesh;
 
 pub use box_shape::BoxShape;
 pub use capsule::Capsule;
@@ -20,8 +23,10 @@ pub use compound::{Compound, CompoundChild};
 pub use cone::Cone;
 pub use convex_hull::ConvexHull;
 pub use cylinder::Cylinder;
+pub use heightfield::Heightfield;
 pub use plane::Plane;
 pub use sphere::Sphere;
+pub use triangle_mesh::TriangleMesh;
 
 /// Shape category, mirroring Bullet's `BroadphaseProxyTypes`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +54,8 @@ pub enum CollisionShape {
     ConvexHull(ConvexHull),
     Compound(Compound),
     Plane(Plane),
+    TriangleMesh(TriangleMesh),
+    Heightfield(Heightfield),
 }
 
 impl CollisionShape {
@@ -98,6 +105,23 @@ impl CollisionShape {
         Self::Plane(Plane::new(normal, constant))
     }
 
+    /// A static triangle mesh (BVH accelerated).
+    #[inline]
+    pub fn triangle_mesh(vertices: Vec<Vector3>, indices: Vec<[u32; 3]>) -> Self {
+        Self::TriangleMesh(TriangleMesh::new(vertices, indices))
+    }
+
+    /// A static heightfield terrain from a `width x depth` height grid.
+    #[inline]
+    pub fn heightfield(
+        heights: Vec<Real>,
+        width: usize,
+        depth: usize,
+        cell_size: Vector3,
+    ) -> Self {
+        Self::Heightfield(Heightfield::new(heights, width, depth, cell_size))
+    }
+
     #[inline]
     pub fn shape_type(&self) -> ShapeType {
         match self {
@@ -109,6 +133,8 @@ impl CollisionShape {
             Self::ConvexHull(_) => ShapeType::ConvexHull,
             Self::Compound(_) => ShapeType::Compound,
             Self::Plane(_) => ShapeType::Plane,
+            Self::TriangleMesh(_) => ShapeType::TriangleMesh,
+            Self::Heightfield(_) => ShapeType::Heightfield,
         }
     }
 
@@ -124,7 +150,7 @@ impl CollisionShape {
             | Self::Cone(_)
             | Self::ConvexHull(_) => true,
             Self::Compound(c) => c.is_convex(),
-            Self::Plane(_) => false,
+            Self::Plane(_) | Self::TriangleMesh(_) | Self::Heightfield(_) => false,
         }
     }
 
@@ -140,6 +166,7 @@ impl CollisionShape {
             Self::ConvexHull(h) => h.margin(),
             Self::Compound(c) => c.margin(),
             Self::Plane(p) => p.margin(),
+            Self::TriangleMesh(_) | Self::Heightfield(_) => 0.0,
         }
     }
 
@@ -155,6 +182,8 @@ impl CollisionShape {
             Self::ConvexHull(h) => h.local_aabb(),
             Self::Compound(c) => c.local_aabb(),
             Self::Plane(p) => p.local_aabb(),
+            Self::TriangleMesh(m) => m.local_aabb(),
+            Self::Heightfield(h) => h.local_aabb(),
         }
     }
 
@@ -169,8 +198,9 @@ impl CollisionShape {
             Self::Cone(c) => c.support_local(dir),
             Self::ConvexHull(h) => h.support_local(dir),
             Self::Compound(c) => c.support_local(dir),
-            // Planes are not convex and never reach GJK support queries.
-            Self::Plane(_) => Vector3::ZERO,
+            // Planes, meshes, and heightfields are not convex and never reach
+            // GJK support queries.
+            Self::Plane(_) | Self::TriangleMesh(_) | Self::Heightfield(_) => Vector3::ZERO,
         }
     }
 
@@ -199,6 +229,8 @@ impl CollisionShape {
             Self::ConvexHull(h) => h.world_aabb(position, orientation),
             Self::Compound(c) => c.world_aabb(position, orientation),
             Self::Plane(p) => p.world_aabb(position, orientation),
+            Self::TriangleMesh(m) => m.world_aabb(position, orientation),
+            Self::Heightfield(h) => h.world_aabb(position, orientation),
         }
     }
 
@@ -214,6 +246,8 @@ impl CollisionShape {
             Self::ConvexHull(h) => h.local_inertia(mass),
             Self::Compound(c) => c.local_inertia(mass),
             Self::Plane(p) => p.local_inertia(mass),
+            Self::TriangleMesh(m) => m.local_inertia(mass),
+            Self::Heightfield(h) => h.local_inertia(mass),
         }
     }
 }

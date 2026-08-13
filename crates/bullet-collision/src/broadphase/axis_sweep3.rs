@@ -135,8 +135,8 @@ mod tests {
     fn requires_overlap_on_all_axes() {
         let mut bp = AxisSweep3::new();
         // Overlap on X and Y but separated on Z.
-        let a = bp.create_proxy(Aabb::new(Vector3::ZERO, Vector3::new(1.0, 1.0, 1.0)));
-        let b = bp.create_proxy(Aabb::new(Vector3::new(0.5, 0.5, 5.0), Vector3::new(1.5, 1.5, 6.0)));
+        bp.create_proxy(Aabb::new(Vector3::ZERO, Vector3::new(1.0, 1.0, 1.0)));
+        bp.create_proxy(Aabb::new(Vector3::new(0.5, 0.5, 5.0), Vector3::new(1.5, 1.5, 6.0)));
         assert!(bp.compute_pairs().is_empty());
     }
 

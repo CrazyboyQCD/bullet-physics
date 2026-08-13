@@ -6,6 +6,7 @@ use crate::shapes::{CollisionShape, Compound};
 
 mod box_box;
 mod convex_convex;
+mod convex_mesh;
 pub mod epa;
 pub mod gjk;
 mod plane;
@@ -48,6 +49,41 @@ pub fn collide(
 
     match (shape_a, shape_b) {
         (CollisionShape::Plane(_), CollisionShape::Plane(_)) => None,
+        // Concave meshes/heightfields collide only with convex shapes (the
+        // compound case was expanded above). Concave-concave and plane-concave
+        // pairs are unsupported and report no contacts.
+        (CollisionShape::TriangleMesh(mesh), other) if other.is_convex() => {
+            convex_mesh::convex_mesh(
+                other,
+                position_b,
+                orientation_b,
+                mesh,
+                position_a,
+                orientation_a,
+            )
+            .map(|m| m.flipped())
+        }
+        (CollisionShape::TriangleMesh(_), _) => None,
+        (CollisionShape::Heightfield(hf), other) if other.is_convex() => {
+            convex_mesh::convex_mesh(
+                other,
+                position_b,
+                orientation_b,
+                hf.as_mesh(),
+                position_a,
+                orientation_a,
+            )
+            .map(|m| m.flipped())
+        }
+        (CollisionShape::Heightfield(_), _) => None,
+        (other, CollisionShape::TriangleMesh(mesh)) if other.is_convex() => {
+            convex_mesh::convex_mesh(other, position_a, orientation_a, mesh, position_b, orientation_b)
+        }
+        (_, CollisionShape::TriangleMesh(_)) => None,
+        (other, CollisionShape::Heightfield(hf)) if other.is_convex() => {
+            convex_mesh::convex_mesh(other, position_a, orientation_a, hf.as_mesh(), position_b, orientation_b)
+        }
+        (_, CollisionShape::Heightfield(_)) => None,
         (CollisionShape::Plane(pa), _) => plane::plane_convex(
             pa,
             position_a,
@@ -198,5 +234,53 @@ mod tests {
         let p = m.points[0];
         assert_relative_eq!(p.normal.y, 1.0);
         assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn sphere_vs_mesh_through_collide() {
+        let mesh = CollisionShape::triangle_mesh(
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 1.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ],
+            vec![[0, 1, 2], [0, 2, 3]],
+        );
+        let sphere = CollisionShape::sphere(0.5);
+        // Normal points from the sphere (shape_a) toward the mesh: -Y.
+        let m = collide_pair(&sphere, Vector3::new(0.5, 0.4, 0.5), &mesh, Vector3::ZERO).unwrap();
+        let p = m.points[0];
+        assert_relative_eq!(p.normal.y, -1.0, epsilon = 1e-3);
+        assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn mesh_vs_sphere_flips_the_normal() {
+        let mesh = CollisionShape::triangle_mesh(
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 1.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ],
+            vec![[0, 1, 2], [0, 2, 3]],
+        );
+        let sphere = CollisionShape::sphere(0.5);
+        // Normal points from the mesh (shape_a) toward the sphere: +Y.
+        let m = collide_pair(&mesh, Vector3::ZERO, &sphere, Vector3::new(0.5, 0.4, 0.5)).unwrap();
+        let p = m.points[0];
+        assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-3);
+        assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn heightfield_vs_box_through_collide() {
+        let hf = CollisionShape::heightfield(vec![0.0; 9], 3, 3, Vector3::ONE);
+        let box_shape = CollisionShape::box_shape(Vector3::splat(0.5));
+        let m = collide_pair(&hf, Vector3::ZERO, &box_shape, Vector3::new(1.0, 0.4, 1.0)).unwrap();
+        let p = m.points[0];
+        assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-3);
+        assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-3);
     }
 }

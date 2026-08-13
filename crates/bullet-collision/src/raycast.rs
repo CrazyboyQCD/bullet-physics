@@ -96,6 +96,8 @@ fn local_raycast(
         CollisionShape::ConvexHull(h) => {
             convex_hull_raycast(&h.points, local_from, local_to)
         }
+        CollisionShape::TriangleMesh(m) => m.raycast(local_from, local_to),
+        CollisionShape::Heightfield(h) => h.raycast(local_from, local_to),
         CollisionShape::Compound(compound) => {
             compound_raycast(compound, inv, position, ray_from, ray_to)
         }
@@ -137,6 +139,9 @@ fn local_inside(
             hull_distance_squared(&h.points, p) <= 1e-12
         }
         CollisionShape::Plane(_) => false,
+        // Open surfaces: rays pass through freely; hits report the surface
+        // normal facing the ray origin from either side.
+        CollisionShape::TriangleMesh(_) | CollisionShape::Heightfield(_) => false,
         CollisionShape::Compound(compound) => compound.children.iter().any(|child| {
             let child_pos = position + orientation.mul_vec3(child.position);
             let child_ori = orientation * child.orientation;
@@ -925,5 +930,50 @@ mod tests {
         let h = ray(&s, Vector3::ZERO, Vector3::ZERO).unwrap();
         assert_eq!(h.fraction, 0.0);
         assert!(ray(&s, Vector3::new(2.0, 0.0, 0.0), Vector3::new(2.0, 0.0, 0.0)).is_none());
+    }
+
+    fn unit_ground_mesh() -> CollisionShape {
+        CollisionShape::triangle_mesh(
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 1.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ],
+            vec![[0, 1, 2], [0, 2, 3]],
+        )
+    }
+
+    #[test]
+    fn triangle_mesh_raycast_through_shape_api() {
+        let m = unit_ground_mesh();
+        let h = ray(&m, Vector3::new(0.5, 5.0, 0.5), Vector3::new(0.5, -1.0, 0.5)).unwrap();
+        assert_relative_eq!(h.fraction, 5.0 / 6.0, epsilon = 1e-4);
+        assert_relative_eq!(h.normal.y, 1.0, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn heightfield_raycast_through_shape_api() {
+        let hf = CollisionShape::heightfield(vec![0.0; 9], 3, 3, Vector3::ONE);
+        let h = ray(&hf, Vector3::new(1.0, 5.0, 1.0), Vector3::new(1.0, -1.0, 1.0)).unwrap();
+        assert_relative_eq!(h.fraction, 5.0 / 6.0, epsilon = 1e-4);
+        assert_relative_eq!(h.normal.y, 1.0, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn rotated_mesh_raycast_rotates_the_normal() {
+        let m = unit_ground_mesh();
+        // Rotate the mesh 90 deg about Z: the surface normal faces world +X.
+        let q = Quaternion::from_rotation_z(bullet_math::FRAC_PI_2);
+        let h = raycast(
+            &m,
+            Vector3::ZERO,
+            q,
+            Vector3::new(3.0, 0.5, 0.5),
+            Vector3::new(-1.0, 0.5, 0.5),
+        )
+        .unwrap();
+        assert_relative_eq!(h.normal.x, 1.0, epsilon = 1e-4);
+        assert_relative_eq!(h.normal.y, 0.0, epsilon = 1e-4);
     }
 }
