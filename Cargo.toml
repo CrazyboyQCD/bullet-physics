@@ -1,6 +1,15 @@
-[package]
-name = "bullet_physics"
+[workspace]
+resolver = "2"
+members = [
+    "crates/bullet-math",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["CrazyboyQCD <yzc13697716338@gmail.com>"]
 
-[dependencies]
+[workspace.dependencies]
+glam = "0.33"
+approx = "0.5"

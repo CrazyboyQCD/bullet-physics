@@ -3,5 +3,14 @@
 version = 4
 
 [[package]]
-name = "bullet_physics"
+name = "bullet-math"
 version = "0.1.0"
+dependencies = [
+ "glam",
+]
+
+[[package]]
+name = "glam"
+version = "0.33.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360bd2cd76e0cd9032d42cf2922155cecea2685b0cfa4630c3246df030bcfd6"

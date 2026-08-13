@@ -1,0 +1,5 @@
+# Windows: use Rust's bundled LLD linker to avoid Git-for-Windows'
+# /usr/bin/link.exe (GNU coreutils `link`) shadowing the MSVC linker, which
+# breaks `cargo test` / `cargo run` linking.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

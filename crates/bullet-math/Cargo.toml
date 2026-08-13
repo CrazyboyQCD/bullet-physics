@@ -1,0 +1,15 @@
+[package]
+name = "bullet-math"
+description = "Linear math layer for the bullet physics engine: SIMD-accelerated, precision-swappable glam aliases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["f32"]
+f32 = []
+f64 = []
+
+[dependencies]
+glam = { workspace = true }
