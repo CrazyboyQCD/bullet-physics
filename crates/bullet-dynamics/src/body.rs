@@ -156,7 +156,7 @@ impl RigidBody {
     /// thresholds; after [`DEACTIVATION_TIME`] seconds the body is marked
     /// [`ActivationState::WantsDeactivation`] (Bullet's `updateDeactivation`).
     pub fn update_deactivation(&mut self, dt: Real) {
-        if !self.is_active() {
+        if !self.is_active() || self.activation_state == ActivationState::DisableDeactivation {
             return;
         }
         let slow = self.linear_velocity.length_squared()
@@ -291,5 +291,52 @@ impl RigidBody {
         } else {
             self.position + self.linear_velocity * dt
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A body with deactivation disabled must never fall asleep, no matter how
+    /// long it rests below the sleeping thresholds (Bullet's `updateDeactivation`
+    /// returns early for `DISABLE_DEACTIVATION`).
+    #[test]
+    fn disable_deactivation_never_sleeps() {
+        let mut body =
+            RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0).disable_deactivation();
+        // 10 seconds of rest, far beyond DEACTIVATION_TIME = 2.
+        for _ in 0..100 {
+            body.update_deactivation(0.1);
+        }
+        assert_eq!(body.activation_state(), ActivationState::DisableDeactivation);
+        assert!(body.is_active());
+    }
+
+    /// Moving fast again resets the rest timer; resting below DEACTIVATION_TIME
+    /// leaves the body active.
+    #[test]
+    fn update_deactivation_resets_timer_on_motion() {
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0);
+        body.update_deactivation(1.9);
+        body.linear_velocity = Vector3::new(5.0, 0.0, 0.0);
+        body.update_deactivation(0.5);
+        assert_eq!(body.activation_state(), ActivationState::Active);
+        // Back at rest: only 0.5s accumulated, still far from 2s.
+        body.linear_velocity = Vector3::ZERO;
+        body.update_deactivation(0.5);
+        assert_eq!(body.activation_state(), ActivationState::Active);
+    }
+
+    /// Resting below the thresholds for longer than DEACTIVATION_TIME marks
+    /// the body as wanting deactivation (the world then puts it to sleep).
+    #[test]
+    fn update_deactivation_marks_wants_deactivation() {
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0);
+        for _ in 0..100 {
+            body.update_deactivation(0.1);
+        }
+        assert_eq!(body.activation_state(), ActivationState::WantsDeactivation);
+        assert!(body.wants_deactivation());
     }
 }
