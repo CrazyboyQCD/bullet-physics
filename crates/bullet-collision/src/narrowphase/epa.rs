@@ -16,11 +16,18 @@
 use bullet_math::{Real, Vector3};
 
 const MAX_ITERATIONS: u32 = 255;
-/// Bullet's `EPA_ACCURACY` (single precision).
+/// Bullet's `EPA_ACCURACY` (precision-dependent, matching `btGjkEpa2`'s
+/// `BT_USE_DOUBLE_PRECISION` config: `1e-4` / `1e-12`).
+#[cfg(not(feature = "f64"))]
 const EPSILON: Real = 1e-4;
+#[cfg(feature = "f64")]
+const EPSILON: Real = 1e-12;
 /// Bullet's `EPA_PLANE_EPS`: face-visibility tolerance (absorbs coplanar
-/// support points).
+/// support points; precision-dependent as above: `1e-5` / `1e-14`).
+#[cfg(not(feature = "f64"))]
 const PLANE_EPS: Real = 1e-5;
+#[cfg(feature = "f64")]
+const PLANE_EPS: Real = 1e-14;
 /// Bullet's `EPA_MAX_VERTICES`: the polytope stops growing past this size.
 const MAX_VERTICES: usize = 128;
 
