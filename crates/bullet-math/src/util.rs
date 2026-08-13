@@ -1,4 +1,4 @@
-use super::{Matrix3, Quaternion, Vector3};
+use super::{Matrix3, Quaternion, Real, Vector3};
 
 /// Axis-aligned bounding box.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -35,6 +35,28 @@ impl Aabb {
             min: self.min.min(other.min),
             max: self.max.max(other.max),
         }
+    }
+
+    /// Transform the AABB by a rigid pose (rotation + translation), sweeping
+    /// its eight corners. Exact for a box shape; conservative for any shape
+    /// contained in the box. Equivalent to Bullet's `btTransformAabb`.
+    #[inline]
+    pub fn transformed(&self, position: Vector3, orientation: Quaternion) -> Aabb {
+        let c = self.center();
+        let e = self.extents();
+        let mut min = Vector3::splat(Real::INFINITY);
+        let mut max = Vector3::splat(Real::NEG_INFINITY);
+        for i in 0..8 {
+            let corner = Vector3::new(
+                if i & 1 == 0 { c.x + e.x } else { c.x - e.x },
+                if i & 2 == 0 { c.y + e.y } else { c.y - e.y },
+                if i & 4 == 0 { c.z + e.z } else { c.z - e.z },
+            );
+            let p = orientation.mul_vec3(corner) + position;
+            min = min.min(p);
+            max = max.max(p);
+        }
+        Aabb::new(min, max)
     }
 }
 

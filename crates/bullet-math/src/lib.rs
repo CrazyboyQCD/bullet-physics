@@ -40,6 +40,24 @@ pub use glam::Affine3A as Transform;
 #[cfg(feature = "f64")]
 pub use glam::DAffine3 as Transform;
 
+/// `pi` at the active precision.
+#[cfg(not(feature = "f64"))]
+pub const PI: f32 = std::f32::consts::PI;
+#[cfg(feature = "f64")]
+pub const PI: f64 = std::f64::consts::PI;
+
+/// `pi / 2` at the active precision.
+#[cfg(not(feature = "f64"))]
+pub const FRAC_PI_2: f32 = std::f32::consts::FRAC_PI_2;
+#[cfg(feature = "f64")]
+pub const FRAC_PI_2: f64 = std::f64::consts::FRAC_PI_2;
+
+/// `1 / sqrt(2)` at the active precision.
+#[cfg(not(feature = "f64"))]
+pub const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
+#[cfg(feature = "f64")]
+pub const FRAC_1_SQRT_2: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
 mod transform;
 mod util;
 
