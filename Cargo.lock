@@ -26,6 +26,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bullet-dynamics"
+version = "0.1.0"
+dependencies = [
+ "bullet-collision",
+ "bullet-math",
+]
+
+[[package]]
 name = "bullet-math"
 version = "0.1.0"
 dependencies = [

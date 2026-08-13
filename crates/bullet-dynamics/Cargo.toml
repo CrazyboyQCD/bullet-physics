@@ -1,0 +1,16 @@
+[package]
+name = "bullet-dynamics"
+description = "Rigid body dynamics for the bullet physics engine: bodies, simulation world, and constraint solvers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["f32"]
+f32 = ["bullet-math/f32", "bullet-collision/f32"]
+f64 = ["bullet-math/f64", "bullet-collision/f64"]
+
+[dependencies]
+bullet-math = { path = "../bullet-math", default-features = false }
+bullet-collision = { path = "../bullet-collision", default-features = false }

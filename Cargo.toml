@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/bullet-math",
     "crates/bullet-collision",
+    "crates/bullet-dynamics",
 ]
 
 [workspace.package]
