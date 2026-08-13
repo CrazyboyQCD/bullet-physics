@@ -4,6 +4,7 @@ members = [
     "crates/bullet-math",
     "crates/bullet-collision",
     "crates/bullet-dynamics",
+    "crates/bullet",
 ]
 
 [workspace.package]
