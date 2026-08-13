@@ -132,8 +132,12 @@ impl PhysicsWorld {
             .map(|b| b.predicted_position(dt))
             .collect();
 
-        // 3. Update broad-phase AABBs from predicted poses.
+        // 3. Update broad-phase AABBs from predicted poses. Sleeping bodies
+        // keep their AABB: they do not move, so it stays correct.
         for (i, body) in self.bodies.iter().enumerate() {
+            if !body.is_active() {
+                continue;
+            }
             let aabb = body.shape.world_aabb(predicted[i], body.orientation);
             self.broadphase.set_aabb(i, aabb);
         }
@@ -143,6 +147,7 @@ impl PhysicsWorld {
 
         // 5. Narrow phase: exact contact manifolds -> constraints.
         let mut constraints: Vec<ContactConstraint> = Vec::new();
+        let mut contact_pairs: Vec<(usize, usize)> = Vec::new();
         for &(i, j) in &pairs {
             let a = &self.bodies[i];
             let b = &self.bodies[j];
@@ -154,6 +159,7 @@ impl PhysicsWorld {
                 predicted[j],
                 b.orientation,
             ) {
+                contact_pairs.push((i, j));
                 // Inherit the previous step's accumulated impulses for contact
                 // points that persist (Bullet's persistent manifolds).
                 warm_start_impulses(
@@ -163,6 +169,20 @@ impl PhysicsWorld {
                 for cp in &manifold.points {
                     constraints.push(ContactConstraint::prepare(i, j, cp, a, b));
                 }
+            }
+        }
+
+        // 5b. Wake up sleeping bodies that touch an active body (Bullet's
+        // island-based activation propagation: activation travels along the
+        // contact graph one step at a time). A contact between two sleeping
+        // bodies does not wake them — a stable stack stays asleep.
+        for &(i, j) in &contact_pairs {
+            let a_active = self.bodies[i].is_active();
+            let b_active = self.bodies[j].is_active();
+            if a_active && !b_active {
+                self.bodies[j].activate();
+            } else if b_active && !a_active {
+                self.bodies[i].activate();
             }
         }
 
@@ -183,6 +203,16 @@ impl PhysicsWorld {
                 });
         }
         self.contact_cache = next_cache;
+
+        // 6c. Deactivation: bodies below the sleeping thresholds for longer
+        // than `DEACTIVATION_TIME` seconds go to sleep (Bullet's
+        // `updateActivationState` between solving and integrating).
+        for body in &mut self.bodies {
+            body.update_deactivation(dt);
+            if body.wants_deactivation() {
+                body.go_to_sleep();
+            }
+        }
 
         // 7. Integrate positions with the corrected velocities.
         for body in &mut self.bodies {
@@ -247,6 +277,7 @@ fn warm_start_impulses(points: &mut [bullet_collision::manifold::ContactPoint], 
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+    use crate::body::ActivationState;
 
     #[test]
     fn raycast_closest_returns_the_nearest_body() {
@@ -356,5 +387,101 @@ mod tests {
         let sphere = world.body(1);
         assert_relative_eq!(sphere.position.y, 0.5, epsilon = 0.05);
         assert!(sphere.linear_velocity.length() < 0.1);
+    }
+
+    /// A body at rest for longer than `DEACTIVATION_TIME` goes to sleep and
+    /// stops being integrated.
+    #[test]
+    fn body_sleeps_after_resting() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        // 3 seconds > DEACTIVATION_TIME: the sphere settles and then sleeps.
+        let dt: Real = 1.0 / 60.0;
+        for _ in 0..(3.0 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        let sphere = world.body(1);
+        assert_eq!(sphere.activation_state(), ActivationState::IslandSleeping);
+        assert_eq!(sphere.linear_velocity, Vector3::ZERO);
+        let y_at_sleep = sphere.position.y;
+        // Further steps must not move the sleeping body.
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert_relative_eq!(world.body(1).position.y, y_at_sleep, epsilon = 1e-6);
+    }
+
+    /// A sleeping body in contact with an active body is woken up (Bullet's
+    /// activation propagation along the contact graph).
+    #[test]
+    fn contact_wakes_sleeping_body() {
+        let mut world = PhysicsWorld::new();
+        // A light sphere resting on the plane goes to sleep first...
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 1.0, 0.0),
+            1.0,
+        ));
+        let dt: Real = 1.0 / 60.0;
+        for _ in 0..(3.0 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        assert_eq!(world.body(1).activation_state(), ActivationState::IslandSleeping);
+        // ...then a fast ball hits it: the sleeping sphere must wake up.
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.25),
+            Vector3::new(0.0, 3.0, 0.0),
+            1.0,
+        )
+        .velocity(Vector3::new(0.0, -5.0, 0.0)));
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert_eq!(
+            world.body(1).activation_state(),
+            ActivationState::Active,
+            "sleeping body was not woken by the impact"
+        );
+    }
+
+    /// Applying a force wakes a sleeping body up (Bullet's `applyCentralForce`).
+    #[test]
+    fn force_wakes_sleeping_body() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 1.0, 0.0),
+            1.0,
+        ));
+        let dt: Real = 1.0 / 60.0;
+        for _ in 0..(3.0 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        world.body_mut(1).apply_force(Vector3::new(0.0, 5.0, 0.0));
+        assert_eq!(world.body(1).activation_state(), ActivationState::Active);
+    }
+
+    /// Static bodies start asleep, like Bullet's static `btRigidBody`.
+    #[test]
+    fn static_body_starts_sleeping() {
+        let body = RigidBody::new_static(bullet_collision::shapes::CollisionShape::sphere(0.5), Vector3::ZERO);
+        assert_eq!(body.activation_state(), ActivationState::IslandSleeping);
+        assert!(!body.is_active());
     }
 }
