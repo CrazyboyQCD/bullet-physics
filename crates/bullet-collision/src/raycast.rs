@@ -9,6 +9,7 @@
 
 use bullet_math::{Quaternion, Real, Vector3};
 
+use crate::narrowphase::gjk::closest_origin;
 use crate::shapes::{CollisionShape, Compound};
 
 /// A ray hit against a shape.
@@ -531,130 +532,6 @@ fn hull_distance_direction(points: &[Vector3], point: Vector3) -> (Real, Vector3
         v = closest_origin(&mut simplex);
     }
     (v.length_squared(), v / v.length())
-}
-
-/// Closest point on the simplex to the origin, shrinking the simplex to the
-/// closest feature. Returns the closest-point vector `origin -> q` and keeps
-/// `simplex` to the sub-feature for the next support step.
-fn closest_origin(simplex: &mut Vec<Vector3>) -> Vector3 {
-    match simplex.len() {
-        0 => Vector3::ZERO,
-        1 => simplex[0],
-        2 => {
-            let (v, keep) = closest_origin_segment(simplex[0], simplex[1]);
-            *simplex = keep;
-            v
-        }
-        3 => {
-            let (v, keep) = closest_origin_triangle(simplex[0], simplex[1], simplex[2]);
-            *simplex = keep;
-            v
-        }
-        _ => {
-            let (v, keep) =
-                closest_origin_tetrahedron(simplex[0], simplex[1], simplex[2], simplex[3]);
-            *simplex = keep;
-            v
-        }
-    }
-}
-
-/// Closest point to the origin on the segment `a-b`, keeping the closest
-/// feature (a point or the segment).
-fn closest_origin_segment(a: Vector3, b: Vector3) -> (Vector3, Vec<Vector3>) {
-    let ab = b - a;
-    let t = -a.dot(ab) / ab.length_squared();
-    if t <= 0.0 {
-        (a, vec![a])
-    } else if t >= 1.0 {
-        (b, vec![b])
-    } else {
-        (a + ab * t, vec![b, a])
-    }
-}
-
-/// Closest point to the origin on the triangle `a-b-c`, keeping the closest
-/// feature (point, edge, or face). Uses the barycentric region test from
-/// Ericson's `ClosestPtPointTriangle` (Real-Time Collision Detection, 5.1.5).
-fn closest_origin_triangle(a: Vector3, b: Vector3, c: Vector3) -> (Vector3, Vec<Vector3>) {
-    let ab = b - a;
-    let ac = c - a;
-    let ap = -a;
-    let d1 = ab.dot(ap);
-    let d2 = ac.dot(ap);
-    if d1 <= 0.0 && d2 <= 0.0 {
-        return (a, vec![a]);
-    }
-    let bp = -b;
-    let d3 = ab.dot(bp);
-    let d4 = ac.dot(bp);
-    if d3 >= 0.0 && d4 <= d3 {
-        return (b, vec![b]);
-    }
-    let vc = d1 * d4 - d3 * d2;
-    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-        let v = d1 / (d1 - d3);
-        let q = a + ab * v;
-        return (q, vec![b, a]);
-    }
-    let cp = -c;
-    let d5 = ab.dot(cp);
-    let d6 = ac.dot(cp);
-    if d6 >= 0.0 && d5 <= d6 {
-        return (c, vec![c]);
-    }
-    let vb = d5 * d2 - d1 * d6;
-    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
-        let w = d2 / (d2 - d6);
-        let q = a + ac * w;
-        return (q, vec![c, a]);
-    }
-    let va = d3 * d6 - d5 * d4;
-    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
-        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        let q = b + (c - b) * w;
-        return (q, vec![c, b]);
-    }
-    // Interior: the closest point is the origin's projection onto the face.
-    let denom = 1.0 / (va + vb + vc);
-    let v = vb * denom;
-    let w = vc * denom;
-    let q = a + ab * v + ac * w;
-    (q, vec![c, b, a])
-}
-
-/// Closest point to the origin on the tetrahedron `a-b-c-d`. The origin is
-/// inside iff it lies on the same side of every face as the opposite vertex;
-/// otherwise shrink to the offending face (deferring to the triangle case).
-fn closest_origin_tetrahedron(
-    a: Vector3,
-    b: Vector3,
-    c: Vector3,
-    d: Vector3,
-) -> (Vector3, Vec<Vector3>) {
-    let ao = -a;
-    let ab = b - a;
-    let ac = c - a;
-    let ad = d - a;
-    let abc = ab.cross(ac);
-    let acd = ac.cross(ad);
-    let adb = ad.cross(ab);
-    let bo = -b;
-    let bcd = (c - b).cross(d - b);
-    if abc.dot(ao) * abc.dot(ad) < 0.0 {
-        return closest_origin_triangle(a, b, c);
-    }
-    if acd.dot(ao) * acd.dot(ab) < 0.0 {
-        return closest_origin_triangle(a, c, d);
-    }
-    if adb.dot(ao) * adb.dot(ac) < 0.0 {
-        return closest_origin_triangle(a, d, b);
-    }
-    if bcd.dot(bo) * bcd.dot(a - b) < 0.0 {
-        return closest_origin_triangle(b, c, d);
-    }
-    // Origin inside the tetrahedron: distance is zero.
-    (Vector3::ZERO, vec![a, b, c, d])
 }
 
 /// Farthest hull vertex along `dir` (local space).
