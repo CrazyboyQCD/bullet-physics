@@ -1,59 +1,611 @@
 {
-  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/examples/scenes_generated.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant).",
+  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/src/parity_scenes.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant), mesh(grid[nx,nz], origin[x0,z0], cell[dx,dz], heights[nx*nz] in z-major order; indices derived with the falling_mesh winding). Body fields: mass (0 = static), friction, restitution, position, optional velocity[vx,vy,vz] (initial linear velocity) and ccd{motion_threshold, swept_sphere_radius}.",
   "scenes": {
     "falling_box": {
-      "dt": [1, 60],
+      "dt": [
+        1,
+        60
+      ],
       "frames": 300,
       "iterations": 10,
-      "gravity": [0, -9.81, 0],
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
       "bodies": [
         {
           "name": "ground",
-          "shape": { "type": "box", "half_extents": [25, 0.5, 25] },
-          "position": [0, -0.5, 0],
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              25,
+              0.5,
+              25
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
           "mass": 0
         },
         {
           "name": "cube",
-          "shape": { "type": "box", "half_extents": [0.5, 0.5, 0.5] },
-          "position": [0, 5, 0],
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            5,
+            0
+          ],
           "mass": 1,
           "friction": 0.6,
           "restitution": 0.0
         }
       ],
-      "record": ["cube"]
+      "record": [
+        "cube"
+      ]
     },
     "falling_capsule": {
-      "dt": [1, 60],
+      "dt": [
+        1,
+        60
+      ],
       "frames": 300,
       "iterations": 10,
-      "gravity": [0, -9.81, 0],
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
       "bodies": [
         {
           "name": "ground",
-          "shape": { "type": "plane", "normal": [0, 1, 0], "constant": 0.0 },
-          "position": [0, 0, 0],
+          "shape": {
+            "type": "plane",
+            "normal": [
+              0,
+              1,
+              0
+            ],
+            "constant": 0.0
+          },
+          "position": [
+            0,
+            0,
+            0
+          ],
           "mass": 0
         },
         {
           "name": "capsule",
-          "shape": { "type": "capsule", "radius": 0.5, "half_height": 1.0 },
-          "position": [0, 5, 0],
+          "shape": {
+            "type": "capsule",
+            "radius": 0.5,
+            "half_height": 1.0
+          },
+          "position": [
+            0,
+            5,
+            0
+          ],
           "mass": 1,
           "friction": 0.6,
           "restitution": 0.0
         },
         {
           "name": "sphere",
-          "shape": { "type": "sphere", "radius": 0.5 },
-          "position": [1, 6, 0],
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            1,
+            6,
+            0
+          ],
           "mass": 1,
           "friction": 0.6,
           "restitution": 0.0
         }
       ],
-      "record": ["capsule", "sphere"]
+      "record": [
+        "capsule",
+        "sphere"
+      ]
+    },
+    "stacking": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 600,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              25,
+              0.5,
+              25
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "b1",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            0.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "name": "b2",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            1.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "name": "b3",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            2.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "name": "b4",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            3.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        }
+      ],
+      "record": [
+        "b1",
+        "b2",
+        "b3",
+        "b4"
+      ]
+    },
+    "mesh": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 420,
+      "iterations": 20,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "mesh",
+            "grid": [
+              10,
+              10
+            ],
+            "origin": [
+              -4.5,
+              -4.5
+            ],
+            "cell": [
+              1.0,
+              1.0
+            ],
+            "heights": [
+              0.9,
+              0.8,
+              0.7,
+              0.6,
+              0.5,
+              0.4,
+              0.3,
+              0.2,
+              0.1,
+              0.0,
+              0.8,
+              0.7,
+              0.6,
+              0.5,
+              0.4,
+              0.3,
+              0.2,
+              0.1,
+              0.0,
+              0.1,
+              0.7,
+              0.6,
+              0.5,
+              0.4,
+              0.3,
+              0.2,
+              0.1,
+              0.0,
+              0.1,
+              0.2,
+              0.6,
+              0.5,
+              0.4,
+              0.3,
+              0.2,
+              0.1,
+              0.0,
+              0.1,
+              0.2,
+              0.3,
+              0.5,
+              0.4,
+              0.3,
+              0.2,
+              0.1,
+              0.0,
+              0.1,
+              0.2,
+              0.3,
+              0.4,
+              0.4,
+              0.3,
+              0.2,
+              0.1,
+              0.0,
+              0.1,
+              0.2,
+              0.3,
+              0.4,
+              0.5,
+              0.3,
+              0.2,
+              0.1,
+              0.0,
+              0.1,
+              0.2,
+              0.3,
+              0.4,
+              0.5,
+              0.6,
+              0.2,
+              0.1,
+              0.0,
+              0.1,
+              0.2,
+              0.3,
+              0.4,
+              0.5,
+              0.6,
+              0.7,
+              0.1,
+              0.0,
+              0.1,
+              0.2,
+              0.3,
+              0.4,
+              0.5,
+              0.6,
+              0.7,
+              0.8,
+              0.0,
+              0.1,
+              0.2,
+              0.3,
+              0.4,
+              0.5,
+              0.6,
+              0.7,
+              0.8,
+              0.9
+            ]
+          },
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "sphere",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            -2,
+            5,
+            -2
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "name": "box",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            2,
+            5,
+            2
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        }
+      ],
+      "record": [
+        "sphere",
+        "box"
+      ]
+    },
+    "ccd": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 120,
+      "iterations": 20,
+      "gravity": [
+        0,
+        0,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "wall",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              5,
+              5,
+              0.1
+            ]
+          },
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "ccd_ball",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.3
+          },
+          "position": [
+            0,
+            0,
+            1
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "velocity": [
+            0,
+            0,
+            -120
+          ],
+          "ccd": {
+            "motion_threshold": 0.1,
+            "swept_sphere_radius": 0.3
+          }
+        },
+        {
+          "name": "plain_ball",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.3
+          },
+          "position": [
+            2,
+            0,
+            1
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "velocity": [
+            0,
+            0,
+            -120
+          ]
+        }
+      ],
+      "record": [
+        "ccd_ball",
+        "plain_ball"
+      ]
+    },
+    "sleeping": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 720,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "plane",
+            "normal": [
+              0,
+              1,
+              0
+            ],
+            "constant": 0.0
+          },
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "b1",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            0.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "name": "b2",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            1.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "name": "b3",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            2.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "name": "ball",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.3
+          },
+          "position": [
+            0,
+            30,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        }
+      ],
+      "record": [
+        "b1",
+        "b2",
+        "b3",
+        "ball"
+      ]
     }
   }
 }
