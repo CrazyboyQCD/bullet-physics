@@ -6,3 +6,5 @@
 
 # For implementation reference
 /refs/bullet3/
+# Python bytecode
+/tools/__pycache__/
