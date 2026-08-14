@@ -11,8 +11,8 @@ pub mod world;
 pub use body::RigidBody;
 pub use character::KinematicCharacterController;
 pub use constraint::{
-    AngularLimit, Constraint, ConstraintKind, HingeConstraint, HingeMotor, JointFrame,
-    Point2PointConstraint,
+    AngularLimit, ConeTwistConstraint, ConeTwistMotor, Constraint, ConstraintKind,
+    FixedConstraint, HingeConstraint, HingeMotor, JointFrame, Point2PointConstraint,
 };
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
 pub use world::PhysicsWorld;

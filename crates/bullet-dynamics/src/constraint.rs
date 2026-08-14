@@ -39,6 +39,15 @@ pub enum ConstraintKind {
     /// axes parallel, with optional angular limits and a motor around the
     /// axis (Bullet's `btHingeConstraint`).
     Hinge(HingeConstraint),
+    /// Fixed (weld) joint: both pivots coincide and the relative orientation
+    /// is locked — all six degrees of freedom are removed (Bullet's
+    /// `btFixedConstraint`, which locks every axis of a
+    /// `btGeneric6DofConstraint`).
+    Fixed(FixedConstraint),
+    /// Cone-and-twist joint: the pivots coincide, the relative orientation
+    /// stays inside an elliptical cone around the X axes plus a one-sided
+    /// twist limit around the cone axis (Bullet's `btConeTwistConstraint`).
+    ConeTwist(ConeTwistConstraint),
 }
 
 impl ConstraintKind {
@@ -47,6 +56,9 @@ impl ConstraintKind {
         match self {
             ConstraintKind::Point2Point(p2p) => p2p,
             ConstraintKind::Hinge(_) => panic!("not a point-to-point constraint"),
+            ConstraintKind::Fixed(_) | ConstraintKind::ConeTwist(_) => {
+                panic!("not a point-to-point constraint")
+            }
         }
     }
 
@@ -55,6 +67,9 @@ impl ConstraintKind {
         match self {
             ConstraintKind::Hinge(hinge) => hinge,
             ConstraintKind::Point2Point(_) => panic!("not a hinge constraint"),
+            ConstraintKind::Fixed(_) | ConstraintKind::ConeTwist(_) => {
+                panic!("not a hinge constraint")
+            }
         }
     }
 
@@ -63,6 +78,41 @@ impl ConstraintKind {
         match self {
             ConstraintKind::Hinge(hinge) => hinge,
             ConstraintKind::Point2Point(_) => panic!("not a hinge constraint"),
+            ConstraintKind::Fixed(_) | ConstraintKind::ConeTwist(_) => {
+                panic!("not a hinge constraint")
+            }
+        }
+    }
+
+    /// Access to the [`FixedConstraint`] parameters.
+    pub fn fixed(&self) -> &FixedConstraint {
+        match self {
+            ConstraintKind::Fixed(fixed) => fixed,
+            _ => panic!("not a fixed constraint"),
+        }
+    }
+
+    /// Mutable access to the [`FixedConstraint`] parameters.
+    pub fn fixed_mut(&mut self) -> &mut FixedConstraint {
+        match self {
+            ConstraintKind::Fixed(fixed) => fixed,
+            _ => panic!("not a fixed constraint"),
+        }
+    }
+
+    /// Access to the [`ConeTwistConstraint`] parameters.
+    pub fn cone_twist(&self) -> &ConeTwistConstraint {
+        match self {
+            ConstraintKind::ConeTwist(ct) => ct,
+            _ => panic!("not a cone-twist constraint"),
+        }
+    }
+
+    /// Mutable access to the [`ConeTwistConstraint`] parameters.
+    pub fn cone_twist_mut(&mut self) -> &mut ConeTwistConstraint {
+        match self {
+            ConstraintKind::ConeTwist(ct) => ct,
+            _ => panic!("not a cone-twist constraint"),
         }
     }
 }
@@ -144,6 +194,54 @@ impl Constraint {
 
     pub fn body_b(&self) -> usize {
         self.body_b
+    }
+
+    /// A fixed (weld) joint: the frames `frame_a` (in body A's
+    /// center-of-mass frame) and `frame_b` (in body B's) stay coincident —
+    /// both the pivot and the relative orientation are locked, removing all
+    /// six degrees of freedom (Bullet's `btFixedConstraint`).
+    pub fn fixed(
+        body_a: usize,
+        body_b: usize,
+        frame_a: JointFrame,
+        frame_b: JointFrame,
+    ) -> Self {
+        Self {
+            kind: ConstraintKind::Fixed(FixedConstraint::new(frame_a, frame_b)),
+            body_a,
+            body_b,
+            enabled: true,
+            disable_collisions: true,
+        }
+    }
+
+    /// A cone-and-twist joint: the pivots stay coincident and the relative
+    /// orientation is limited to an elliptical cone around the frame X axes
+    /// (`swing_span1` around Y, `swing_span2` around Z) plus a one-sided
+    /// twist limit `twist_span` around the cone axis (Bullet's
+    /// `btConeTwistConstraint`). All spans are in radians.
+    pub fn cone_twist(
+        body_a: usize,
+        body_b: usize,
+        frame_a: JointFrame,
+        frame_b: JointFrame,
+        swing_span1: Real,
+        swing_span2: Real,
+        twist_span: Real,
+    ) -> Self {
+        Self {
+            kind: ConstraintKind::ConeTwist(ConeTwistConstraint::new(
+                frame_a,
+                frame_b,
+                swing_span1,
+                swing_span2,
+                twist_span,
+            )),
+            body_a,
+            body_b,
+            enabled: true,
+            disable_collisions: true,
+        }
     }
 
     pub fn kind(&self) -> &ConstraintKind {
@@ -567,7 +665,7 @@ fn get_hinge_angle(tr_a: &Matrix3, tr_b: &Matrix3) -> Real {
     swing_axis.dot(ref_axis0).atan2(swing_axis.dot(ref_axis1))
 }
 
-/// Wrap an angle into `[-蟺, 蟺]` (Bullet's `btNormalizeAngle`).
+/// Wrap an angle into `[-π, π]` (Bullet's `btNormalizeAngle`).
 fn normalize_angle(angle: Real) -> Real {
     let two_pi = 2.0 * bullet_math::PI;
     let mut a = angle % two_pi; // truncating, like `btFmod`.
@@ -577,6 +675,753 @@ fn normalize_angle(angle: Real) -> Real {
         a -= two_pi;
     }
     a
+}
+
+/// Return `angle` adjusted to the range `[lo, hi]` by adding/subtracting
+/// `2π` so it is closest to one of the limits (Bullet's
+/// `btAdjustAngleToLimits`); all arguments are expected normalized. When
+/// `lo >= hi` (a free or locked axis) the angle is returned unchanged.
+fn adjust_angle_to_limits(angle: Real, lo: Real, hi: Real) -> Real {
+    let two_pi = 2.0 * bullet_math::PI;
+    if lo >= hi {
+        return angle;
+    }
+    if angle < lo {
+        let diff_lo = normalize_angle(lo - angle).abs();
+        let diff_hi = normalize_angle(hi - angle).abs();
+        if diff_lo < diff_hi {
+            angle
+        } else {
+            angle + two_pi
+        }
+    } else if angle > hi {
+        let diff_hi = normalize_angle(angle - hi).abs();
+        let diff_lo = normalize_angle(angle - lo).abs();
+        if diff_lo < diff_hi {
+            angle - two_pi
+        } else {
+            angle
+        }
+    } else {
+        angle
+    }
+}
+
+/// Bullet's `matrixToEulerXYZ`: the Euler angles `(x, y, z)` of a rotation
+/// matrix, extracted with `btGetMatrixElem(mat, index) = mat[index % 3]
+/// [index / 3]` (row `index % 3`, column `index / 3` in Bullet's row-major
+/// storage). glam stores columns, so Bullet's `mat[i][j]` is
+/// `m.col(j)[i]`; the extraction is ported verbatim (the signs are
+/// consistent with the constraint rows built from these angles — do not
+/// "fix" them).
+fn euler_xyz(m: &Matrix3) -> Vector3 {
+    // Bullet's `mat[2][0]`, `mat[2][1]`, `mat[1][0]`, ... in glam's column
+    // storage (row i, column j = `m.col(j)[i]`).
+    let r20 = m.col(0).z; // mat[2][0]
+    let r21 = m.col(1).z; // mat[2][1]
+    let r22 = m.col(2).z; // mat[2][2]
+    let r10 = m.col(0).y; // mat[1][0]
+    let r11 = m.col(1).y; // mat[1][1]
+    let r01 = m.col(1).x; // mat[0][1]
+    let r00 = m.col(0).x; // mat[0][0]
+    if r20 < 1.0 {
+        if r20 > -1.0 {
+            Vector3::new((-r21).atan2(r22), r20.asin(), (-r10).atan2(r00))
+        } else {
+            Vector3::new(-(r01).atan2(r11), -bullet_math::FRAC_PI_2, 0.0)
+        }
+    } else {
+        Vector3::new((r01).atan2(r11), bullet_math::FRAC_PI_2, 0.0)
+    }
+}
+
+/// The relative-orientation information Bullet's `calculateAngleInfo`
+/// computes for the generic 6DOF family: the Euler XYZ angles of the
+/// relative rotation `trA⁻¹ · trB` and the three normalized angular
+/// constraint axes (`m_calculatedAxis`), each of which constrains the
+/// corresponding Euler-angle rate.
+fn relative_rotation_info(tr_a: &Matrix3, tr_b: &Matrix3) -> (Vector3, [Vector3; 3]) {
+    let relative = tr_a.transpose() * *tr_b;
+    let euler = euler_xyz(&relative);
+    // Bullet: `axis0 = trB.col(0)`, `axis2 = trA.col(2)`, then
+    // `ax[1] = axis2×axis0`, `ax[0] = ax[1]×axis2`, `ax[2] = axis0×ax[1]`.
+    let axis0 = tr_b.col(0);
+    let axis2 = tr_a.col(2);
+    let mut axes = [Vector3::ZERO; 3];
+    axes[1] = axis2.cross(axis0);
+    axes[0] = axes[1].cross(axis2);
+    axes[2] = axis0.cross(axes[1]);
+    for a in axes.iter_mut() {
+        *a = a.normalize();
+    }
+    (euler, axes)
+}
+
+/// Mirror Bullet's accumulated-impulse window `[lower, upper]` (infinities
+/// included) through our row convention, where our accumulated impulse is
+/// the negative of Bullet's (`λ_ours = −λ_bullet`), so a window `[L, U]`
+/// becomes `[−U, −L]`.
+fn mirrored_row_limits(lower: Real, upper: Real) -> RowLimits {
+    let lower_inf = lower.is_infinite() && lower < 0.0;
+    let upper_inf = upper.is_infinite() && upper > 0.0;
+    match (lower_inf, upper_inf) {
+        (true, true) => RowLimits::Unbounded,
+        // Bullet `[−inf, 0]` (a low limit) → our `[0, +inf]`.
+        (true, false) => RowLimits::LowerBounded(0.0),
+        // Bullet `[0, +inf]` (a high limit) → our `[−inf, 0]`.
+        (false, true) => RowLimits::UpperBounded(0.0),
+        // A symmetric window (motor): unchanged, since `[−c, c]` mirrors to
+        // itself.
+        (false, false) => RowLimits::Bilateral((upper - lower) / 2.0),
+    }
+}
+
+/// A fixed (weld) joint locking all six degrees of freedom between two
+/// frames (Bullet's `btFixedConstraint`, which is a `btGeneric6DofConstraint`
+/// with every limit zeroed).
+///
+/// Rows: three linear pivot rows keeping the frame origins coincident
+/// (point-to-point style, world axes) plus three angular rows driving the
+/// relative orientation back to identity. The angular rows use the locked
+/// branch of the generic 6DOF constraint: the Euler angles of `trA⁻¹·trB`
+/// driven to zero along the calculated axes (see [`relative_rotation_info`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixedConstraint {
+    /// Constraint frame on body A (pivot + basis in A's COM frame).
+    pub frame_a: JointFrame,
+    /// Constraint frame on body B (pivot + basis in B's COM frame).
+    pub frame_b: JointFrame,
+}
+
+impl FixedConstraint {
+    /// A fixed joint keeping `frame_a` and `frame_b` coincident.
+    pub fn new(frame_a: JointFrame, frame_b: JointFrame) -> Self {
+        Self { frame_a, frame_b }
+    }
+
+    /// Flatten this fixed joint into its solver rows (the locked-6DOF
+    /// recipe): three world-axis linear rows plus three angular rows along
+    /// the relative-rotation axes.
+    fn prepare_rows(
+        &self,
+        body_a: usize,
+        body_b: usize,
+        bodies: &[RigidBody],
+        inv_dt: Real,
+        erp: Real,
+        out: &mut Vec<ConstraintRow>,
+    ) {
+        let a = &bodies[body_a];
+        let b = &bodies[body_b];
+        let tr_a = Matrix3::from_quat(a.orientation) * self.frame_a.basis;
+        let tr_b = Matrix3::from_quat(b.orientation) * self.frame_b.basis;
+        let pivot_a = a.position + a.orientation * self.frame_a.origin;
+        let pivot_b = b.position + b.orientation * self.frame_b.origin;
+        let r_a = pivot_a - a.position;
+        let r_b = pivot_b - b.position;
+        let k = inv_dt * erp;
+
+        // Three linear pivot rows along the world axes (identical to the
+        // point-to-point joint): keep the frame origins coincident.
+        for axis in 0..3 {
+            let mut normal = Vector3::ZERO;
+            normal[axis] = 1.0;
+            out.push(ConstraintRow::prepare(
+                body_a,
+                body_b,
+                normal,
+                r_a.cross(normal),
+                normal,
+                r_b.cross(normal),
+                a,
+                b,
+                k * (pivot_a - pivot_b)[axis],
+                RowLimits::Unbounded,
+            ));
+        }
+
+        // Three angular rows locking the relative orientation: the locked
+        // 6DOF branch (`lo == hi == 0`, so the violation is the Euler angle
+        // itself). Bullet's rotational limit error is `−k·err`, mirrored to
+        // our `+k·err` bias; the limits are `[−inf, +inf]` (unbounded).
+        let (euler, axes) = relative_rotation_info(&tr_a, &tr_b);
+        for i in 0..3 {
+            out.push(ConstraintRow::prepare(
+                body_a,
+                body_b,
+                Vector3::ZERO,
+                axes[i],
+                Vector3::ZERO,
+                axes[i],
+                a,
+                b,
+                k * euler[i],
+                RowLimits::Unbounded,
+            ));
+        }
+    }
+}
+
+/// A cone-and-twist (ragdoll) joint (Bullet's `btConeTwistConstraint`): the
+/// pivots stay coincident (three linear rows, like the point-to-point joint)
+/// and the relative orientation is limited to an elliptical cone around the
+/// frame X axes plus a one-sided twist limit around the cone axis.
+///
+/// `swing_span1` bounds the swing in the frame's Y direction, `swing_span2`
+/// in the Z direction; `twist_span` bounds the rotation around the X axis in
+/// one direction only (Bullet only tests the positive side). A span of 0
+/// locks that degree of freedom, a negative span frees it, and the default
+/// `setLimit(0, 0, 0)` style call with `BT_LARGE_FLOAT` spans frees
+/// everything. Softness 1.0 (default) makes the limits hard; the correction
+/// factor `bias_factor` (0.3) scales the pull-back bias and
+/// `relaxation_factor` (1.0) scales the row jacobian.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConeTwistConstraint {
+    /// Constraint frame on body A (pivot + basis in A's COM frame).
+    pub frame_a: JointFrame,
+    /// Constraint frame on body B (pivot + basis in B's COM frame).
+    pub frame_b: JointFrame,
+    /// Swing limit around the frame Y axis, radians.
+    pub swing_span1: Real,
+    /// Swing limit around the frame Z axis, radians.
+    pub swing_span2: Real,
+    /// Twist limit around the frame X axis, radians (one-sided).
+    pub twist_span: Real,
+    /// Limit softness (Bullet's `m_limitSoftness`, default 1.0).
+    pub limit_softness: Real,
+    /// Position-correction factor on the limit bias (Bullet's
+    /// `m_biasFactor`, default 0.3).
+    pub bias_factor: Real,
+    /// Row-jacobian scale (Bullet's `m_relaxationFactor`, default 1.0).
+    pub relaxation_factor: Real,
+    /// Optional motor driving the joint to a target orientation (Bullet's
+    /// `setMotorTarget` + `m_maxMotorImpulse`).
+    pub motor: Option<ConeTwistMotor>,
+    /// Per-step state (Bullet's `m_swingAxis` etc.), updated by the last
+    /// solve step.
+    swing_correction: Real,
+    swing_axis: Vector3,
+    solve_swing_limit: bool,
+    twist_correction: Real,
+    twist_axis: Vector3,
+    twist_angle: Real,
+    solve_twist_limit: bool,
+    twist_axis_a: Vector3,
+    k_swing: Real,
+    k_twist: Real,
+}
+
+/// The threshold below which the swing spans are treated as locked/hinge
+/// configurations (Bullet's `CONETWIST_DEF_FIX_THRESH`).
+const CONE_TWIST_FIX_THRESH: Real = 0.05;
+
+/// Bullet's `SIMD_EPSILON` (precision-dependent): near-zero tolerance used
+/// by the cone/twist angle tests (`btFuzzyZero` and the
+/// `twistAngle > SIMD_EPSILON` normalization guard). Normalizing a
+/// near-zero rotation axis is numerically unstable (the row's effective
+/// mass explodes as `1/|axis|²`), so the guard must be at Bullet's exact
+/// epsilon or the double-precision build re-excites the twist.
+const SIMD_EPSILON: Real = {
+    #[cfg(not(feature = "f64"))]
+    {
+        std::f32::EPSILON
+    }
+    #[cfg(feature = "f64")]
+    {
+        std::f64::EPSILON
+    }
+};
+
+/// The cone axis in constraint space (Bullet's `vTwist`).
+const CONE_TWIST_AXIS: Vector3 = Vector3::X;
+
+/// A cone-twist motor: rotate the joint toward `target` (a quaternion in
+/// constraint space, see [`ConeTwistConstraint::set_motor_target`]),
+/// limited to `max_impulse` per step (Bullet's `enableMotor` /
+/// `setMotorTarget`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConeTwistMotor {
+    /// Target relative orientation in constraint space (Bullet's
+    /// `m_qTarget`, clamped to the limits at set time).
+    pub target: Quaternion,
+    /// Maximum motor impulse per step (Bullet's `m_maxMotorImpulse`).
+    pub max_impulse: Real,
+}
+
+impl ConeTwistConstraint {
+    /// A cone-and-twist joint with the given spans (radians) and the default
+    /// softness 1.0 / bias factor 0.3 / relaxation factor 1.0 (Bullet's
+    /// `setLimit(swing1, swing2, twist)`).
+    pub fn new(
+        frame_a: JointFrame,
+        frame_b: JointFrame,
+        swing_span1: Real,
+        swing_span2: Real,
+        twist_span: Real,
+    ) -> Self {
+        Self {
+            frame_a,
+            frame_b,
+            swing_span1,
+            swing_span2,
+            twist_span,
+            limit_softness: 1.0,
+            bias_factor: 0.3,
+            relaxation_factor: 1.0,
+            motor: None,
+            swing_correction: 0.0,
+            swing_axis: Vector3::ZERO,
+            solve_swing_limit: false,
+            twist_correction: 0.0,
+            twist_axis: Vector3::ZERO,
+            twist_angle: 0.0,
+            solve_twist_limit: false,
+            twist_axis_a: Vector3::ZERO,
+            k_swing: 0.0,
+            k_twist: 0.0,
+        }
+    }
+
+    /// Set the spans (radians), softness, bias factor and relaxation factor
+    /// (Bullet's `setLimit`).
+    pub fn set_limit(
+        &mut self,
+        swing_span1: Real,
+        swing_span2: Real,
+        twist_span: Real,
+        softness: Real,
+        bias_factor: Real,
+        relaxation_factor: Real,
+    ) {
+        self.swing_span1 = swing_span1;
+        self.swing_span2 = swing_span2;
+        self.twist_span = twist_span;
+        self.limit_softness = softness;
+        self.bias_factor = bias_factor;
+        self.relaxation_factor = relaxation_factor;
+    }
+
+    /// Enable the motor toward a world-space target orientation `q` (Bullet's
+    /// `setMotorTarget`): `q` is the desired relative orientation of body B
+    /// w.r.t. body A, converted to constraint space with the joint frames.
+    pub fn set_motor_target(&mut self, q: Quaternion) {
+        let q_constraint = self.frame_b.basis_quat().inverse() * q * self.frame_a.basis_quat();
+        self.set_motor_target_in_constraint_space(q_constraint);
+    }
+
+    /// Enable the motor toward a target given directly in constraint space
+    /// (Bullet's `setMotorTargetInConstraintSpace`); the target is clamped to
+    /// the cone/twist limits.
+    pub fn set_motor_target_in_constraint_space(&mut self, q: Quaternion) {
+        let target = q;
+        // Clamp the motor target to within the limits, like Bullet.
+        let v_twisted = target * CONE_TWIST_AXIS;
+        let mut q_target_cone = Quaternion::from_rotation_arc(CONE_TWIST_AXIS, v_twisted);
+        q_target_cone = q_target_cone.normalize();
+        let mut q_target_twist = q_target_cone.inverse() * target;
+        q_target_twist = q_target_twist.normalize();
+
+        if self.swing_span1 >= CONE_TWIST_FIX_THRESH && self.swing_span2 >= CONE_TWIST_FIX_THRESH {
+            let (mut swing_angle, swing_axis, swing_limit) =
+                self.compute_cone_limit_info(&q_target_cone);
+            let softness = 1.0;
+            if swing_angle.abs() > SIMD_EPSILON {
+                if swing_angle > swing_limit * softness {
+                    swing_angle = swing_limit * softness;
+                } else if swing_angle < -swing_limit * softness {
+                    swing_angle = -swing_limit * softness;
+                }
+                q_target_cone = Quaternion::from_axis_angle(swing_axis, swing_angle);
+            }
+        }
+
+        if self.twist_span >= CONE_TWIST_FIX_THRESH {
+            let (mut twist_angle, twist_axis) = self.compute_twist_limit_info(&q_target_twist);
+            if twist_angle.abs() > SIMD_EPSILON {
+                if twist_angle > self.twist_span * 1.0 {
+                    twist_angle = self.twist_span * 1.0;
+                } else if twist_angle < -self.twist_span * 1.0 {
+                    twist_angle = -self.twist_span * 1.0;
+                }
+                q_target_twist = Quaternion::from_axis_angle(twist_axis, twist_angle);
+            }
+        }
+
+        let max_impulse = self.motor.map(|m| m.max_impulse).unwrap_or(-1.0);
+        self.motor = Some(ConeTwistMotor {
+            target: q_target_cone * q_target_twist,
+            max_impulse,
+        });
+    }
+
+    /// Whether a motor is enabled.
+    pub fn motor_enabled(&self) -> bool {
+        self.motor.is_some()
+    }
+
+    /// The last swing correction (radians), updated by the last solve step.
+    pub fn swing_correction(&self) -> Real {
+        self.swing_correction
+    }
+
+    /// The last twist correction (radians), updated by the last solve step.
+    pub fn twist_correction(&self) -> Real {
+        self.twist_correction
+    }
+
+    /// The current twist angle in radians (Bullet's `getTwistAngle`),
+    /// updated by the last solve step.
+    pub fn twist_angle(&self) -> Real {
+        self.twist_angle
+    }
+
+    /// Whether the swing limit was active in the last solve step.
+    pub fn solve_swing_limit(&self) -> bool {
+        self.solve_swing_limit
+    }
+
+    /// Whether the twist limit was active in the last solve step.
+    pub fn solve_twist_limit(&self) -> bool {
+        self.solve_twist_limit
+    }
+
+    /// Flatten this cone-twist joint into its solver rows (Bullet's
+    /// `getInfo2NonVirtual`): three linear pivot rows plus the swing and
+    /// twist limit rows.
+    fn prepare_rows(
+        &mut self,
+        body_a: usize,
+        body_b: usize,
+        bodies: &[RigidBody],
+        inv_dt: Real,
+        erp: Real,
+        out: &mut Vec<ConstraintRow>,
+    ) {
+        let a = &bodies[body_a];
+        let b = &bodies[body_b];
+        let tr_a = Matrix3::from_quat(a.orientation) * self.frame_a.basis;
+        let tr_b = Matrix3::from_quat(b.orientation) * self.frame_b.basis;
+        let pivot_a = a.position + a.orientation * self.frame_a.origin;
+        let pivot_b = b.position + b.orientation * self.frame_b.origin;
+        let r_a = pivot_a - a.position;
+        let r_b = pivot_b - b.position;
+        let k = inv_dt * erp;
+
+        // Three linear pivot rows along the world axes (Bullet writes
+        // `J1 = e_j` with the skew of `−a1`, exactly the point-to-point
+        // recipe; `m_constraintError = k·(pivotB − pivotA)`, mirrored to our
+        // `k·(pivotA − pivotB)` bias).
+        for axis in 0..3 {
+            let mut normal = Vector3::ZERO;
+            normal[axis] = 1.0;
+            out.push(ConstraintRow::prepare(
+                body_a,
+                body_b,
+                normal,
+                r_a.cross(normal),
+                normal,
+                r_b.cross(normal),
+                a,
+                b,
+                k * (pivot_a - pivot_b)[axis],
+                RowLimits::Unbounded,
+            ));
+        }
+
+        self.calc_angle_info(&tr_a, &tr_b, &a.inv_inertia_world(), &b.inv_inertia_world());
+
+        // Swing limit rows.
+        if self.solve_swing_limit {
+            if self.swing_span1 < CONE_TWIST_FIX_THRESH && self.swing_span2 < CONE_TWIST_FIX_THRESH {
+                // Both spans locked: two rows keeping the X axes parallel
+                // (Bullet's fixed branch, rows along trA's Y and Z).
+                let p = tr_a.col(1);
+                let q = tr_a.col(2);
+                let fact = inv_dt * self.relaxation_factor;
+                for dir in [p, q] {
+                    out.push(ConstraintRow::prepare(
+                        body_a,
+                        body_b,
+                        Vector3::ZERO,
+                        dir,
+                        Vector3::ZERO,
+                        dir,
+                        a,
+                        b,
+                        -fact * self.swing_axis.dot(dir),
+                        RowLimits::Unbounded,
+                    ));
+                }
+            } else {
+                // Elliptical cone: one row pulling back along the swing axis.
+                let ax1 = self.swing_axis * (self.relaxation_factor * self.relaxation_factor);
+                let limits = match self.motor {
+                    Some(m) if m.max_impulse >= 0.0 => {
+                        // Bullet's `[0, maxImpulse]`, mirrored through
+                        // λ_ours = −λ_bullet.
+                        RowLimits::Window(-m.max_impulse, 0.0)
+                    }
+                    _ => RowLimits::UpperBounded(0.0),
+                };
+                out.push(ConstraintRow::prepare(
+                    body_a,
+                    body_b,
+                    Vector3::ZERO,
+                    ax1,
+                    Vector3::ZERO,
+                    ax1,
+                    a,
+                    b,
+                    -inv_dt * self.bias_factor * self.swing_correction,
+                    limits,
+                ));
+            }
+        }
+
+        // Twist limit row.
+        if self.solve_twist_limit {
+            let ax1 = self.twist_axis * (self.relaxation_factor * self.relaxation_factor);
+            let limits = if self.twist_span > 0.0 {
+                if self.twist_correction > 0.0 {
+                    // Bullet's `[0, +inf]`, mirrored.
+                    RowLimits::UpperBounded(0.0)
+                } else {
+                    RowLimits::LowerBounded(0.0)
+                }
+            } else {
+                // Locked twist (`twist_span == 0`): a plain equality row.
+                RowLimits::Unbounded
+            };
+            out.push(ConstraintRow::prepare(
+                body_a,
+                body_b,
+                Vector3::ZERO,
+                ax1,
+                Vector3::ZERO,
+                ax1,
+                a,
+                b,
+                -inv_dt * self.bias_factor * self.twist_correction,
+                limits,
+            ));
+        }
+    }
+
+    /// Port of Bullet's `calcAngleInfo2`: split the relative rotation into
+    /// cone and twist, test the limits, and update the per-step swing/twist
+    /// state consumed by [`prepare_rows`](Self::prepare_rows).
+    fn calc_angle_info(
+        &mut self,
+        tr_a: &Matrix3,
+        tr_b: &Matrix3,
+        inv_inertia_a: &Matrix3,
+        inv_inertia_b: &Matrix3,
+    ) {
+        self.swing_correction = 0.0;
+        self.solve_twist_limit = false;
+        self.solve_swing_limit = false;
+
+        if let Some(motor) = self.motor {
+            // Motor branch: the swing axis/correction come from the delta
+            // between the current relative pose and the target pose (Bullet
+            // assumes `setMotorTarget` was called and the target is within
+            // the limits).
+            let r_delta = *tr_b * Matrix3::from_quat(motor.target) * tr_a.transpose();
+            let mut q_delta = Quaternion::from_mat3(&r_delta);
+            q_delta = q_delta.normalize();
+            let swing_axis = q_delta.xyz();
+            let len2 = swing_axis.length_squared();
+            if len2 > SIMD_EPSILON {
+                self.swing_axis = swing_axis / len2.sqrt();
+                self.swing_correction = quaternion_angle(&q_delta);
+                if self.swing_correction.abs() > SIMD_EPSILON {
+                    self.solve_swing_limit = true;
+                }
+            }
+            return;
+        }
+
+        // Non-motor branch: decompose the relative rotation into cone (no
+        // twist) and pure twist, from B's perspective.
+        let q_a = Quaternion::from_mat3(tr_a);
+        let q_b = Quaternion::from_mat3(tr_b);
+        let mut q_ab = q_b.inverse() * q_a;
+        q_ab = q_ab.normalize();
+        let mut v_cone_no_twist = q_ab * CONE_TWIST_AXIS;
+        v_cone_no_twist = v_cone_no_twist.normalize();
+        let mut q_ab_cone = Quaternion::from_rotation_arc(CONE_TWIST_AXIS, v_cone_no_twist);
+        q_ab_cone = q_ab_cone.normalize();
+        let mut q_ab_twist = q_ab_cone.inverse() * q_ab;
+        q_ab_twist = q_ab_twist.normalize();
+
+        if self.swing_span1 >= CONE_TWIST_FIX_THRESH && self.swing_span2 >= CONE_TWIST_FIX_THRESH {
+            let (swing_angle, mut swing_axis, swing_limit) =
+                self.compute_cone_limit_info(&q_ab_cone);
+            if swing_angle > swing_limit * self.limit_softness {
+                self.solve_swing_limit = true;
+                self.swing_correction = swing_angle - swing_limit * self.limit_softness;
+                self.adjust_swing_axis_to_use_ellipse_normal(&mut swing_axis);
+                self.swing_axis = q_b * (-swing_axis);
+                self.k_swing = 1.0
+                    / (angular_impulse_denominator(self.swing_axis, inv_inertia_a)
+                        + angular_impulse_denominator(self.swing_axis, inv_inertia_b));
+            }
+        } else {
+            // One or both spans below the fix threshold: hinge/fixed
+            // configurations (Bullet's `else` branch of the cone test).
+            let iv_a = tr_a.col(0);
+            let jv_a = tr_a.col(1);
+            let kv_a = tr_a.col(2);
+            let iv_b = tr_b.col(0);
+            let mut x = iv_b.dot(iv_a);
+            let mut y = iv_b.dot(jv_a);
+            let mut z = iv_b.dot(kv_a);
+            if self.swing_span1 < CONE_TWIST_FIX_THRESH && self.swing_span2 < CONE_TWIST_FIX_THRESH {
+                // Fixed: one row keeps the X axes parallel.
+                if y.abs() > SIMD_EPSILON || z.abs() > SIMD_EPSILON {
+                    self.solve_swing_limit = true;
+                    self.swing_axis = -iv_b.cross(iv_a);
+                }
+            } else {
+                if self.swing_span1 < CONE_TWIST_FIX_THRESH {
+                    // Hinge around the Y axis.
+                    if x.abs() > SIMD_EPSILON || z.abs() > SIMD_EPSILON {
+                        self.solve_swing_limit = true;
+                        if self.swing_span2 >= CONE_TWIST_FIX_THRESH {
+                            y = 0.0;
+                            let span2 = z.atan2(x);
+                            if span2 > self.swing_span2 {
+                                x = self.swing_span2.cos();
+                                z = self.swing_span2.sin();
+                            } else if span2 < -self.swing_span2 {
+                                x = self.swing_span2.cos();
+                                z = -self.swing_span2.sin();
+                            }
+                        }
+                    }
+                } else {
+                    // Hinge around the Z axis.
+                    if x.abs() > SIMD_EPSILON || y.abs() > SIMD_EPSILON {
+                        self.solve_swing_limit = true;
+                        if self.swing_span1 >= CONE_TWIST_FIX_THRESH {
+                            z = 0.0;
+                            let span1 = y.atan2(x);
+                            if span1 > self.swing_span1 {
+                                x = self.swing_span1.cos();
+                                y = self.swing_span1.sin();
+                            } else if span1 < -self.swing_span1 {
+                                x = self.swing_span1.cos();
+                                y = -self.swing_span1.sin();
+                            }
+                        }
+                    }
+                }
+                let target = (x * iv_a + y * jv_a + z * kv_a).normalize();
+                self.swing_axis = -iv_b.cross(target);
+                self.swing_correction = self.swing_axis.length();
+                if self.swing_correction.abs() > SIMD_EPSILON {
+                    self.swing_axis = self.swing_axis.normalize();
+                }
+            }
+        }
+
+        if self.twist_span >= 0.0 {
+            let (twist_angle, twist_axis) = self.compute_twist_limit_info(&q_ab_twist);
+            self.twist_angle = twist_angle;
+            if twist_angle > self.twist_span * self.limit_softness {
+                self.solve_twist_limit = true;
+                self.twist_correction = twist_angle - self.twist_span * self.limit_softness;
+                self.twist_axis = q_b * (-twist_axis);
+                self.k_twist = 1.0
+                    / (angular_impulse_denominator(self.twist_axis, inv_inertia_a)
+                        + angular_impulse_denominator(self.twist_axis, inv_inertia_b));
+            }
+            if self.solve_swing_limit {
+                self.twist_axis_a = q_a * (-twist_axis);
+            }
+        } else {
+            self.twist_angle = 0.0;
+        }
+    }
+
+    /// Port of `computeConeLimitInfo`: the swing angle/axis of a cone
+    /// rotation (twist removed) and the elliptical cone limit for that
+    /// axis.
+    fn compute_cone_limit_info(&self, q_cone: &Quaternion) -> (Real, Vector3, Real) {
+        let swing_angle = quaternion_angle(q_cone);
+        if swing_angle > SIMD_EPSILON {
+            let mut swing_axis = q_cone.xyz();
+            swing_axis = swing_axis.normalize();
+            let x_ellipse = swing_axis.y;
+            let y_ellipse = -swing_axis.z;
+            let mut swing_limit = self.swing_span1;
+            if x_ellipse.abs() > SIMD_EPSILON {
+                let surface_slope2 = (y_ellipse * y_ellipse) / (x_ellipse * x_ellipse);
+                let mut norm = 1.0 / (self.swing_span2 * self.swing_span2);
+                norm += surface_slope2 / (self.swing_span1 * self.swing_span1);
+                let swing_limit2 = (1.0 + surface_slope2) / norm;
+                swing_limit = swing_limit2.sqrt();
+            }
+            (swing_angle, swing_axis, swing_limit)
+        } else {
+            (swing_angle, Vector3::ZERO, self.swing_span1)
+        }
+    }
+
+    /// Port of `computeTwistLimitInfo`: the angle and axis of a pure twist
+    /// rotation, taking the short way around.
+    fn compute_twist_limit_info(&self, q_twist: &Quaternion) -> (Real, Vector3) {
+        let mut q_min_twist = *q_twist;
+        let mut twist_angle = quaternion_angle(q_twist);
+        if twist_angle > bullet_math::PI {
+            q_min_twist = -*q_twist;
+            twist_angle = quaternion_angle(&q_min_twist);
+        }
+        let mut twist_axis = q_min_twist.xyz();
+        if twist_angle > SIMD_EPSILON {
+            twist_axis = twist_axis.normalize();
+        }
+        (twist_angle, twist_axis)
+    }
+
+    /// Port of `adjustSwingAxisToUseEllipseNormal`: for an elliptical cone
+    /// limit, aim the swing correction along the ellipse normal at the
+    /// current swing point instead of straight back to the center.
+    fn adjust_swing_axis_to_use_ellipse_normal(&self, swing_axis: &mut Vector3) {
+        let y = -swing_axis.z;
+        let z = swing_axis.y;
+        if z.abs() > SIMD_EPSILON {
+            let mut grad = y / z;
+            grad *= self.swing_span2 / self.swing_span1;
+            let y = if y > 0.0 {
+                (grad * z).abs()
+            } else {
+                -(grad * z).abs()
+            };
+            swing_axis.z = -y;
+            swing_axis.y = z;
+            *swing_axis = swing_axis.normalize();
+        }
+    }
+}
+
+/// `axis · (inv_inertia_world · axis)`, Bullet's
+/// `computeAngularImpulseDenominator`.
+fn angular_impulse_denominator(axis: Vector3, inv_inertia_world: &Matrix3) -> Real {
+    axis.dot(*inv_inertia_world * axis)
+}
+
+/// A quaternion's rotation angle in `[0, 2π]` (Bullet's `getAngle`).
+fn quaternion_angle(q: &Quaternion) -> Real {
+    2.0 * q.w.clamp(-1.0, 1.0).acos()
+}
+
+/// The rotation of a frame's basis, as a quaternion (Bullet's
+/// `btTransform::getRotation`).
+impl JointFrame {
+    fn basis_quat(&self) -> Quaternion {
+        Quaternion::from_mat3(&self.basis)
+    }
 }
 
 /// Motor factor fading the motor near the limits (Bullet's
@@ -667,6 +1512,26 @@ pub fn prepare_rows(
         }
         ConstraintKind::Hinge(hinge) => {
             hinge.prepare_rows(
+                constraint.body_a,
+                constraint.body_b,
+                bodies,
+                inv_dt,
+                erp,
+                out,
+            );
+        }
+        ConstraintKind::Fixed(fixed) => {
+            fixed.prepare_rows(
+                constraint.body_a,
+                constraint.body_b,
+                bodies,
+                inv_dt,
+                erp,
+                out,
+            );
+        }
+        ConstraintKind::ConeTwist(cone_twist) => {
+            cone_twist.prepare_rows(
                 constraint.body_a,
                 constraint.body_b,
                 bodies,
@@ -1067,6 +1932,211 @@ mod tests {
         assert!(
             held.abs() < 0.05,
             "unclamped joint should hold the bob, y = {held}"
+        );
+    }
+
+    /// A fixed joint welds a box to a static anchor: an initial spin and
+    /// sideways push are killed, the relative orientation returns to
+    /// identity and the pivot stays on the anchor under gravity.
+    #[test]
+    fn fixed_joint_locks_a_rigid_assembly() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        let anchor = world.add_body(RigidBody::new_static(
+            CollisionShape::box_shape(Vector3::splat(0.2)),
+            Vector3::ZERO,
+        ));
+        // A box hanging 1 m below the anchor; both pivots sit 0.5 above each
+        // body's centre, coinciding at (0, 1.5, 0) at assembly.
+        let box_body = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::splat(0.3)),
+            Vector3::new(0.0, 1.0, 0.0),
+            1.0,
+        ));
+        world.add_constraint(Constraint::fixed(
+            box_body,
+            anchor,
+            JointFrame::new(Vector3::new(0.0, 0.5, 0.0), Matrix3::IDENTITY),
+            JointFrame::new(Vector3::new(0.0, 1.5, 0.0), Matrix3::IDENTITY),
+        ));
+        // Kick it: a spin around Z and a sideways velocity.
+        world.body_mut(box_body).angular_velocity = Vector3::new(0.0, 0.0, 4.0);
+        world.body_mut(box_body).linear_velocity = Vector3::new(2.0, 0.0, 0.0);
+        let mut max_rel_angle: Real = 0.0;
+        for _ in 0..600 {
+            world.step_simulation(DT);
+            // The anchor's frame is identity, so the relative orientation is
+            // the box's own orientation.
+            max_rel_angle = max_rel_angle.max(quaternion_angle(&world.body(box_body).orientation));
+        }
+        let b = world.body(box_body);
+        // The weld holds: the box returns to the anchor's orientation and
+        // hangs straight below the pivot at (0, 1, 0).
+        assert!(
+            max_rel_angle < 0.5,
+            "relative orientation wandered during the kick: {max_rel_angle}"
+        );
+        assert!(
+            (b.position - Vector3::new(0.0, 1.0, 0.0)).length() < 0.03,
+            "box drifted from below the anchor: {:?}",
+            b.position
+        );
+        assert!(
+            b.angular_velocity.length() < 0.05,
+            "box still spinning: {:?}",
+            b.angular_velocity
+        );
+        let pivot = b.position + b.orientation * Vector3::new(0.0, 0.5, 0.0);
+        assert!(
+            (pivot - Vector3::new(0.0, 1.5, 0.0)).length() < 0.03,
+            "pivot off the anchor: {:?}",
+            pivot
+        );
+    }
+
+    /// Two boxes welded side by side tumble and land on the ground as one
+    /// rigid unit: their relative pose stays fixed even under impact.
+    #[test]
+    fn fixed_joint_welds_two_dynamic_bodies() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        // Two boxes, one above the other with a small gap, welded by a fixed
+        // joint whose frames meet halfway between them.
+        let a = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::new(0.4, 0.4, 0.4)),
+            Vector3::new(0.0, 1.2, 0.0),
+            1.0,
+        ));
+        let b = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::new(0.4, 0.4, 0.4)),
+            Vector3::new(0.0, 1.6, 0.0),
+            1.0,
+        ));
+        world.add_constraint(Constraint::fixed(
+            a,
+            b,
+            JointFrame::new(Vector3::new(0.0, 0.2, 0.0), Matrix3::IDENTITY),
+            JointFrame::new(Vector3::new(0.0, -0.2, 0.0), Matrix3::IDENTITY),
+        ));
+        // Tumble the pair a little.
+        world.body_mut(a).angular_velocity = Vector3::new(1.0, 2.0, 0.0);
+        world.body_mut(b).angular_velocity = Vector3::new(1.0, 2.0, 0.0);
+        let mut max_rel_angle: Real = 0.0;
+        let mut max_pivot_err: Real = 0.0;
+        for _ in 0..300 {
+            world.step_simulation(DT);
+            let ba = world.body(a);
+            let bb = world.body(b);
+            let rel_quat = Quaternion::from_mat3(&Matrix3::from_quat(bb.orientation)).inverse()
+                * Quaternion::from_mat3(&Matrix3::from_quat(ba.orientation));
+            max_rel_angle = max_rel_angle.max(quaternion_angle(&rel_quat));
+            // The weld residual: the two frame origins must stay coincident
+            // (their world positions differ by the rigid offset).
+            let pivot_a = ba.position + ba.orientation * Vector3::new(0.0, 0.2, 0.0);
+            let pivot_b = bb.position + bb.orientation * Vector3::new(0.0, -0.2, 0.0);
+            max_pivot_err = max_pivot_err.max((pivot_b - pivot_a).length());
+        }
+        assert!(
+            max_rel_angle < 0.15,
+            "welded pair twisted apart: {max_rel_angle}"
+        );
+        assert!(
+            max_pivot_err < 0.15,
+            "welded pair stretched apart: {max_pivot_err}"
+        );
+    }
+
+    /// A cone-twist joint limits the swing: a bob pinned at the anchor and
+    /// spun around Z swings against the cone and the angle between the cone
+    /// axes never exceeds the swing span (plus the Baumgarte overshoot).
+    #[test]
+    fn cone_twist_limits_the_swing() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        let anchor = world.add_body(RigidBody::new_static(
+            CollisionShape::box_shape(Vector3::splat(0.2)),
+            Vector3::ZERO,
+        ));
+        let bob = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::sphere(0.1),
+            Vector3::ZERO,
+            1.0,
+        ));
+        // Cone axis = X on both bodies; both pivots at the origin (the bob's
+        // centre is pinned to the anchor). Swing limited to 25°, twist free.
+        let cone = Constraint::cone_twist(
+            bob,
+            anchor,
+            JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
+            JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
+            0.44,
+            0.44,
+            -1.0,
+        );
+        world.add_constraint(cone);
+        // Spin the bob around Z: its X axis swings out of the cone.
+        world.body_mut(bob).angular_velocity = Vector3::new(0.0, 0.0, 4.0);
+        let mut max_swing: Real = 0.0;
+        for _ in 0..600 {
+            world.step_simulation(DT);
+            // The swing angle is the angle between the cone axes (X).
+            let ax_a = world.body(anchor).orientation * Vector3::X;
+            let ax_b = world.body(bob).orientation * Vector3::X;
+            max_swing = max_swing.max(ax_a.dot(ax_b).clamp(-1.0, 1.0).acos());
+        }
+        assert!(
+            max_swing < 0.55,
+            "cone exceeded: swing angle {max_swing} rad (limit 0.44)"
+        );
+        // It actually swung (moved out of the hanging position and back).
+        assert!(max_swing > 0.3, "bob barely swung: {max_swing}");
+    }
+
+    /// A cone-twist joint with a locked twist span (0) stops the twist: a
+    /// spin around the cone axis is killed and the twist angle never grows.
+    #[test]
+    fn cone_twist_locks_the_twist() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        let anchor = world.add_body(RigidBody::new_static(
+            CollisionShape::box_shape(Vector3::splat(0.2)),
+            Vector3::ZERO,
+        ));
+        let bob = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::sphere(0.1),
+            Vector3::ZERO,
+            1.0,
+        ));
+        // Free swing, locked twist (span 0): the bob can swing but not twist.
+        let cone = Constraint::cone_twist(
+            bob,
+            anchor,
+            JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
+            JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
+            0.9,
+            0.9,
+            0.0,
+        );
+        world.add_constraint(cone);
+        // Spin the bob around the cone axis (X).
+        world.body_mut(bob).angular_velocity = Vector3::new(6.0, 0.0, 0.0);
+        let mut max_twist: Real = 0.0;
+        for _ in 0..300 {
+            world.step_simulation(DT);
+            max_twist = max_twist.max(world.constraint(0).kind().cone_twist().twist_angle());
+        }
+        assert!(
+            max_twist < 0.1,
+            "locked twist drifted: {max_twist} rad"
+        );
+        assert!(
+            world.body(bob).angular_velocity.x.abs() < 0.1,
+            "bob still twisting: {:?}",
+            world.body(bob).angular_velocity
         );
     }
 }

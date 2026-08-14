@@ -72,6 +72,10 @@ pub enum RowLimits {
     LowerBounded(Real),
     /// `[-inf, upper]` (a hinge high limit).
     UpperBounded(Real),
+    /// `[lower, upper]`: a general asymmetric window (a joint row whose
+    /// mirrored Bullet window is neither one-sided nor symmetric, e.g. the
+    /// cone-twist motor's `[−maxMotorImpulse, 0]`).
+    Window(Real, Real),
 }
 
 /// One solver row of a joint constraint (Bullet's `btSolverConstraint`
@@ -410,6 +414,7 @@ fn solve_joint_row(bodies: &mut [RigidBody], c: &mut ConstraintRow) {
         RowLimits::Bilateral(clamp) => (old + lambda).clamp(-clamp, clamp),
         RowLimits::LowerBounded(lower) => (old + lambda).max(lower),
         RowLimits::UpperBounded(upper) => (old + lambda).min(upper),
+        RowLimits::Window(lower, upper) => (old + lambda).clamp(lower, upper),
     };
     c.impulse = new;
     let j = new - old;
