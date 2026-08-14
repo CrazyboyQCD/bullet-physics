@@ -1,4 +1,8 @@
 /target
 
+# Parity harness build artifacts
+/tools/*.exe
+/tools/*.obj
+
 # For implementation reference
 /refs/bullet3/

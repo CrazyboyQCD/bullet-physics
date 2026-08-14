@@ -1,0 +1,59 @@
+{
+  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/examples/scenes_generated.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant).",
+  "scenes": {
+    "falling_box": {
+      "dt": [1, 60],
+      "frames": 300,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": { "type": "box", "half_extents": [25, 0.5, 25] },
+          "position": [0, -0.5, 0],
+          "mass": 0
+        },
+        {
+          "name": "cube",
+          "shape": { "type": "box", "half_extents": [0.5, 0.5, 0.5] },
+          "position": [0, 5, 0],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        }
+      ],
+      "record": ["cube"]
+    },
+    "falling_capsule": {
+      "dt": [1, 60],
+      "frames": 300,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": { "type": "plane", "normal": [0, 1, 0], "constant": 0.0 },
+          "position": [0, 0, 0],
+          "mass": 0
+        },
+        {
+          "name": "capsule",
+          "shape": { "type": "capsule", "radius": 0.5, "half_height": 1.0 },
+          "position": [0, 5, 0],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "name": "sphere",
+          "shape": { "type": "sphere", "radius": 0.5 },
+          "position": [1, 6, 0],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        }
+      ],
+      "record": ["capsule", "sphere"]
+    }
+  }
+}

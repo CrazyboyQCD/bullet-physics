@@ -1,0 +1,110 @@
+//! Rust-side scene recorder for the frame-by-frame parity harness.
+//!
+//! Reads the scene tables generated from tools/scenes.json
+//! (scenes_generated.rs), simulates one scene with the same protocol as the
+//! C++ recorder (tools/bullet_record.cpp), and writes one CSV per recorded
+//! body to the current working directory:
+//!
+//! ```text
+//! <scene>_<body>.csv   (one line per frame: t px py pz qx qy qz qw, %.6f)
+//! ```
+//!
+//! Output is diffed against the Bullet recording by tools/compare.py /
+//! tools/parity.py (see docs/parity-harness.md).
+//!
+//! Usage: cargo run -p bullet --example record_scenes -- [scene_name]
+
+use std::fs::File;
+use std::io::Write;
+
+use bullet::dynamics::{PhysicsWorld, RigidBody};
+use bullet::math::{Real, Vector3};
+use bullet::shapes::CollisionShape;
+
+// Included via #[path] from src/parity_scenes.rs (auto-generated from
+// tools/scenes.json).
+#[path = "../src/parity_scenes.rs"]
+mod parity_scenes;
+
+use parity_scenes::{ShapeSpec, SCENES};
+
+fn main() {
+    let scene_name = std::env::args().nth(1).unwrap_or_else(|| "falling_box".to_string());
+    let suffix = std::env::args().nth(2).unwrap_or_else(|| "rust".to_string());
+    let Some((_, spec)) = SCENES.iter().find(|(n, _)| *n == scene_name) else {
+        eprintln!("record_scenes: unknown scene '{scene_name}'");
+        std::process::exit(2);
+    };
+
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(
+        spec.gravity[0] as Real,
+        spec.gravity[1] as Real,
+        spec.gravity[2] as Real,
+    ));
+    world.set_iterations(spec.iterations);
+
+    // Build bodies; remember the index of each body whose trajectory is
+    // recorded (scene bodies are added in spec order, matching the C++ side).
+    let mut record_idx: Vec<usize> = Vec::new();
+    for (i, b) in spec.bodies.iter().enumerate() {
+        let shape = match b.shape {
+            ShapeSpec::Box(h) => CollisionShape::box_shape(Vector3::new(
+                h[0] as Real, h[1] as Real, h[2] as Real,
+            )),
+            ShapeSpec::Sphere(r) => CollisionShape::sphere(r as Real),
+            ShapeSpec::Capsule(r, hh) => CollisionShape::capsule(r as Real, hh as Real),
+            ShapeSpec::Cylinder(r, hh) => CollisionShape::cylinder(r as Real, hh as Real),
+            ShapeSpec::Cone(r, hh) => CollisionShape::cone(r as Real, hh as Real),
+            ShapeSpec::Plane([nx, ny, nz, c]) => {
+                CollisionShape::plane(
+                    Vector3::new(nx as Real, ny as Real, nz as Real),
+                    c as Real,
+                )
+            }
+        };
+        let body = if b.is_static {
+            RigidBody::new_static(shape, Vector3::new(
+                b.position[0] as Real, b.position[1] as Real, b.position[2] as Real,
+            ))
+        } else {
+            RigidBody::new_dynamic(
+                shape,
+                Vector3::new(
+                    b.position[0] as Real, b.position[1] as Real, b.position[2] as Real,
+                ),
+                b.mass as Real,
+            )
+            .friction(b.friction as Real)
+            .restitution(b.restitution as Real)
+        };
+        world.add_body(body);
+        if spec.record.iter().any(|r| *r == b.name) {
+            record_idx.push(i);
+        }
+    }
+
+    let dt: Real = spec.dt_num as Real / spec.dt_den as Real;
+
+    // Open one output file per recorded body (cwd, like the C++ recorder).
+    let mut out: Vec<File> = Vec::new();
+    for r in spec.record {
+        let fname = format!("{scene_name}_{r}_{suffix}.csv");
+        out.push(File::create(&fname).unwrap_or_else(|e| {
+            eprintln!("record_scenes: cannot open {fname}: {e}");
+            std::process::exit(2);
+        }));
+    }
+
+    for frame in 1..=spec.frames {
+        world.step_simulation(dt);
+        let line = format!("{:.6}", frame as Real * dt);
+        for (k, &i) in record_idx.iter().enumerate() {
+            let p = world.body(i).position;
+            let q = world.body(i).orientation;
+            writeln!(out[k], "{line} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
+                     p.x, p.y, p.z, q.x, q.y, q.z, q.w)
+                .expect("write csv");
+        }
+    }
+}
