@@ -15,6 +15,7 @@ It is the canonical reference for "does X match Bullet?" — checked against
 | Friction warm starting | Not inherited across steps (rebuilds from zero each step) | Inherited (`m_appliedImpulseLateral1/2`), `m_warmstartingFactor = 0.85` | Our manifolds are rebuilt per step; the tangent basis rotates with the point set on triangle meshes, and stale friction kicks made resting bodies oscillate (`falling_mesh`). Normal-impulse warm starting IS implemented |
 | Contact manifold persistence | Impulse cache only (normal impulse, point matched by distance + normal) | Full `btPersistentManifold` with point lifetime, friction anchors, `refreshContactPoints` | Impulse cache delivers the warm-starting benefit with a fraction of the machinery |
 | `activate()` on disabled bodies | Skips `DisableDeactivation` and `DisableSimulation` bodies (they keep their state) | Forces `ACTIVE_TAG` — only the static/kinematic collision flags are checked | Preserving `DISABLE_DEACTIVATION`/`DISABLE_SIMULATION` semantics is safer for the common "never sleep / never simulate" usage |
+| Broad phase | `AxisSweep3` (three-axis sweep-and-prune) as the default | `btDbvtBroadphase` (dynamic BVH tree) is Bullet's default; `btAxisSweep3` is opt-in | Sweep-and-prune with incremental sorted lists is simpler and fast for moderate scenes; DBVT deferred (see §3) |
 
 ## 2. Numerical differences from Bullet defaults
 
@@ -34,6 +35,7 @@ It is the canonical reference for "does X match Bullet?" — checked against
 - **Joints**: Point2Point, Hinge, Generic6Dof, ConeTwist, Slider, Fixed.
 - **Featherstone multibody**.
 - **Full persistent-manifold point lifecycle** (lifetime tracking, friction anchors, contact-processed callbacks) — see §1.
+- **DbvtBroadphase** (Bullet's default dynamic-BVH broad phase): we use AxisSweep3 instead (see §1); revisit for very large dynamic scenes.
 
 ## 4. Aligned with Bullet (reference)
 
