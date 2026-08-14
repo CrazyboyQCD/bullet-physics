@@ -59,8 +59,14 @@ pub const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
 pub const FRAC_1_SQRT_2: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
 mod transform;
+pub mod spatial;
 mod util;
 
 pub use transform::make_transform;
+pub use spatial::{
+    outer_product, skew, spatial_transform, symmetric_spatial_outer_product,
+    symmetric_spatial_outer_product_force, SpatialForceVector, SpatialMotionVector,
+    SpatialTransformationMatrix, SymmetricSpatialDyad,
+};
 pub use util::Aabb;
 pub use util::inertia_tensor_world;
