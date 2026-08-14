@@ -127,6 +127,31 @@ impl BroadPhase for AxisSweep3 {
     fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize> {
         aabb_raycast_candidates(&self.aabbs, ray_from, ray_to)
     }
+
+    fn aabb_candidates(&self, query: Aabb) -> Vec<usize> {
+        // A proxy overlaps the query on axis k exactly when min[k] <= q.max[k]
+        // and max[k] >= q.min[k]. The per-axis lists are sorted by min, so the
+        // first condition is a prefix; intersect the three axes' prefixes.
+        let mut sets: [HashSet<usize>; 3] = [HashSet::new(), HashSet::new(), HashSet::new()];
+        for k in 0..3 {
+            let order = &self.order[k];
+            let cut = order.partition_point(|&i| {
+                self.aabbs[i].as_ref().unwrap().min[k] <= query.max[k]
+            });
+            sets[k] = order[..cut]
+                .iter()
+                .copied()
+                .filter(|&i| self.aabbs[i].as_ref().unwrap().max[k] >= query.min[k])
+                .collect();
+        }
+        let mut out: Vec<usize> = sets[0]
+            .intersection(&sets[1])
+            .filter(|p| sets[2].contains(p))
+            .copied()
+            .collect();
+        out.sort_unstable();
+        out
+    }
 }
 
 #[cfg(test)]
@@ -314,5 +339,40 @@ mod tests {
             sweep.raycast_candidates(from, to),
             brute.raycast_candidates(from, to)
         );
+    }
+
+    #[test]
+    fn aabb_candidates_matches_brute_force() {
+        let mut sweep = AxisSweep3::new();
+        let mut brute = super::super::BruteForceBroadPhase::new();
+        let mut seed = 0xdeadbeefcafef00du64;
+        for _ in 0..48 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let base = Vector3::new(
+                ((seed >> 32) % 400) as Real / 10.0,
+                ((seed >> 16) % 400) as Real / 10.0,
+                (seed % 400) as Real / 10.0,
+            );
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let extent = Vector3::new(
+                ((seed >> 32) % 100) as Real / 100.0 + 0.1,
+                ((seed >> 16) % 100) as Real / 100.0 + 0.1,
+                (seed % 100) as Real / 100.0 + 0.1,
+            );
+            let aabb = Aabb::new(base, base + extent);
+            sweep.create_proxy(aabb);
+            brute.create_proxy(aabb);
+        }
+        // Query AABBs at scattered positions (including overlaps, edge touches
+        // and empty regions).
+        let queries = [
+            Aabb::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(20.0, 20.0, 20.0)),
+            Aabb::new(Vector3::new(10.0, 10.0, 10.0), Vector3::new(12.0, 12.0, 12.0)),
+            Aabb::new(Vector3::new(50.0, 50.0, 50.0), Vector3::new(60.0, 60.0, 60.0)),
+            Aabb::new(Vector3::new(39.9, 0.0, 0.0), Vector3::new(40.0, 40.0, 40.0)),
+        ];
+        for q in queries {
+            assert_eq!(sweep.aabb_candidates(q), brute.aabb_candidates(q), "query {q:?}");
+        }
     }
 }

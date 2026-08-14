@@ -59,6 +59,10 @@ impl BroadPhase for BruteForceBroadPhase {
     fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize> {
         aabb_raycast_candidates(&self.aabbs, ray_from, ray_to)
     }
+
+    fn aabb_candidates(&self, aabb: Aabb) -> Vec<usize> {
+        super::aabb_overlap_candidates(&self.aabbs, aabb)
+    }
 }
 
 #[cfg(test)]

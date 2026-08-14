@@ -385,6 +385,26 @@ fn closest_origin_tetrahedron(
     let ab = b - a;
     let ac = c - a;
     let ad = d - a;
+    // Degenerate (coplanar) tetrahedron: the side-of-face products below are
+    // all zero (every opposite-vertex vector lies in the face plane), so the
+    // "origin inside" conclusion would be wrong. A flat hull has no interior:
+    // fall back to the closest of the four faces. The GJK distance walks hit
+    // this when the search direction is the normal of the current closest
+    // face (the pushed support point is coplanar with it).
+    if ab.cross(ac).dot(ad).abs() < 1e-12 {
+        let faces = [(a, b, c), (a, b, d), (a, c, d), (b, c, d)];
+        let (best, keep) = faces
+            .iter()
+            .map(|&(x, y, z)| closest_origin_triangle(x, y, z))
+            .min_by(|p, q| {
+                p.0
+                    .length_squared()
+                    .partial_cmp(&q.0.length_squared())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap();
+        return (best, keep);
+    }
     let abc = ab.cross(ac);
     let acd = ac.cross(ad);
     let adb = ad.cross(ab);

@@ -28,6 +28,25 @@ pub trait BroadPhase {
     /// include extra proxies (e.g. the segment passes through an AABB corner
     /// that no shape covers). Mirrors Bullet's `btAxisSweep3::rayTest`.
     fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize>;
+    /// Indices of proxies whose AABB overlaps the query AABB (any order).
+    ///
+    /// Exact overlap test (no false positives); used by sweep and contact
+    /// queries that then run the narrow phase on the candidates.
+    fn aabb_candidates(&self, aabb: Aabb) -> Vec<usize>;
+}
+
+/// AABB-overlap candidates over a proxy AABB arena (shared by both broad
+/// phases; the exact reference for tests and brute-force usage).
+#[inline]
+pub(crate) fn aabb_overlap_candidates(aabbs: &[Option<Aabb>], query: Aabb) -> Vec<usize> {
+    aabbs.iter()
+        .enumerate()
+        .filter_map(|(i, a)| {
+            a.as_ref()
+                .filter(|aabb| aabb.overlaps(&query))
+                .map(|_| i)
+        })
+        .collect()
 }
 
 /// Slab-method segment-versus-AABB test (t in `[0, 1]`).

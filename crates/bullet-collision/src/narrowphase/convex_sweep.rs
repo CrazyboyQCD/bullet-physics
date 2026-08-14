@@ -344,6 +344,173 @@ fn to_delta(dir: Vector3, length: Real) -> Vector3 {
     dir * length
 }
 
+/// Cast a convex `shape` from `from` to `to` against a target, returning the
+/// closest hit. Generalizes [`swept_sphere_cast`] to an arbitrary convex cast
+/// shape — used by the character controller's step-up/forward/down sweeps,
+/// mirroring `btCollisionWorld::convexSweep`:
+/// - convex targets: Minkowski GJK distance walk (the same closest-approach
+///   search as the sphere cast, with a zero radius);
+/// - planes: analytic (the shape's deepest point along the plane normal);
+/// - triangle meshes / heightfields: BVH-pruned per-triangle convex casts.
+///
+/// `shape` must be convex; `other` must be convex, a plane, or a
+/// mesh/heightfield. Returns `None` when the segment never touches the target.
+pub fn convex_cast(
+    shape: &CollisionShape,
+    from: Vector3,
+    ori: Quaternion,
+    to: Vector3,
+    other: &CollisionShape,
+    other_pos: Vector3,
+    other_ori: Quaternion,
+) -> Option<SweepHit> {
+    match other {
+        CollisionShape::Plane(p) => sweep_convex_plane(shape, from, ori, to, p, other_pos, other_ori),
+        CollisionShape::TriangleMesh(mesh) => {
+            sweep_convex_mesh(shape, from, ori, to, mesh, other_pos, other_ori)
+        }
+        CollisionShape::Heightfield(hf) => {
+            sweep_convex_mesh(shape, from, ori, to, hf.as_mesh(), other_pos, other_ori)
+        }
+        _ => sweep_convex_shape(shape, from, ori, to, other, other_pos, other_ori),
+    }
+}
+
+/// Cast `shape` against a convex target via the Minkowski GJK distance: the
+/// squared distance between the two shapes along the segment is convex, so the
+/// shared ternary/binary search finds the first touching fraction. The
+/// separation direction (from the target toward the moving shape) is the hit
+/// normal.
+fn sweep_convex_shape(
+    shape: &CollisionShape,
+    from: Vector3,
+    ori: Quaternion,
+    to: Vector3,
+    other: &CollisionShape,
+    other_pos: Vector3,
+    other_ori: Quaternion,
+) -> Option<SweepHit> {
+    let delta = to - from;
+    let length = delta.length();
+    if length <= Real::EPSILON {
+        return None;
+    }
+    let dir = delta / length;
+    // Squared shape-shape distance (and separation direction) with the moving
+    // shape's position `p` along the segment. The support is B - A (the target
+    // minus the moving shape), so `point_convex_distance`'s returned direction
+    // — the closest point of {point - S} to the origin — points from the
+    // target's closest point toward the moving shape, matching the hit-normal
+    // convention "from the target toward the swept shape".
+    let dist = |p: Vector3| -> (Real, Vector3) {
+        let support = |d: Vector3| {
+            other.support_world(other_pos, other_ori, d) - shape.support_world(p, ori, -d)
+        };
+        point_convex_distance(&support, Vector3::ZERO)
+    };
+    let mut hit = sweep_with_dist(from, dir, length, 0.0, dist)?;
+    // The sweep core reports the shape reference point at the entry (the
+    // radius is zero); refine it to a contact point on the target's contact
+    // side: the target's support along the hit normal (from the target toward
+    // the moving shape).
+    hit.point = other.support_world(other_pos, other_ori, hit.normal);
+    Some(hit)
+}
+
+/// Cast `shape` against a plane (analytic): the shape's deepest point along
+/// the plane normal crosses the plane during the sweep.
+fn sweep_convex_plane(
+    shape: &CollisionShape,
+    from: Vector3,
+    ori: Quaternion,
+    to: Vector3,
+    plane: &Plane,
+    other_pos: Vector3,
+    other_ori: Quaternion,
+) -> Option<SweepHit> {
+    let delta = to - from;
+    let length = delta.length();
+    if length <= Real::EPSILON {
+        return None;
+    }
+    let n = other_ori.mul_vec3(plane.normal);
+    let c = plane.constant + n.dot(other_pos);
+    // Normal from the plane toward the shape (the plane narrow phase's
+    // orientation convention).
+    let normal = if n.dot(from) >= c { n } else { -n };
+    let deepest = |p: Vector3| shape.support_world(p, ori, -normal);
+    let da = normal.dot(deepest(from)) - c;
+    let db = normal.dot(deepest(to)) - c;
+    if db >= da {
+        // Moving away from or parallel to the plane (this also covers a shape
+        // resting exactly ON the plane sweeping sideways: da == db == 0).
+        return None;
+    }
+    if da <= 0.0 {
+        // Already touching (and approaching): clamp at the start.
+        return Some(SweepHit {
+            fraction: 0.0,
+            normal,
+            point: deepest(from),
+        });
+    }
+    let fraction = da / (da - db);
+    if !(0.0..=1.0).contains(&fraction) {
+        return None;
+    }
+    let entry = from + delta * fraction;
+    Some(SweepHit {
+        fraction,
+        normal,
+        point: deepest(entry),
+    })
+}
+
+/// Cast `shape` against a triangle mesh: BVH-pruned per-triangle convex casts
+/// in mesh-local space (the hit fraction is preserved under the rigid
+/// transform; the normal and point are mapped back to world space).
+fn sweep_convex_mesh(
+    shape: &CollisionShape,
+    from: Vector3,
+    ori: Quaternion,
+    to: Vector3,
+    mesh: &TriangleMesh,
+    other_pos: Vector3,
+    other_ori: Quaternion,
+) -> Option<SweepHit> {
+    let inv = other_ori.inverse();
+    let from_l = inv.mul_vec3(from - other_pos);
+    let to_l = inv.mul_vec3(to - other_pos);
+    let ori_l = inv * ori;
+    // Swept AABB: the union of the shape's AABBs at the two endpoints (the
+    // AABB of a convex set moving linearly is the union of endpoint AABBs).
+    let aabb = shape
+        .world_aabb(from_l, ori_l)
+        .merged(&shape.world_aabb(to_l, ori_l));
+    let mut best: Option<SweepHit> = None;
+    for tri in mesh.triangles_in_aabb(&aabb) {
+        let (a, b, c) = mesh.triangle(tri as usize);
+        let tri_shape = CollisionShape::convex_hull(vec![a, b, c]);
+        if let Some(hit) = sweep_convex_shape(
+            shape,
+            from_l,
+            ori_l,
+            to_l,
+            &tri_shape,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+        ) && best.is_none_or(|h| hit.fraction < h.fraction)
+        {
+            best = Some(hit);
+        }
+    }
+    best.map(|h| SweepHit {
+        fraction: h.fraction,
+        normal: other_ori.mul_vec3(h.normal),
+        point: other_ori.mul_vec3(h.point) + other_pos,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,5 +588,65 @@ mod tests {
         // The slope surface normal points up and toward -X.
         assert!(h.normal.y > 0.6);
         assert!(h.normal.x < -0.1);
+    }
+
+    fn ccast(shape: &CollisionShape, from: Vector3, to: Vector3, other: &CollisionShape) -> Option<SweepHit> {
+        convex_cast(shape, from, Quaternion::IDENTITY, to, other, Vector3::ZERO, Quaternion::IDENTITY)
+    }
+
+    #[test]
+    fn box_cast_head_on_hits_a_box() {
+        let moving = CollisionShape::box_shape(Vector3::splat(0.5));
+        let target = CollisionShape::box_shape(Vector3::splat(1.0));
+        // The moving box (half 0.5) travels +X to -X; the target face at
+        // x = 1 is reached when the moving box's -X face (at x - 0.5) hits it:
+        // from x = 5 over a 5-unit segment, fraction = (5 - 1.5) / 5.
+        let h = ccast(&moving, Vector3::new(5.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 0.0), &target).unwrap();
+        assert_relative_eq!(h.fraction, (5.0 - 1.5) / 5.0, epsilon = 1e-4);
+        // The normal points from the target back toward the moving box (+X).
+        assert_relative_eq!(h.normal.x, 1.0, epsilon = 1e-3);
+        // The contact point sits on the target's contact face (x = 1).
+        assert_relative_eq!(h.point.x, 1.0, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn box_cast_misses_when_offset() {
+        let moving = CollisionShape::box_shape(Vector3::splat(0.5));
+        let target = CollisionShape::box_shape(Vector3::splat(1.0));
+        // The combined extent along y is 1.5; a pass at y = 3 misses.
+        assert!(ccast(&moving, Vector3::new(5.0, 3.0, 0.0), Vector3::new(-5.0, 3.0, 0.0), &target).is_none());
+    }
+
+    #[test]
+    fn capsule_cast_lands_on_a_plane() {
+        let capsule = CollisionShape::capsule(0.4, 0.8);
+        let plane = CollisionShape::plane(Vector3::Y, 0.0);
+        // Capsule drops from y = 3 to y = -1 (4-unit segment); its lowest
+        // point (center - half_height - radius) reaches the plane at
+        // y = 3 - 4f, i.e. fraction = (3 - 1.2)/4 = 0.45.
+        let h = ccast(&capsule, Vector3::new(0.0, 3.0, 0.0), Vector3::new(0.0, -1.0, 0.0), &plane).unwrap();
+        assert_relative_eq!(h.fraction, (3.0 - 1.2) / 4.0, epsilon = 1e-4);
+        assert_relative_eq!(h.normal.y, 1.0, epsilon = 1e-4);
+        // The hit point is the capsule's lowest point touching the plane.
+        assert_relative_eq!(h.point.y, 0.0, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn box_cast_against_a_mesh_slope() {
+        // A single 45-degree triangle slope (y = x), the falling_mesh winding.
+        let mesh = CollisionShape::triangle_mesh(
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(2.0, 2.0, 0.0),
+                Vector3::new(0.0, 0.0, 2.0),
+            ],
+            vec![[0, 1, 2]],
+        );
+        let moving = CollisionShape::box_shape(Vector3::splat(0.4));
+        // Drop the box vertically over the slope interior; it must hit the
+        // surface (upward-ish normal) rather than pass through.
+        let h = ccast(&moving, Vector3::new(1.0, 3.0, 0.6), Vector3::new(1.0, -1.0, 0.6), &mesh).unwrap();
+        assert!(h.normal.y > 0.6, "normal {h:?} should point up the slope");
+        assert!(h.fraction > 0.0 && h.fraction < 1.0);
     }
 }
