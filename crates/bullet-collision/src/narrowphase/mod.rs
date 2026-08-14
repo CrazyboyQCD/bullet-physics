@@ -109,10 +109,14 @@ pub fn collide(
             sphere::sphere_sphere(sa, position_a, sb, position_b)
         }
         (CollisionShape::Sphere(sa), CollisionShape::BoxShape(bb)) => {
-            sphere::sphere_box(sa, position_a, bb, position_b, orientation_b)
+            // sphere_box reports the normal from the box to the sphere; flip it
+            // so it points from shape_a (sphere) to shape_b (box).
+            sphere::sphere_box(sa, position_a, bb, position_b, orientation_b).map(|m| m.flipped())
         }
         (CollisionShape::BoxShape(ba), CollisionShape::Sphere(sb)) => {
-            sphere::sphere_box(sb, position_b, ba, position_a, orientation_a).map(|m| m.flipped())
+            // sphere_box already reports the normal from the box (shape_a) to
+            // the sphere (shape_b); no flip.
+            sphere::sphere_box(sb, position_b, ba, position_a, orientation_a)
         }
         (CollisionShape::BoxShape(ba), CollisionShape::BoxShape(bb)) => {
             box_box::box_box(ba, position_a, orientation_a, bb, position_b, orientation_b)
