@@ -23,7 +23,8 @@
 
 namespace {
 
-btCollisionShape* make_shape(const BodySpec& b) {
+btCollisionShape* make_shape(const BodySpec& b,
+                             std::vector<std::unique_ptr<btTriangleMesh>>& meshes) {
   const btScalar* p = b.params;
   switch (b.shape) {
     case SHAPE_BOX:
@@ -42,6 +43,23 @@ btCollisionShape* make_shape(const BodySpec& b) {
       return new btConeShape(p[0], btScalar(2.0) * p[1]);
     case SHAPE_PLANE:
       return new btStaticPlaneShape(btVector3(p[0], p[1], p[2]), p[3]);
+    case SHAPE_MESH: {
+      // Same vertex/index data as this crate's TriangleMesh (generated from
+      // the shared scenes.json); btBvhTriangleMeshShape mirrors our BVH path.
+      btTriangleMesh* tm = new btTriangleMesh();
+      const btScalar* v = b.mesh->vertices;
+      const int* idx = b.mesh->indices;
+      for (int i = 0; i < b.mesh->num_triangles; ++i) {
+        const btScalar* a = v + 3 * idx[3 * i + 0];
+        const btScalar* c = v + 3 * idx[3 * i + 1];
+        const btScalar* e = v + 3 * idx[3 * i + 2];
+        tm->addTriangle(btVector3(a[0], a[1], a[2]),
+                        btVector3(c[0], c[1], c[2]),
+                        btVector3(e[0], e[1], e[2]));
+      }
+      meshes.push_back(std::unique_ptr<btTriangleMesh>(tm));
+      return new btBvhTriangleMeshShape(tm, true);
+    }
   }
   return nullptr;
 }
@@ -82,11 +100,12 @@ int main(int argc, char** argv) {
   // --- Build bodies (owned here; world references them until it is destroyed
   // first, which the declaration order guarantees) ---
   std::vector<std::unique_ptr<btCollisionShape>> shapes;
+  std::vector<std::unique_ptr<btTriangleMesh>> mesh_storage;
   std::vector<std::unique_ptr<btMotionState>> motions;
   std::vector<std::unique_ptr<btRigidBody>> bodies;
   for (int i = 0; i < spec->num_bodies; ++i) {
     const BodySpec& b = spec->bodies[i];
-    shapes.push_back(std::unique_ptr<btCollisionShape>(make_shape(b)));
+    shapes.push_back(std::unique_ptr<btCollisionShape>(make_shape(b, mesh_storage)));
     btCollisionShape* shape = shapes.back().get();
     motions.push_back(std::unique_ptr<btMotionState>(
         new btDefaultMotionState(btTransform(btQuaternion(0, 0, 0, 1),
@@ -99,6 +118,13 @@ int main(int argc, char** argv) {
     btRigidBody* body = bodies.back().get();
     body->setFriction(b.friction);
     body->setRestitution(b.restitution);
+    if (!b.is_static) {
+      body->setLinearVelocity(btVector3(b.velocity[0], b.velocity[1], b.velocity[2]));
+      if (b.ccd_on) {
+        body->setCcdMotionThreshold(b.ccd_motion_threshold);
+        body->setCcdSweptSphereRadius(b.ccd_swept_sphere_radius);
+      }
+    }
     world.addRigidBody(body);
   }
 

@@ -62,22 +62,37 @@ fn main() {
                     c as Real,
                 )
             }
+            ShapeSpec::Mesh(verts, idx) => {
+                let vertices: Vec<Vector3> = verts
+                    .chunks(3)
+                    .map(|c| Vector3::new(c[0] as Real, c[1] as Real, c[2] as Real))
+                    .collect();
+                let indices: Vec<[u32; 3]> = idx
+                    .chunks(3)
+                    .map(|t| [t[0], t[1], t[2]])
+                    .collect();
+                CollisionShape::triangle_mesh(vertices, indices)
+            }
         };
-        let body = if b.is_static {
-            RigidBody::new_static(shape, Vector3::new(
-                b.position[0] as Real, b.position[1] as Real, b.position[2] as Real,
-            ))
+        let position = Vector3::new(
+            b.position[0] as Real, b.position[1] as Real, b.position[2] as Real,
+        );
+        let mut body = if b.is_static {
+            RigidBody::new_static(shape, position)
         } else {
-            RigidBody::new_dynamic(
-                shape,
-                Vector3::new(
-                    b.position[0] as Real, b.position[1] as Real, b.position[2] as Real,
-                ),
-                b.mass as Real,
-            )
-            .friction(b.friction as Real)
-            .restitution(b.restitution as Real)
+            RigidBody::new_dynamic(shape, position, b.mass as Real)
+                .friction(b.friction as Real)
+                .restitution(b.restitution as Real)
+                .velocity(Vector3::new(
+                    b.velocity[0] as Real, b.velocity[1] as Real, b.velocity[2] as Real,
+                ))
         };
+        if !b.is_static && b.ccd_on {
+            body = body.ccd(
+                b.ccd_motion_threshold as Real,
+                b.ccd_swept_sphere_radius as Real,
+            );
+        }
         world.add_body(body);
         if spec.record.iter().any(|r| *r == b.name) {
             record_idx.push(i);

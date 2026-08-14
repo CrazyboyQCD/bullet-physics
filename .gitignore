@@ -8,3 +8,8 @@
 /refs/bullet3/
 # Python bytecode
 /tools/__pycache__/
+
+# Parity scene tables are generated from tools/scenes.json (single source of truth)
+/tools/bullet_scenes.h
+/crates/bullet/src/parity_scenes.rs
+/tools/_vcvars_env.bat

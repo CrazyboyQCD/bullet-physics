@@ -23,15 +23,18 @@ C_HEADER = os.path.join(ROOT, "tools", "bullet_scenes.h")
 # example; record_scenes.rs pulls it in with #[path].
 RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "parity_scenes.rs")
 
-SHAPE_TYPES = {"box", "sphere", "capsule", "cylinder", "cone", "plane"}
+SHAPE_TYPES = {"box", "sphere", "capsule", "cylinder", "cone", "plane", "mesh"}
 SHAPE_ENUM = {"box": "SHAPE_BOX", "sphere": "SHAPE_SPHERE", "capsule": "SHAPE_CAPSULE",
-              "cylinder": "SHAPE_CYLINDER", "cone": "SHAPE_CONE", "plane": "SHAPE_PLANE"}
+              "cylinder": "SHAPE_CYLINDER", "cone": "SHAPE_CONE", "plane": "SHAPE_PLANE",
+              "mesh": "SHAPE_MESH"}
 
 
 def shape_params(shape):
     """Flatten a shape dict into (type, [params...]) with the union layout:
     box: 3 half extents; sphere: radius; capsule/cylinder/cone: radius,
-    half_height; plane: normal xyz + constant. Padded to 6 floats."""
+    half_height; plane: normal xyz + constant. Padded to 6 floats. Mesh bodies
+    carry their geometry in a dedicated MeshSpec; the params array stays
+    all-zero so the union layout still parses."""
     t = shape["type"]
     if t == "box":
         return t, list(shape["half_extents"])
@@ -41,7 +44,42 @@ def shape_params(shape):
         return t, [shape["radius"], shape["half_height"]]
     if t == "plane":
         return t, list(shape["normal"]) + [shape["constant"]]
+    if t == "mesh":
+        return t, [0.0] * 6
     raise ValueError(f"unknown shape type {t!r}")
+
+
+def mesh_vertices(shape):
+    """Expand a height-grid mesh spec into (nx, nz, vertices) where vertices is
+    a flat [x, y, z] list in z-major order (index z*nx + x) - the same vertex
+    order as the falling_mesh demo, so the two engines build identical
+    geometry."""
+    nx, nz = shape["grid"]
+    ox, oz = shape["origin"]
+    dx, dz = shape["cell"]
+    heights = shape["heights"]
+    if len(heights) != nx * nz:
+        raise ValueError(f"mesh heights: expected {nx * nz} values, got {len(heights)}")
+    verts = []
+    for z in range(nz):
+        for x in range(nx):
+            h = heights[z * nx + x]
+            verts.extend([ox + x * dx, h, oz + z * dz])
+    return nx, nz, verts
+
+
+def mesh_indices(nx, nz):
+    """Triangle indices for the height grid with the falling_mesh demo winding
+    ([v00, v11, v10] / [v00, v01, v11], +Y face normals on a flat grid)."""
+    idx = []
+    for z in range(nz - 1):
+        for x in range(nx - 1):
+            v00 = z * nx + x
+            v10 = v00 + 1
+            v01 = v00 + nx
+            v11 = v01 + 1
+            idx.extend([v00, v11, v10, v00, v01, v11])
+    return idx
 
 
 def fmt(v, precision=9):
@@ -60,7 +98,14 @@ def gen_c(scenes):
         "",
         "#include \"btBulletDynamicsCommon.h\"",
         "",
-        "enum ShapeType { SHAPE_BOX, SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_CYLINDER, SHAPE_CONE, SHAPE_PLANE };",
+        "enum ShapeType { SHAPE_BOX, SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_CYLINDER, SHAPE_CONE, SHAPE_PLANE, SHAPE_MESH };",
+        "",
+        "struct MeshSpec {",
+        "  int num_vertices;",
+        "  const btScalar* vertices;  // num_vertices * 3 (x y z)",
+        "  int num_triangles;",
+        "  const int* indices;        // num_triangles * 3",
+        "};",
         "",
         "struct BodySpec {",
         "  const char* name;",
@@ -69,6 +114,10 @@ def gen_c(scenes):
         "  btScalar pos[3];",
         "  btScalar mass, friction, restitution;",
         "  int is_static;",
+        "  btScalar velocity[3];",
+        "  int ccd_on;",
+        "  btScalar ccd_motion_threshold, ccd_swept_sphere_radius;",
+        "  const MeshSpec* mesh;  // non-null only for SHAPE_MESH",
         "};",
         "",
         "struct SceneSpec {",
@@ -85,6 +134,19 @@ def gen_c(scenes):
         "",
     ]
     for name, sc in scenes.items():
+        # Emit mesh geometry first so the body specs can reference it.
+        for b in sc["bodies"]:
+            if b["shape"]["type"] != "mesh":
+                continue
+            nx, nz, verts = mesh_vertices(b["shape"])
+            idx = mesh_indices(nx, nz)
+            vs = ", ".join(f"btScalar({fmt(x)})" for x in verts)
+            is_ = ", ".join(str(i) for i in idx)
+            lines.append(f"static const btScalar k{name}_{b['name']}_verts[] = {{ {vs} }};")
+            lines.append(f"static const int k{name}_{b['name']}_idx[] = {{ {is_} }};")
+            lines.append(f"static const MeshSpec k{name}_{b['name']}_mesh = "
+                         f"{{ {len(verts) // 3}, k{name}_{b['name']}_verts, "
+                         f"{len(idx) // 3}, k{name}_{b['name']}_idx }};")
         lines.append(f"static const BodySpec k{name}_bodies[] = {{")
         for b in sc["bodies"]:
             t, params = shape_params(b["shape"])
@@ -98,8 +160,17 @@ def gen_c(scenes):
                 fr = fmt(b.get("friction", 0.5))
                 re = fmt(b.get("restitution", 0.0))
             st = 1 if b.get("mass", 0.0) == 0 else 0
+            vel = b.get("velocity", [0.0, 0.0, 0.0])
+            vel_s = ", ".join(f"btScalar({fmt(x)})" for x in vel)
+            ccd = b.get("ccd")
+            ccd_on = 1 if ccd else 0
+            ccd_mt = ccd.get("motion_threshold", 0.0) if ccd else 0.0
+            ccd_sr = ccd.get("swept_sphere_radius", 0.0) if ccd else 0.0
+            mesh_ref = f"&k{name}_{b['name']}_mesh" if t == "mesh" else "nullptr"
             lines.append(f"  {{\"{b['name']}\", {SHAPE_ENUM[t]}, {{{p}}}, {{{pos}}}, "
-                         f"btScalar({mass}), btScalar({fr}), btScalar({re}), {st}}},")
+                         f"btScalar({mass}), btScalar({fr}), btScalar({re}), {st}, "
+                         f"{{{vel_s}}}, {ccd_on}, btScalar({fmt(ccd_mt)}), "
+                         f"btScalar({fmt(ccd_sr)}), {mesh_ref}}},")
         lines.append("};")
         lines.append("")
         rec = ", ".join(f"\"{r}\"" for r in sc["record"])
@@ -133,6 +204,7 @@ def gen_rs(scenes):
         "    Cylinder(f32, f32),",
         "    Cone(f32, f32),",
         "    Plane([f32; 4]),",
+        "    Mesh(&'static [f32], &'static [u32]),",
         "}",
         "",
         "pub struct BodySpec {",
@@ -143,6 +215,10 @@ def gen_rs(scenes):
         "    pub friction: f32,",
         "    pub restitution: f32,",
         "    pub is_static: bool,",
+        "    pub velocity: [f32; 3],",
+        "    pub ccd_on: bool,",
+        "    pub ccd_motion_threshold: f32,",
+        "    pub ccd_swept_sphere_radius: f32,",
         "}",
         "",
         "pub struct SceneSpec {",
@@ -169,8 +245,15 @@ def gen_rs(scenes):
             elif t in ("capsule", "cylinder", "cone"):
                 cap = t[0].upper() + t[1:]
                 shape = f"ShapeSpec::{cap}({fmt(params[0])}, {fmt(params[1])})"
-            else:
+            elif t == "plane":
                 shape = f"ShapeSpec::Plane([{', '.join(fmt(x) for x in params)}])"
+            else:  # mesh
+                _, _, verts = mesh_vertices(b["shape"])
+                nx, nz = b["shape"]["grid"]
+                idx = mesh_indices(nx, nz)
+                vs = ", ".join(fmt(x) for x in verts)
+                is_ = ", ".join(str(i) for i in idx)
+                shape = f"ShapeSpec::Mesh(&[{vs}], &[{is_}])"
             pos = f"[{', '.join(fmt(x) for x in b['position'])}]"
             mass = fmt(b.get("mass", 0.0))
             if b.get("mass", 0.0) == 0:
@@ -178,9 +261,17 @@ def gen_rs(scenes):
             else:
                 fr, re = fmt(b.get("friction", 0.5)), fmt(b.get("restitution", 0.0))
                 st = "false"
+            vel = b.get("velocity", [0.0, 0.0, 0.0])
+            vel_s = ", ".join(fmt(x) for x in vel)
+            ccd = b.get("ccd")
+            ccd_on = "true" if ccd else "false"
+            ccd_mt = ccd.get("motion_threshold", 0.0) if ccd else 0.0
+            ccd_sr = ccd.get("swept_sphere_radius", 0.0) if ccd else 0.0
             lines.append(f"            BodySpec {{ name: \"{b['name']}\", shape: {shape}, "
                          f"position: {pos}, mass: {mass}, friction: {fr}, restitution: {re}, "
-                         f"is_static: {st} }},")
+                         f"is_static: {st}, velocity: [{vel_s}], ccd_on: {ccd_on}, "
+                         f"ccd_motion_threshold: {fmt(ccd_mt)}, "
+                         f"ccd_swept_sphere_radius: {fmt(ccd_sr)} }},")
         lines.append("        ],")
         rec = ", ".join(f"\"{r}\"" for r in sc["record"])
         dt_num, dt_den = sc["dt"]
@@ -207,6 +298,12 @@ def main():
             if b.get("mass", 0.0) == 0 and "friction" in b and b["friction"] != 0.5:
                 print(f"warning: {name}/{b['name']}: static body friction {b['friction']} "
                       f"differs from default 0.5; static friction is not set via shape spec", file=sys.stderr)
+            if b["shape"]["type"] == "mesh":
+                try:
+                    mesh_vertices(b["shape"])
+                except ValueError as e:
+                    print(f"error: {name}/{b['name']}: {e}", file=sys.stderr)
+                    return 1
     with open(C_HEADER, "w", encoding="utf-8", newline="\n") as f:
         f.write(gen_c(scenes))
     with open(RS_TABLE, "w", encoding="utf-8", newline="\n") as f:
