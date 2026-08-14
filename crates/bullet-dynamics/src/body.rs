@@ -272,6 +272,50 @@ impl RigidBody {
         bullet_math::inertia_tensor_world(self.inv_inertia_local, self.orientation)
     }
 
+    /// Mass in kilograms (`1 / inv_mass`); infinite for static bodies.
+    #[inline]
+    pub fn mass(&self) -> Real {
+        if self.inv_mass == 0.0 {
+            Real::INFINITY
+        } else {
+            1.0 / self.inv_mass
+        }
+    }
+
+    /// Apply an impulse at a world-space point offset from the center of mass
+    /// (Bullet's `applyImpulse`): an instant velocity change
+    /// `Δv = impulse · inv_mass` and `Δω = inv_inertia_world · (rel_pos ×
+    /// impulse)`. Unlike `apply_force`, this does not wake the body up — it is
+    /// a raw velocity change, matching Bullet.
+    #[inline]
+    pub fn apply_impulse(&mut self, impulse: Vector3, rel_pos: Vector3) {
+        if self.inv_mass == 0.0 {
+            return;
+        }
+        self.linear_velocity += impulse * self.inv_mass;
+        self.angular_velocity += self.inv_inertia_world() * rel_pos.cross(impulse);
+    }
+
+    /// Velocity of the point at offset `rel_pos` from the center of mass
+    /// (Bullet's `getVelocityInLocalPoint`):
+    /// `linear_velocity + angular_velocity × rel_pos`.
+    #[inline]
+    pub fn velocity_at_local_point(&self, rel_pos: Vector3) -> Vector3 {
+        self.linear_velocity + self.angular_velocity.cross(rel_pos)
+    }
+
+    /// Effective mass (inverse of the constraint diagonal) along `normal` at
+    /// the world-space point `pos` (Bullet's
+    /// `computeImpulseDenominator`): the denominator `1/jacDiagAB` of a
+    /// unilateral impulse constraint at that point, `inv_mass + nᵀ·(I⁻¹·(r×n))×r`.
+    #[inline]
+    pub fn compute_impulse_denominator(&self, pos: Vector3, normal: Vector3) -> Real {
+        let r0 = pos - self.position;
+        let c0 = r0.cross(normal);
+        let vec = (self.inv_inertia_world() * c0).cross(r0);
+        self.inv_mass + normal.dot(vec)
+    }
+
     /// Accumulate a force applied at the center of mass.
     ///
     /// Applying a force wakes the body up, like Bullet's `applyCentralForce`.
@@ -343,6 +387,7 @@ impl RigidBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_relative_eq;
 
     /// A body with deactivation disabled must never fall asleep, no matter how
     /// long it rests below the sleeping thresholds (Bullet's `updateDeactivation`
@@ -384,5 +429,50 @@ mod tests {
         }
         assert_eq!(body.activation_state(), ActivationState::WantsDeactivation);
         assert!(body.wants_deactivation());
+    }
+
+    /// An impulse at the center of mass only changes the linear velocity; an
+    /// off-center impulse also spins the body (Bullet's `applyImpulse`).
+    #[test]
+    fn apply_impulse_changes_velocity() {
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 2.0);
+        body.apply_impulse(Vector3::new(4.0, 0.0, 0.0), Vector3::ZERO);
+        assert_relative_eq!(body.linear_velocity.x, 2.0, epsilon = 1e-6);
+        assert_eq!(body.angular_velocity, Vector3::ZERO);
+        // Off-center impulse adds angular velocity around r × j.
+        body.apply_impulse(Vector3::new(0.0, 2.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
+        assert_relative_eq!(body.linear_velocity.y, 1.0, epsilon = 1e-6);
+        assert!(body.angular_velocity.length() > 0.0);
+        // Static bodies ignore impulses.
+        let mut static_body = RigidBody::new_static(CollisionShape::sphere(0.5), Vector3::ZERO);
+        static_body.apply_impulse(Vector3::new(1.0, 0.0, 0.0), Vector3::ZERO);
+        assert_eq!(static_body.linear_velocity, Vector3::ZERO);
+    }
+
+    /// `velocity_at_local_point` = linear velocity + ω × r (Bullet's
+    /// `getVelocityInLocalPoint`).
+    #[test]
+    fn velocity_at_local_point_adds_rotation() {
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0);
+        body.linear_velocity = Vector3::new(1.0, 2.0, 0.0);
+        body.angular_velocity = Vector3::new(0.0, 0.0, 2.0);
+        let v = body.velocity_at_local_point(Vector3::new(0.0, 0.0, 3.0));
+        assert_relative_eq!(v.x, 1.0, epsilon = 1e-6);
+        assert_relative_eq!(v.y, 2.0, epsilon = 1e-6);
+        assert_relative_eq!(v.z, 0.0, epsilon = 1e-6);
+    }
+
+    /// `compute_impulse_denominator` is positive for dynamic bodies and zero
+    /// for static ones (Bullet's `computeImpulseDenominator`).
+    #[test]
+    fn compute_impulse_denominator_is_positive() {
+        let body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 2.0);
+        let denom = body.compute_impulse_denominator(Vector3::new(0.0, 0.5, 0.0), Vector3::Y);
+        assert!(denom > 0.0);
+        let static_body = RigidBody::new_static(CollisionShape::sphere(0.5), Vector3::ZERO);
+        assert_eq!(
+            static_body.compute_impulse_denominator(Vector3::new(0.0, 0.5, 0.0), Vector3::Y),
+            0.0
+        );
     }
 }

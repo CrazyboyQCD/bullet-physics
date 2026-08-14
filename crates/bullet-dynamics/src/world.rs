@@ -100,8 +100,25 @@ impl PhysicsWorld {
     /// `ClosestRayResultCallback`. The AABB test is conservative, so the
     /// result is identical to testing every body.
     pub fn raycast_closest(&self, ray_from: Vector3, ray_to: Vector3) -> Option<(usize, RayHit)> {
+        self.raycast_closest_excluding(ray_from, ray_to, None)
+    }
+
+    /// Like [`raycast_closest`](Self::raycast_closest) but never reports
+    /// `ignore` (the raycast vehicle's wheel rays, which must not hit their
+    /// own chassis). Bullet skips the chassis implicitly because its
+    /// interior-start rays miss; we report interior starts (deviation §1), so
+    /// the exclusion is explicit here.
+    pub fn raycast_closest_excluding(
+        &self,
+        ray_from: Vector3,
+        ray_to: Vector3,
+        ignore: Option<usize>,
+    ) -> Option<(usize, RayHit)> {
         let mut best: Option<(usize, RayHit)> = None;
         for i in self.broadphase.raycast_candidates(ray_from, ray_to) {
+            if Some(i) == ignore {
+                continue;
+            }
             let body = &self.bodies[i];
             if let Some(hit) = raycast::raycast(
                 &body.shape,

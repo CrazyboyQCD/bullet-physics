@@ -27,6 +27,6 @@ pub use bullet_collision::shapes;
 pub mod prelude {
     pub use bullet_collision::raycast::RayHit;
     pub use bullet_collision::shapes::CollisionShape;
-    pub use bullet_dynamics::{KinematicCharacterController, PhysicsWorld, RigidBody};
+    pub use bullet_dynamics::{KinematicCharacterController, PhysicsWorld, RaycastVehicle, RigidBody, VehicleTuning};
     pub use bullet_math::{Quaternion, Real, Vector3};
 }
