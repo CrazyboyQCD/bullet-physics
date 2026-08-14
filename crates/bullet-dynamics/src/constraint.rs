@@ -790,8 +790,8 @@ fn adjust_angle_to_limits(angle: Real, lo: Real, hi: Real) -> Real {
 /// storage). glam stores columns, so Bullet's `mat[i][j]` is
 /// `m.col(j)[i]`; the extraction is ported verbatim (the signs are
 /// consistent with the constraint rows built from these angles — do not
-/// "fix" them).
-fn euler_xyz(m: &Matrix3) -> Vector3 {
+/// "fix" them). Also used by the multibody fixed/slider constraints.
+pub(crate) fn euler_xyz(m: &Matrix3) -> Vector3 {
     // Bullet's `mat[2][0]`, `mat[2][1]`, `mat[1][0]`, ... in glam's column
     // storage (row i, column j = `m.col(j)[i]`).
     let r20 = m.col(0).z; // mat[2][0]

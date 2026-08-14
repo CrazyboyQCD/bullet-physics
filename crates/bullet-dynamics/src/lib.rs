@@ -4,6 +4,7 @@
 pub mod body;
 pub mod character;
 pub mod constraint;
+pub mod multibody;
 pub mod solver;
 pub mod vehicle;
 pub mod world;
@@ -16,5 +17,6 @@ pub use constraint::{
     Point2PointConstraint, RotationalLimitMotor, SliderConstraint, SliderMotor,
     TranslationalLimitMotor,
 };
+pub use multibody::{MultiBody, MultiBodyConstraint, MultiBodyWorld};
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
 pub use world::PhysicsWorld;
