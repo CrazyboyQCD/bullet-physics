@@ -4,7 +4,9 @@
 //! can be diffed numerically.
 //!
 //! Usage: `cargo run -p bullet --example multibody_probe -- <scene> [frames]`
-//! with scene in {free_base, pendulum, two_link, p2p, motor, fixed}.
+//! with scene in {free_base, pendulum, two_link, p2p, motor, fixed,
+//! prismatic, spherical, planar, gear, joint_limit, spherical_limit,
+//! spherical_motor}.
 
 use bullet::dynamics::multibody::constraint::MultiBodyConstraint;
 use bullet::dynamics::MultiBody;
@@ -27,6 +29,9 @@ fn main() {
         "spherical" => scene_spherical(dt, frames),
         "planar" => scene_planar(dt, frames),
         "gear" => scene_gear(dt, frames),
+        "joint_limit" => scene_joint_limit(dt, frames),
+        "spherical_limit" => scene_spherical_limit(dt, frames),
+        "spherical_motor" => scene_spherical_motor(dt, frames),
         other => {
             eprintln!("unknown scene {other}");
             std::process::exit(1);
@@ -327,6 +332,100 @@ fn scene_gear(dt: Real, frames: usize) {
             a.joint_vel_multidof(0)[0],
             b.joint_pos_multidof(0)[0],
             b.joint_vel_multidof(0)[0]
+        );
+    }
+}
+
+fn scene_joint_limit(dt: Real, frames: usize) {
+    let mut world = MultiBodyWorld::new();
+    world.set_gravity(Vector3::ZERO);
+    let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+    body.setup_revolute(
+        0,
+        1.0,
+        Vector3::ONE,
+        None,
+        Quaternion::IDENTITY,
+        Vector3::Z,
+        Vector3::ZERO,
+        Vector3::new(1.0, 0.0, 0.0),
+    );
+    body.finalize_multidof();
+    body.set_joint_pos_multidof(0, &[0.25]);
+    body.set_joint_vel_multidof(0, &[2.0]);
+    let ib = world.add_multibody(body);
+    let snapshot = world.multibodies().to_vec();
+    let limit = MultiBodyConstraint::joint_limit(ib, 0, -0.3, 0.3, &snapshot);
+    world.add_constraint(limit);
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let body = world.multibody(ib);
+        println!("{f} {:.6} {:.6}", body.joint_pos_multidof(0)[0], body.joint_vel_multidof(0)[0]);
+    }
+}
+
+fn scene_spherical_limit(dt: Real, frames: usize) {
+    let mut world = MultiBodyWorld::new();
+    world.set_gravity(Vector3::ZERO);
+    let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+    body.setup_spherical(
+        0,
+        1.0,
+        Vector3::ONE,
+        None,
+        Quaternion::IDENTITY,
+        Vector3::ZERO,
+        Vector3::new(0.0, 0.0, -1.0),
+    );
+    body.finalize_multidof();
+    let half = bullet::math::FRAC_PI_2 / 3.0;
+    let q = [half.sin(), 0.0, 0.0, half.cos()];
+    body.set_joint_pos_multidof(0, &q);
+    let ib = world.add_multibody(body);
+    let snapshot = world.multibodies().to_vec();
+    let limit = MultiBodyConstraint::spherical_joint_limit(ib, 0, 0.3, 0.3, 0.5, 100.0, &snapshot);
+    world.add_constraint(limit);
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let body = world.multibody(ib);
+        let jp = body.joint_pos_multidof(0);
+        let jv = body.joint_vel_multidof(0);
+        println!(
+            "{f} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
+            jp[0], jp[1], jp[2], jp[3], jv[0], jv[1], jv[2]
+        );
+    }
+}
+
+fn scene_spherical_motor(dt: Real, frames: usize) {
+    let mut world = MultiBodyWorld::new();
+    world.set_gravity(Vector3::ZERO);
+    let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+    body.setup_spherical(
+        0,
+        1.0,
+        Vector3::ONE,
+        None,
+        Quaternion::IDENTITY,
+        Vector3::ZERO,
+        Vector3::new(0.0, 0.0, -1.0),
+    );
+    body.finalize_multidof();
+    let half = bullet::math::FRAC_PI_2 / 3.0;
+    let q = [half.sin(), 0.0, 0.0, half.cos()];
+    body.set_joint_pos_multidof(0, &q);
+    let ib = world.add_multibody(body);
+    let snapshot = world.multibodies().to_vec();
+    let motor = MultiBodyConstraint::spherical_joint_motor(ib, 0, 100.0, &snapshot);
+    world.add_constraint(motor);
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let body = world.multibody(ib);
+        let jp = body.joint_pos_multidof(0);
+        let jv = body.joint_vel_multidof(0);
+        println!(
+            "{f} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
+            jp[0], jp[1], jp[2], jp[3], jv[0], jv[1], jv[2]
         );
     }
 }

@@ -21,6 +21,9 @@
 #include <BulletDynamics/Featherstone/btMultiBodyFixedConstraint.h>
 #include <BulletDynamics/Featherstone/btMultiBodyJointMotor.h>
 #include <BulletDynamics/Featherstone/btMultiBodyGearConstraint.h>
+#include <BulletDynamics/Featherstone/btMultiBodyJointLimitConstraint.h>
+#include <BulletDynamics/Featherstone/btMultiBodySphericalJointLimit.h>
+#include <BulletDynamics/Featherstone/btMultiBodySphericalJointMotor.h>
 
 static const btScalar DT = btScalar(1) / btScalar(60);
 static const int DEFAULT_FRAMES = 300;
@@ -292,11 +295,92 @@ static void scene_gear(int frames)
 	}
 }
 
+// Scene 11: a fixed-base revolute joint with a joint limit [-0.3, 0.3];
+// released inside with a velocity toward the upper bound so the limit stops
+// the motion and the joint bounces between the bounds (no damping).
+static void scene_joint_limit(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	world->setGravity(btVector3(0, 0, 0));
+	btMultiBody* body = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	body->setupRevolute(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+						btVector3(0, 0, 1), btVector3(0, 0, 0), btVector3(1, 0, 0));
+	body->finalizeMultiDof();
+	btScalar q = 0.25;
+	body->setJointPosMultiDof(0, &q);
+	btScalar qd = 2;
+	body->setJointVelMultiDof(0, &qd);
+	world->addMultiBody(body);
+	addColliders(world, body);
+	btMultiBodyJointLimitConstraint* limit = new btMultiBodyJointLimitConstraint(body, 0, -0.3, 0.3);
+	world->addMultiBodyConstraint(limit);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		printf("%d %.6f %.6f\n", f, body->getJointPos(0), body->getJointVel(0));
+	}
+}
+
+// Scene 12: a fixed-base spherical joint with a swing/twist limit; the joint
+// is tilted 60 degrees about X, far outside the 0.3 rad swing range, and the
+// limit pulls the swing back inside the cone.
+static void scene_spherical_limit(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	world->setGravity(btVector3(0, 0, 0));
+	btMultiBody* body = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	body->setupSpherical(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+						 btVector3(0, 0, 0), btVector3(0, 0, -1));
+	body->finalizeMultiDof();
+	btScalar q[4] = {btSin(SIMD_HALF_PI / 3), 0, 0, btCos(SIMD_HALF_PI / 3)};
+	body->setJointPosMultiDof(0, q);
+	world->addMultiBody(body);
+	addColliders(world, body);
+	btMultiBodySphericalJointLimit* limit = new btMultiBodySphericalJointLimit(body, 0, 0.3, 0.3, 0.5, 100);
+	world->addMultiBodyConstraint(limit);
+	const btScalar* jp = body->getJointPosMultiDof(0);
+	const btScalar* jv = body->getJointVelMultiDof(0);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		jp = body->getJointPosMultiDof(0);
+		jv = body->getJointVelMultiDof(0);
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n", f, jp[0], jp[1], jp[2], jp[3], jv[0], jv[1], jv[2]);
+	}
+}
+
+// Scene 13: a fixed-base spherical joint driven by a spherical motor back to
+// the identity orientation from a 60 degree tilt about X.
+static void scene_spherical_motor(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	world->setGravity(btVector3(0, 0, 0));
+	btMultiBody* body = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	body->setupSpherical(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+						 btVector3(0, 0, 0), btVector3(0, 0, -1));
+	body->finalizeMultiDof();
+	btScalar q[4] = {btSin(SIMD_HALF_PI / 3), 0, 0, btCos(SIMD_HALF_PI / 3)};
+	body->setJointPosMultiDof(0, q);
+	world->addMultiBody(body);
+	addColliders(world, body);
+	btMultiBodySphericalJointMotor* motor = new btMultiBodySphericalJointMotor(body, 0, 100);
+	world->addMultiBodyConstraint(motor);
+	const btScalar* jp = body->getJointPosMultiDof(0);
+	const btScalar* jv = body->getJointVelMultiDof(0);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		jp = body->getJointPosMultiDof(0);
+		jv = body->getJointVelMultiDof(0);
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n", f, jp[0], jp[1], jp[2], jp[3], jv[0], jv[1], jv[2]);
+	}
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s <free_base|pendulum|two_link|p2p|motor|fixed|prismatic|spherical|planar|gear> [frames]\n", argv[0]);
+		fprintf(stderr, "usage: %s <free_base|pendulum|two_link|p2p|motor|fixed|prismatic|spherical|planar|gear|joint_limit|spherical_limit|spherical_motor> [frames]\n", argv[0]);
 		return 1;
 	}
 	const char* scene = argv[1];
@@ -321,6 +405,12 @@ int main(int argc, char** argv)
 		scene_planar(frames);
 	else if (!strcmp(scene, "gear"))
 		scene_gear(frames);
+	else if (!strcmp(scene, "joint_limit"))
+		scene_joint_limit(frames);
+	else if (!strcmp(scene, "spherical_limit"))
+		scene_spherical_limit(frames);
+	else if (!strcmp(scene, "spherical_motor"))
+		scene_spherical_motor(frames);
 	else
 	{
 		fprintf(stderr, "unknown scene %s\n", scene);
