@@ -53,11 +53,16 @@ pub fn convex_convex(
         return None;
     }
 
-    // Witness points: the farthest point of A along the normal and of B along
-    // -normal. Their midpoint is the contact position.
+    // Contact position: the witness point on B, `pointOnB = supportA(normal) -
+    // normal * depth`, matching `btGjkPairDetector::getClosestPoints`
+    // (`btGjkEpa2::Penetration`'s `witnesses[1]` under our A->B normal
+    // convention). The previous midpoint-of-supports formula used B's *global*
+    // support along -normal, which for a large shape (e.g. a mesh triangle)
+    // lies far from the overlap; the resulting contact position was garbage,
+    // wrecking the solver's torque arms (found by the `mesh` parity scene:
+    // bodies neither tumbled nor rolled downhill like Bullet's).
     let point_a = shape_a.support_world(position_a, orientation_a, normal);
-    let point_b = shape_b.support_world(position_b, orientation_b, -normal);
-    let position = (point_a + point_b) * 0.5;
+    let position = point_a - normal * depth;
     Some(ContactManifold::from_points(vec![ContactPoint::new(
         position,
         normal,
