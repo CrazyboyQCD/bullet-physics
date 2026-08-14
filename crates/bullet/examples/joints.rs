@@ -74,6 +74,36 @@ fn main() {
     ));
     world.body_mut(lower).linear_velocity = Vector3::new(2.0, 0.0, 0.0);
 
+    // A hinged door at z = 6: opened 60° around a vertical hinge and
+    // released, it swings down and is stopped by its ±40° angular limits.
+    let anchor_c = world.add_body(RigidBody::new_static(
+        CollisionShape::box_shape(Vector3::splat(0.2)),
+        Vector3::new(0.0, 2.0, 6.0),
+    ));
+    let door = world.add_body(RigidBody::new_dynamic(
+        CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.2)),
+        Vector3::ZERO,
+        2.0,
+    ));
+    let a60 = (std::f32::consts::PI / 3.0) as Real;
+    world.body_mut(door).position = Vector3::new(a60.cos() * 0.5, a60.sin() * 0.5 + 2.0, 6.0);
+    world
+        .body_mut(door)
+        .orientation = Quaternion::from_rotation_z(a60);
+    let mut door_hinge = Constraint::hinge(
+        door,
+        anchor_c,
+        Vector3::new(-0.5, 0.0, 0.0),
+        Vector3::Z,
+        Vector3::ZERO,
+        Vector3::Z,
+    );
+    door_hinge
+        .kind_mut()
+        .hinge_mut()
+        .set_limit(-0.7, 0.7);
+    world.add_constraint(door_hinge);
+
     // Verify the pivots are initially satisfied: the upper bob top is at the
     // anchor pivot (0, 2.5, 2), the lower bob top at the upper bob bottom.
     {
@@ -89,6 +119,7 @@ fn main() {
     let dt: Real = 1.0 / 60.0;
     let mut max_pivot_err: Real = 0.0;
     let mut min_lower_x: Real = Real::INFINITY;
+    let mut door_min_angle: Real = Real::INFINITY;
     println!("t     bob.x    bob.y    lower.x  lower.y  pivot_err");
     for step in 0..900 {
         world.step_simulation(dt);
@@ -109,6 +140,10 @@ fn main() {
         .length();
         max_pivot_err = max_pivot_err.max(e1).max(e2).max(e3);
         min_lower_x = min_lower_x.min(l.position.x);
+        // The door's hinge angle: starts at +60° and is stopped by the ±40°
+        // limits (0.7 rad).
+        let door_angle = world.constraint(3).kind().hinge().hinge_angle();
+        door_min_angle = door_min_angle.min(door_angle);
         if step % 60 == 0 {
             println!(
                 "{:.2}  {:.3}  {:.3}  {:.3}  {:.3}  {:.4}",
@@ -123,20 +158,34 @@ fn main() {
     }
 
     // Behaviors verified: the pendulum bob swung past the bottom (x crossed
-    // zero, reaching the far side), the double pendulum swung too, and all
-    // pivots stayed on their anchors within the Baumgarte residual.
+    // zero, reaching the far side), the double pendulum swung too, all pivots
+    // stayed on their anchors within the Baumgarte residual, and the hinged
+    // door was stopped by its angular limits (never swinging past 0.7 rad).
     let bob_b = world.body(bob);
     let l = world.body(lower);
+    let door_angle = world.constraint(3).kind().hinge().hinge_angle();
     println!(
-        "final bob = ({:.2}, {:.2}), lower = ({:.2}, {:.2}), max pivot err = {:.4}, min lower x = {:.2}",
+        "final bob = ({:.2}, {:.2}), lower = ({:.2}, {:.2}), max pivot err = {:.4}, min lower x = {:.2}, door angle = {:.2}",
         bob_b.position.x,
         bob_b.position.y,
         l.position.x,
         l.position.y,
         max_pivot_err,
-        min_lower_x
+        min_lower_x,
+        door_angle
     );
     assert!(max_pivot_err < 0.2, "pivot error too large: {max_pivot_err}");
     assert!(min_lower_x < -0.5, "double pendulum did not swing: {min_lower_x}");
-    println!("OK: pendulum and double pendulum swing on their joints.");
+    // The door starts at +60° (past the +0.7 limit) and swings down; the low
+    // limit at −0.7 stops it, so it must never pass −0.75 and must settle on
+    // the limit.
+    assert!(
+        door_min_angle > -0.75,
+        "hinged door passed the low limit: min angle {door_min_angle}"
+    );
+    assert!(
+        (door_angle + 0.7).abs() < 0.05,
+        "hinged door did not settle on its limit: {door_angle}"
+    );
+    println!("OK: pendulums swing on point-to-point joints and the door swings into its hinge limit.");
 }
