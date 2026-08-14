@@ -334,7 +334,7 @@ impl PhysicsWorld {
         // from the current (pre-integration) poses, like Bullet's
         // `convertJoints` after `predictUnconstraintMotion`.
         let mut joint_rows: Vec<ConstraintRow> = Vec::new();
-        for c in &self.constraints {
+        for c in &mut self.constraints {
             constraint::prepare_rows(c, &self.bodies, inv_dt, BAUMGARTE, &mut joint_rows);
         }
 

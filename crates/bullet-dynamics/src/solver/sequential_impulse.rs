@@ -56,54 +56,67 @@ pub struct ContactConstraint {
     push_impulse: Real,
 }
 
-/// Bounds on the accumulated impulse of a bilateral constraint row (Bullet's
-/// `m_lowerLimit` / `m_upperLimit`; the P2P default leaves them infinite, an
-/// optional `m_impulseClamp` makes them symmetric).
+/// Bounds on the accumulated impulse of a constraint row (Bullet's
+/// `m_lowerLimit` / `m_upperLimit`; the defaults leave them infinite, an
+/// optional `m_impulseClamp` makes them symmetric, and hinge limits/motors
+/// clamp one or both ends).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RowLimits {
     /// `[-inf, +inf]`: a plain equality row (Bullet's default for joints).
     Unbounded,
-    /// `[-clamp, clamp]` (Bullet's `btConstraintSetting::m_impulseClamp`).
+    /// `[-clamp, +clamp]` (Bullet's `btConstraintSetting::m_impulseClamp`
+    /// and the hinge motor's `m_maxMotorImpulse`).
     Bilateral(Real),
-    /// `[0, +inf]`: a unilateral row (contacts); kept for completeness.
-    Unilateral,
+    /// `[lower, +inf]` (a hinge low limit, and contacts' non-negative
+    /// normal impulse).
+    LowerBounded(Real),
+    /// `[-inf, upper]` (a hinge high limit).
+    UpperBounded(Real),
 }
 
 /// One solver row of a joint constraint (Bullet's `btSolverConstraint`
-/// flattened for the non-contact pool): a bilateral equality along `normal`
-/// at the world pivot points `r_a`/`r_b` from each body's COM, driven by the
-/// position-error bias. Joint rows share the contact iteration loop (Bullet's
-/// `solveGroupCacheFriendly` solves both pools).
+/// flattened for the non-contact pool): a bilateral equality with the
+/// jacobian `(lin_a, ang_a)` on body A and `(lin_b, ang_b)` on body B,
+/// measured as `J·v = (lin_b·v_b + ang_b·ω_b) − (lin_a·v_a + ang_a·ω_a)` and
+/// driven by the position-error bias. Joint rows share the contact iteration
+/// loop (Bullet's `solveGroupCacheFriendly` solves both pools).
 pub struct ConstraintRow {
     body_a: usize,
     body_b: usize,
-    normal: Vector3,
-    r_a: Vector3,
-    r_b: Vector3,
+    /// Linear jacobian on body A (the impulse applies `−lin_a·λ`).
+    lin_a: Vector3,
+    /// Angular jacobian on body A (the impulse applies `−invI_a·ang_a·λ`).
+    ang_a: Vector3,
+    /// Linear jacobian on body B (the impulse applies `+lin_b·λ`).
+    lin_b: Vector3,
+    /// Angular jacobian on body B (the impulse applies `+invI_b·ang_b·λ`).
+    ang_b: Vector3,
     inv_mass_a: Real,
     inv_mass_b: Real,
     inv_inertia_a: Matrix3,
     inv_inertia_b: Matrix3,
+    /// Inverse effective mass along the row: `1 / K` with
+    /// `K = Σ J·(M⁻¹·Jᵀ)` over both bodies.
     mass: Real,
-    /// Velocity target: `k 路 (pivotA 鈭?pivotB) 路 n` with `k = fps 路 erp`
-    /// (Bullet's `m_constraintError`, pre-scaled by the ERP/fps and built
-    /// into `m_rhs` at `convertJoint`).
+    /// Velocity target for `J·v` (Bullet's `m_constraintError`, built into
+    /// `m_rhs` at `convertJoint`).
     bias: Real,
     limits: RowLimits,
     impulse: Real,
 }
 
 impl ConstraintRow {
-    /// Build a bilateral row along `normal` at the given lever arms (Bullet's
+    /// Build a bilateral row from the per-body jacobians (Bullet's
     /// `convertJoint`): the effective mass from both bodies, the bias from
     /// the caller's position error, and the impulse clamp.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         body_a: usize,
         body_b: usize,
-        normal: Vector3,
-        r_a: Vector3,
-        r_b: Vector3,
+        lin_a: Vector3,
+        ang_a: Vector3,
+        lin_b: Vector3,
+        ang_b: Vector3,
         a: &RigidBody,
         b: &RigidBody,
         bias: Real,
@@ -111,23 +124,23 @@ impl ConstraintRow {
     ) -> Self {
         let inv_inertia_a = a.inv_inertia_world();
         let inv_inertia_b = b.inv_inertia_world();
-        let mass = effective_mass(
-            a.inv_mass(),
-            b.inv_mass(),
-            &inv_inertia_a,
-            &inv_inertia_b,
-            r_a,
-            r_b,
-            normal,
-        );
+        let inv_mass_a = a.inv_mass();
+        let inv_mass_b = b.inv_mass();
+        // K = J·(M⁻¹·Jᵀ): linear + angular contributions of both bodies.
+        let k = inv_mass_a * lin_a.length_squared()
+            + inv_mass_b * lin_b.length_squared()
+            + ang_a.dot(inv_inertia_a * ang_a)
+            + ang_b.dot(inv_inertia_b * ang_b);
+        let mass = if k > 0.0 { 1.0 / k } else { 0.0 };
         Self {
             body_a,
             body_b,
-            normal,
-            r_a,
-            r_b,
-            inv_mass_a: a.inv_mass(),
-            inv_mass_b: b.inv_mass(),
+            lin_a,
+            ang_a,
+            lin_b,
+            ang_b,
+            inv_mass_a,
+            inv_mass_b,
             inv_inertia_a,
             inv_inertia_b,
             mass,
@@ -387,24 +400,24 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
 fn solve_joint_row(bodies: &mut [RigidBody], c: &mut ConstraintRow) {
     let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
 
-    let va = a.linear_velocity + a.angular_velocity.cross(c.r_a);
-    let vb = b.linear_velocity + b.angular_velocity.cross(c.r_b);
-    let vn = (vb - va).dot(c.normal);
+    let row_vel = (c.lin_b.dot(b.linear_velocity) + c.ang_b.dot(b.angular_velocity))
+        - (c.lin_a.dot(a.linear_velocity) + c.ang_a.dot(a.angular_velocity));
 
-    let lambda = c.mass * (c.bias - vn);
+    let lambda = c.mass * (c.bias - row_vel);
     let old = c.impulse;
     let new = match c.limits {
         RowLimits::Unbounded => old + lambda,
         RowLimits::Bilateral(clamp) => (old + lambda).clamp(-clamp, clamp),
-        RowLimits::Unilateral => (old + lambda).max(0.0),
+        RowLimits::LowerBounded(lower) => (old + lambda).max(lower),
+        RowLimits::UpperBounded(upper) => (old + lambda).min(upper),
     };
     c.impulse = new;
     let j = new - old;
     if j != 0.0 {
-        a.linear_velocity -= c.normal * (j * c.inv_mass_a);
-        b.linear_velocity += c.normal * (j * c.inv_mass_b);
-        a.angular_velocity -= c.inv_inertia_a * (c.r_a.cross(c.normal * j));
-        b.angular_velocity += c.inv_inertia_b * (c.r_b.cross(c.normal * j));
+        a.linear_velocity -= c.lin_a * (j * c.inv_mass_a);
+        b.linear_velocity += c.lin_b * (j * c.inv_mass_b);
+        a.angular_velocity -= c.inv_inertia_a * (c.ang_a * j);
+        b.angular_velocity += c.inv_inertia_b * (c.ang_b * j);
     }
 }
 

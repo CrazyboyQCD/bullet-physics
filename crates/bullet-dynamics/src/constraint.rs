@@ -22,7 +22,7 @@
 //! true)`, a [`Constraint`] suppresses collision response between its two
 //! bodies by default ([`Constraint::set_disable_collisions`]).
 
-use bullet_math::{Real, Vector3};
+use bullet_math::{Matrix3, Quaternion, Real, Vector3};
 
 use crate::body::RigidBody;
 use crate::solver::sequential_impulse::{ConstraintRow, RowLimits};
@@ -35,6 +35,10 @@ pub enum ConstraintKind {
     /// `pivot_b` (on body B); both are given in their body's
     /// center-of-mass frame (Bullet's `btPoint2PointConstraint`).
     Point2Point(Point2PointConstraint),
+    /// Revolute (hinge) joint: keep the pivots coincident *and* the hinge
+    /// axes parallel, with optional angular limits and a motor around the
+    /// axis (Bullet's `btHingeConstraint`).
+    Hinge(HingeConstraint),
 }
 
 impl ConstraintKind {
@@ -42,6 +46,23 @@ impl ConstraintKind {
     pub fn point2point_mut(&mut self) -> &mut Point2PointConstraint {
         match self {
             ConstraintKind::Point2Point(p2p) => p2p,
+            ConstraintKind::Hinge(_) => panic!("not a point-to-point constraint"),
+        }
+    }
+
+    /// Access to the [`HingeConstraint`] parameters.
+    pub fn hinge(&self) -> &HingeConstraint {
+        match self {
+            ConstraintKind::Hinge(hinge) => hinge,
+            ConstraintKind::Point2Point(_) => panic!("not a hinge constraint"),
+        }
+    }
+
+    /// Mutable access to the [`HingeConstraint`] parameters.
+    pub fn hinge_mut(&mut self) -> &mut HingeConstraint {
+        match self {
+            ConstraintKind::Hinge(hinge) => hinge,
+            ConstraintKind::Point2Point(_) => panic!("not a hinge constraint"),
         }
     }
 }
@@ -83,6 +104,33 @@ impl Constraint {
                 impulse_clamp: 0.0,
                 erp: None,
             }),
+            body_a,
+            body_b,
+            enabled: true,
+            disable_collisions: true,
+        }
+    }
+
+    /// A hinge (revolute) joint: the pivots `pivot_a`/`pivot_b` (in each
+    /// body's center-of-mass frame) stay coincident and the hinge axes
+    /// `axis_a`/`axis_b` (in each body's frame) stay parallel, so the bodies
+    /// can only rotate around the axis (Bullet's
+    /// `btHingeConstraint(rbA, rbB, pivotInA, pivotInB, axisInA, axisInB)`).
+    ///
+    /// The constraint frames are built with a deterministic perpendicular
+    /// basis around each axis (see [`HingeConstraint`]); unlike Bullet, the
+    /// zero-angle reference is not aligned to body A's initial X axis, so
+    /// limit angles are measured from the assembly-time axes.
+    pub fn hinge(
+        body_a: usize,
+        body_b: usize,
+        pivot_a: Vector3,
+        axis_a: Vector3,
+        pivot_b: Vector3,
+        axis_b: Vector3,
+    ) -> Self {
+        Self {
+            kind: ConstraintKind::Hinge(HingeConstraint::new(pivot_a, axis_a, pivot_b, axis_b)),
             body_a,
             body_b,
             enabled: true,
@@ -157,12 +205,418 @@ impl Point2PointConstraint {
     }
 }
 
+/// A frame attached to a joint body: the pivot (`origin`) and the basis in
+/// the body's center-of-mass frame. The Z column of `basis` is the hinge
+/// axis; X and Y span the hinge-angle reference plane (Bullet's
+/// `m_rbAFrame` / `m_rbBFrame`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JointFrame {
+    /// Pivot point in the body's center-of-mass frame.
+    pub origin: Vector3,
+    /// Basis in the body's center-of-mass frame; column 2 is the hinge axis.
+    pub basis: Matrix3,
+}
+
+impl JointFrame {
+    pub fn new(origin: Vector3, basis: Matrix3) -> Self {
+        Self { origin, basis }
+    }
+
+    /// The hinge axis (the frame's Z column) in the body frame.
+    pub fn axis(&self) -> Vector3 {
+        self.basis.col(2)
+    }
+}
+
+/// Angular limits of a hinge around its axis (Bullet's `btAngularLimit`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AngularLimit {
+    /// Lower limit, in radians.
+    pub low: Real,
+    /// Upper limit, in radians. `low > high` deactivates the limit.
+    pub high: Real,
+    /// Limit softness (Bullet's `m_softness`, default 0.9); kept for API
+    /// compatibility — the current row formulation does not use it.
+    pub softness: Real,
+    /// Position-correction factor on the limit bias (Bullet's
+    /// `m_biasFactor`, default 0.3).
+    pub bias_factor: Real,
+    /// Bounce restitution at the limit (Bullet's `m_relaxationFactor`;
+    /// 1.0 = no bounce, 0.0 = fully elastic).
+    pub relaxation_factor: Real,
+}
+
+impl AngularLimit {
+    /// A hinge angle limit in radians (Bullet's `setLimit` with the default
+    /// softness 0.9, bias factor 0.3, relaxation factor 1.0). `low > high`
+    /// deactivates the limit.
+    pub fn new(low: Real, high: Real) -> Self {
+        Self {
+            low,
+            high,
+            softness: 0.9,
+            bias_factor: 0.3,
+            relaxation_factor: 1.0,
+        }
+    }
+
+    pub fn set(
+        &mut self,
+        low: Real,
+        high: Real,
+        softness: Real,
+        bias_factor: Real,
+        relaxation_factor: Real,
+    ) {
+        self.low = low;
+        self.high = high;
+        self.softness = softness;
+        self.bias_factor = bias_factor;
+        self.relaxation_factor = relaxation_factor;
+    }
+
+    /// Test `angle` against the limit (Bullet's `test`): returns the
+    /// correction (signed distance back into range), the limit sign (+1 low,
+    /// − high) and whether the limit is active.
+    fn test(&self, angle: Real) -> (Real, Real, bool) {
+        let half_range = (self.high - self.low) / 2.0;
+        if half_range >= 0.0 {
+            let center = normalize_angle(self.low + half_range);
+            let deviation = normalize_angle(angle - center);
+            if deviation < -half_range {
+                return (-(deviation + half_range), 1.0, true);
+            }
+            if deviation > half_range {
+                return (half_range - deviation, -1.0, true);
+            }
+        }
+        (0.0, 0.0, false)
+    }
+}
+
+/// A hinge motor: rotates the joint at `target_velocity` rad/s around the
+/// axis, limited to `max_impulse` per step (Bullet's `enableAngularMotor`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HingeMotor {
+    /// Target angular velocity around the hinge axis, rad/s.
+    pub target_velocity: Real,
+    /// Maximum motor impulse per step (Bullet's `m_maxMotorImpulse`).
+    pub max_impulse: Real,
+}
+
+/// A revolute (hinge) joint (Bullet's `btHingeConstraint`, using the classic
+/// `getInfo2Internal` formulation): three linear pivot rows, two angular rows
+/// keeping the hinge axes parallel, and an optional limit/motor row around
+/// the axis.
+///
+/// Deviations from Bullet (see `docs/bullet-deviations.md`): the frames are
+/// built with a deterministic perpendicular basis around the given axes (the
+/// zero-angle reference is not aligned to body A's initial X axis), and the
+/// modern frame-offset formulation of the linear rows is not used.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HingeConstraint {
+    /// Hinge frame on body A (pivot + basis in A's COM frame).
+    pub frame_a: JointFrame,
+    /// Hinge frame on body B (pivot + basis in B's COM frame).
+    pub frame_b: JointFrame,
+    /// Skip the three linear pivot rows, keeping only the axis alignment
+    /// (Bullet's `setAngularOnly`).
+    pub angular_only: bool,
+    /// Angular limits around the hinge axis (Bullet's `setLimit`).
+    pub limit: Option<AngularLimit>,
+    /// Hinge motor (Bullet's `enableAngularMotor`).
+    pub motor: Option<HingeMotor>,
+    /// Per-step state: the current hinge angle (Bullet's `m_hingeAngle`).
+    pub hinge_angle: Real,
+    limit_correction: Real,
+    limit_sign: Real,
+    solve_limit: bool,
+}
+
+impl HingeConstraint {
+    /// Build the constraint frames from pivots and axes in each body's frame
+    /// (Bullet's pivot/axis constructor). The perpendicular basis is chosen
+    /// deterministically: `t1` perpendicular to `axis_a`, `t2 = axis_a 脳 t1`,
+    /// and frame B's basis is frame A's rotated by the shortest arc from
+    /// `axis_a` to `axis_b`.
+    pub fn new(
+        pivot_a: Vector3,
+        axis_a: Vector3,
+        pivot_b: Vector3,
+        axis_b: Vector3,
+    ) -> Self {
+        let axis_a = axis_a.normalize();
+        let axis_b = axis_b.normalize();
+        let t1 = axis_a
+            .cross(if axis_a.x.abs() < 0.9 { Vector3::X } else { Vector3::Y })
+            .normalize();
+        let t2 = axis_a.cross(t1);
+        let basis_a = Matrix3::from_cols(t1, t2, axis_a);
+        // Rotate the basis so its Z aligns with axis_b (Bullet's
+        // `shortestArcQuat`); X follows, Y is rebuilt orthogonal.
+        let rotation = Quaternion::from_rotation_arc(axis_a, axis_b);
+        let t1_b = rotation * t1;
+        let t2_b = axis_b.cross(t1_b);
+        let basis_b = Matrix3::from_cols(t1_b, t2_b, axis_b);
+        Self {
+            frame_a: JointFrame::new(pivot_a, basis_a),
+            frame_b: JointFrame::new(pivot_b, basis_b),
+            angular_only: false,
+            limit: None,
+            motor: None,
+            hinge_angle: 0.0,
+            limit_correction: 0.0,
+            limit_sign: 0.0,
+            solve_limit: false,
+        }
+    }
+
+    /// The current hinge angle in radians (Bullet's `getHingeAngle`), updated
+    /// by the last solve step.
+    pub fn hinge_angle(&self) -> Real {
+        self.hinge_angle
+    }
+
+    /// Set angular limits around the axis (Bullet's `setLimit`); `low > high`
+    /// deactivates them.
+    pub fn set_limit(&mut self, low: Real, high: Real) {
+        self.limit = Some(AngularLimit::new(low, high));
+    }
+
+    /// Enable the hinge motor (Bullet's `enableAngularMotor`).
+    pub fn enable_motor(&mut self, target_velocity: Real, max_impulse: Real) {
+        self.motor = Some(HingeMotor {
+            target_velocity,
+            max_impulse,
+        });
+    }
+
+    /// Disable the hinge motor.
+    pub fn disable_motor(&mut self) {
+        self.motor = None;
+    }
+
+    /// Flatten this hinge into its solver rows (Bullet's `getInfo2Internal`).
+    fn prepare_rows(
+        &mut self,
+        body_a: usize,
+        body_b: usize,
+        bodies: &[RigidBody],
+        inv_dt: Real,
+        erp: Real,
+        out: &mut Vec<ConstraintRow>,
+    ) {
+        let a = &bodies[body_a];
+        let b = &bodies[body_b];
+        // World-space frames (Bullet's `trA = transA · m_rbAFrame`).
+        let tr_a = Matrix3::from_quat(a.orientation) * self.frame_a.basis;
+        let tr_b = Matrix3::from_quat(b.orientation) * self.frame_b.basis;
+        let pivot_a = a.position + a.orientation * self.frame_a.origin;
+        let pivot_b = b.position + b.orientation * self.frame_b.origin;
+        let r_a = pivot_a - a.position;
+        let r_b = pivot_b - b.position;
+        // Hinge axis (Z) and its perpendiculars (X, Y) of frame A.
+        let ax1 = tr_a.col(2);
+        let p = tr_a.col(0);
+        let q = tr_a.col(1);
+        let ax2 = tr_b.col(2);
+        let k = inv_dt * erp;
+
+        // Linear pivot rows (Bullet's `m_J1linearAxis` = 卤e_j), unless the
+        // joint is angular-only.
+        if !self.angular_only {
+            for axis in 0..3 {
+                let mut normal = Vector3::ZERO;
+                normal[axis] = 1.0;
+                out.push(ConstraintRow::prepare(
+                    body_a,
+                    body_b,
+                    normal,
+                    r_a.cross(normal),
+                    normal,
+                    r_b.cross(normal),
+                    a,
+                    b,
+                    k * (pivot_a - pivot_b)[axis],
+                    RowLimits::Unbounded,
+                ));
+            }
+        }
+
+        // Two angular rows keeping the hinge axes parallel: drive the
+        // relative spin around p and q to zero, with a bias proportional to
+        // the misalignment u = ax1 脳 ax2 (Bullet's rows 3-4).
+        let u = ax1.cross(ax2);
+        out.push(ConstraintRow::prepare(
+            body_a,
+            body_b,
+            Vector3::ZERO,
+            p,
+            Vector3::ZERO,
+            p,
+            a,
+            b,
+            -k * u.dot(p),
+            RowLimits::Unbounded,
+        ));
+        out.push(ConstraintRow::prepare(
+            body_a,
+            body_b,
+            Vector3::ZERO,
+            q,
+            Vector3::ZERO,
+            q,
+            a,
+            b,
+            -k * u.dot(q),
+            RowLimits::Unbounded,
+        ));
+
+        // The limit/motor row around the hinge axis (Bullet's row 5).
+        self.hinge_angle = get_hinge_angle(&tr_a, &tr_b);
+        let (correction, sign, solve) = self
+            .limit
+            .as_ref()
+            .map(|l| l.test(self.hinge_angle))
+            .unwrap_or((0.0, 0.0, false));
+        self.limit_correction = correction;
+        self.limit_sign = sign;
+        self.solve_limit = solve;
+
+        let powered = self.motor.is_some();
+        if solve || powered {
+            // Bullet's row error (in its `v = (ωA −ωB)·axis` convention);
+            // our mirrored row negates it.
+            let mut row_error: Real = 0.0;
+            let lostop = self.limit.map(|l| l.low).unwrap_or(1.0);
+            let histop = self.limit.map(|l| l.high).unwrap_or(-1.0);
+            let mut motor_ineffective = false;
+            if solve && lostop == histop {
+                motor_ineffective = true;
+            }
+            if powered && !motor_ineffective {
+                let motor = self.motor.as_ref().unwrap();
+                let mot_fact = get_motor_factor(
+                    self.hinge_angle,
+                    lostop,
+                    histop,
+                    motor.target_velocity,
+                    inv_dt * erp,
+                );
+                row_error += mot_fact * motor.target_velocity;
+            }
+            if solve {
+                row_error += k * correction;
+                // Bounce: only for incoming velocities, and only if it
+                // exceeds the current error (Bullet's bounce block).
+                let bounce = self.limit.map(|l| l.relaxation_factor).unwrap_or(1.0);
+                if bounce > 0.0 {
+                    let vel = a.angular_velocity.dot(ax1) - b.angular_velocity.dot(ax1);
+                    if sign > 0.0 {
+                        if vel < 0.0 {
+                            let newc = -bounce * vel;
+                            if newc > row_error {
+                                row_error = newc;
+                            }
+                        }
+                    } else if vel > 0.0 {
+                        let newc = -bounce * vel;
+                        if newc < row_error {
+                            row_error = newc;
+                        }
+                    }
+                }
+                row_error *= self.limit.map(|l| l.bias_factor).unwrap_or(1.0);
+            }
+
+            let limits = if solve {
+                if lostop == histop {
+                    RowLimits::Unbounded
+                } else if sign > 0.0 {
+                    // Low limit: mirrored clamp of Bullet's [0, +inf].
+                    RowLimits::UpperBounded(0.0)
+                } else {
+                    RowLimits::LowerBounded(0.0)
+                }
+            } else {
+                RowLimits::Bilateral(self.motor.map(|m| m.max_impulse).unwrap_or(0.0))
+            };
+            out.push(ConstraintRow::prepare(
+                body_a,
+                body_b,
+                Vector3::ZERO,
+                ax1,
+                Vector3::ZERO,
+                ax1,
+                a,
+                b,
+                -row_error,
+                limits,
+            ));
+        }
+    }
+}
+
+/// The hinge angle between two world frames (Bullet's `getHingeAngle` with
+/// `m_referenceSign = +1`): the rotation of frame B's Y axis around frame A's
+/// Z axis.
+fn get_hinge_angle(tr_a: &Matrix3, tr_b: &Matrix3) -> Real {
+    let ref_axis0 = tr_a.col(0);
+    let ref_axis1 = tr_a.col(1);
+    let swing_axis = tr_b.col(1);
+    swing_axis.dot(ref_axis0).atan2(swing_axis.dot(ref_axis1))
+}
+
+/// Wrap an angle into `[-蟺, 蟺]` (Bullet's `btNormalizeAngle`).
+fn normalize_angle(angle: Real) -> Real {
+    let two_pi = 2.0 * bullet_math::PI;
+    let mut a = angle % two_pi; // truncating, like `btFmod`.
+    if a < -bullet_math::PI {
+        a += two_pi;
+    } else if a > bullet_math::PI {
+        a -= two_pi;
+    }
+    a
+}
+
+/// Motor factor fading the motor near the limits (Bullet's
+/// `btTypedConstraint::getMotorFactor`).
+fn get_motor_factor(pos: Real, low_lim: Real, upp_lim: Real, vel: Real, time_fact: Real) -> Real {
+    if low_lim > upp_lim {
+        return 1.0;
+    }
+    if low_lim == upp_lim {
+        return 0.0;
+    }
+    let delta_max = vel / time_fact;
+    if delta_max < 0.0 {
+        if pos >= low_lim && pos < low_lim - delta_max {
+            (low_lim - pos) / delta_max
+        } else if pos < low_lim {
+            0.0
+        } else {
+            1.0
+        }
+    } else if delta_max > 0.0 {
+        if pos <= upp_lim && pos > upp_lim - delta_max {
+            (upp_lim - pos) / delta_max
+        } else if pos > upp_lim {
+            0.0
+        } else {
+            1.0
+        }
+    } else {
+        0.0
+    }
+}
+
 /// Flatten a [`Constraint`] into its solver rows for this step (Bullet's
 /// `getInfo1` + `getInfo2` + `convertJoint`). Rows are appended to `out`.
 /// `inv_dt` is `1 / dt` (Bullet's `info2.fps`); `erp` is the global ERP
-/// (Bullet's `infoGlobal.m_erp`, 0.2).
+/// (Bullet's `infoGlobal.m_erp`, 0.2). Joints with per-step state (the hinge
+/// angle and limit test) update it here, before the solve.
 pub fn prepare_rows(
-    constraint: &Constraint,
+    constraint: &mut Constraint,
     bodies: &[RigidBody],
     inv_dt: Real,
     erp: Real,
@@ -171,7 +625,7 @@ pub fn prepare_rows(
     if !constraint.enabled {
         return;
     }
-    match &constraint.kind {
+    match &mut constraint.kind {
         ConstraintKind::Point2Point(p2p) => {
             let a = &bodies[constraint.body_a];
             let b = &bodies[constraint.body_b];
@@ -189,7 +643,7 @@ pub fn prepare_rows(
                 RowLimits::Unbounded
             };
             // Three orthogonal rows along the world axes (Bullet's
-            // `m_J1linearAxis` = ±e_j with the skew-symmetric angular
+            // `m_J1linearAxis` = 卤e_j with the skew-symmetric angular
             // jacobians built from the lever arms).
             for axis in 0..3 {
                 let mut normal = Vector3::ZERO;
@@ -198,8 +652,9 @@ pub fn prepare_rows(
                     constraint.body_a,
                     constraint.body_b,
                     normal,
-                    r_a,
-                    r_b,
+                    r_a.cross(normal),
+                    normal,
+                    r_b.cross(normal),
                     a,
                     b,
                     // bias = k · (pivotA − pivotB) · n (see module docs for
@@ -209,6 +664,16 @@ pub fn prepare_rows(
                     limits,
                 ));
             }
+        }
+        ConstraintKind::Hinge(hinge) => {
+            hinge.prepare_rows(
+                constraint.body_a,
+                constraint.body_b,
+                bodies,
+                inv_dt,
+                erp,
+                out,
+            );
         }
     }
 }
@@ -380,6 +845,147 @@ mod tests {
                 );
         }
         assert!(max_err < 0.2, "chain pivots drifted: {max_err}");
+    }
+
+    /// A door hinged at its edge swings like a pendulum around the vertical
+    /// hinge axis: the pivot stays on the anchor, the hinge axes stay
+    /// parallel, and the hinge angle oscillates.
+    #[test]
+    fn hinge_swings_and_keeps_axis_aligned() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        let anchor = world.add_body(RigidBody::new_static(
+            CollisionShape::box_shape(Vector3::splat(0.2)),
+            Vector3::ZERO,
+        ));
+        // A door (box) hinged at its edge (local (-0.5,0,0)) to the anchor
+        // at the origin, opened 45° around the vertical (Z) hinge.
+        let door = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.2)),
+            Vector3::new(0.0, 0.5, 0.0),
+            2.0,
+        ));
+        let a45 = std::f32::consts::FRAC_PI_4 as Real;
+        world.body_mut(door).position = Vector3::new(a45.cos() * 0.5, a45.sin() * 0.5, 0.0);
+        world.body_mut(door).orientation = Quaternion::from_rotation_z(a45);
+        // Hinge: the door's edge (local (-0.5,0,0)) pinned to the anchor
+        // pivot at the origin, axis (0,0,1) on both bodies.
+        let hinge = Constraint::hinge(
+            door,
+            anchor,
+            Vector3::new(-0.5, 0.0, 0.0),
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::Z,
+        );
+        world.add_constraint(hinge);
+
+        let mut max_pivot_err: Real = 0.0;
+        let mut min_align: Real = 1.0;
+        let mut max_angle: Real = 0.0;
+        let mut zero_crossings = 0;
+        let mut prev_angle = 0.0;
+        for step in 0..600 {
+            world.step_simulation(DT);
+            let d = world.body(door);
+            let pivot = d.position + d.orientation * Vector3::new(-0.5, 0.0, 0.0);
+            max_pivot_err = max_pivot_err.max(pivot.length());
+            // Hinge axes: the door's local Z rotated to world, the anchor's Z.
+            let ax1 = d.orientation * Vector3::Z;
+            min_align = min_align.min(ax1.dot(Vector3::Z).abs());
+            let angle = world.constraint(0).kind().hinge().hinge_angle();
+            max_angle = max_angle.max(angle.abs());
+            if step > 0 && prev_angle > 0.0 && angle <= 0.0 {
+                zero_crossings += 1;
+            }
+            prev_angle = angle;
+        }
+        assert!(max_pivot_err < 0.2, "door pivot drifted: {max_pivot_err}");
+        assert!(min_align > 0.99, "hinge axes misaligned: {min_align}");
+        assert!(max_angle > 0.5, "door barely swung: max angle {max_angle}");
+        assert!(zero_crossings >= 3, "door did not oscillate: {zero_crossings} crossings");
+    }
+
+    /// A door with angular limits stops at the limit instead of swinging
+    /// through: the hinge angle never exceeds the range and settles on it.
+    #[test]
+    fn hinge_limit_stops_the_door() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        let anchor = world.add_body(RigidBody::new_static(
+            CollisionShape::box_shape(Vector3::splat(0.2)),
+            Vector3::ZERO,
+        ));
+        let door = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.2)),
+            Vector3::ZERO,
+            2.0,
+        ));
+        // Open the door 45° (well past the 30° limit) and release it.
+        let a45 = std::f32::consts::FRAC_PI_4 as Real;
+        world.body_mut(door).position = Vector3::new(a45.cos() * 0.5, a45.sin() * 0.5, 0.0);
+        world.body_mut(door).orientation = Quaternion::from_rotation_z(a45);
+        let mut hinge = Constraint::hinge(
+            door,
+            anchor,
+            Vector3::new(-0.5, 0.0, 0.0),
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::Z,
+        );
+        hinge.kind_mut().hinge_mut().set_limit(-0.3, 0.3);
+        world.add_constraint(hinge);
+        let mut min_angle: Real = 0.0;
+        for _ in 0..600 {
+            world.step_simulation(DT);
+            let angle = world.constraint(0).kind().hinge().hinge_angle();
+            min_angle = min_angle.min(angle);
+        }
+        // The door starts at +45° (past the +0.3 limit, so the initial state
+        // violates it by construction) and swings down under gravity; the
+        // low limit at −0.3 stops it. It must never swing past the low limit
+        // and must settle resting on it.
+        assert!(min_angle > -0.35, "door passed the low limit: {min_angle}");
+        let final_angle = world.constraint(0).kind().hinge().hinge_angle();
+        assert!(
+            (final_angle + 0.3).abs() < 0.05,
+            "door did not settle on the low limit: {final_angle}"
+        );
+    }
+
+    /// A motorized hinge rotates the door at the target angular velocity.
+    #[test]
+    fn hinge_motor_rotates_the_door() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let anchor = world.add_body(RigidBody::new_static(
+            CollisionShape::box_shape(Vector3::splat(0.2)),
+            Vector3::ZERO,
+        ));
+        let door = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.2)),
+            Vector3::new(0.5, 0.0, 0.0),
+            2.0,
+        ));
+        let mut hinge = Constraint::hinge(
+            door,
+            anchor,
+            Vector3::new(-0.5, 0.0, 0.0),
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::Z,
+        );
+        hinge.kind_mut().hinge_mut().enable_motor(1.0, 1000.0);
+        world.add_constraint(hinge);
+        for _ in 0..180 {
+            world.step_simulation(DT);
+        }
+        // 3 s at 1 rad/s ≈ 3 rad of rotation.
+        let angle = world.constraint(0).kind().hinge().hinge_angle();
+        assert!(
+            (angle - 3.0).abs() < 1.0,
+            "motor did not rotate the door at 1 rad/s: {angle}"
+        );
     }
 
     /// Two overlapping boxes linked by a joint do not push each other apart
