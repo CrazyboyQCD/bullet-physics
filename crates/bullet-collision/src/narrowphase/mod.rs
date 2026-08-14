@@ -7,10 +7,13 @@ use crate::shapes::{CollisionShape, Compound};
 mod box_box;
 mod convex_convex;
 mod convex_mesh;
+mod convex_sweep;
 pub mod epa;
 pub mod gjk;
 mod plane;
 mod sphere;
+
+pub use convex_sweep::{swept_sphere_cast, SweepHit};
 
 /// Detect collision between two shapes and generate a contact manifold.
 ///
