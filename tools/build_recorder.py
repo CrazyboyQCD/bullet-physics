@@ -20,10 +20,28 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS = os.path.join(ROOT, "tools")
 VCVARS = r"D:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 SRC = os.path.join(TOOLS, "bullet_record.cpp")
-EXE = os.path.join(TOOLS, "bullet_record.exe")
-OBJ = os.path.join(TOOLS, "bullet_record.obj")
-LIB_DIR = os.path.join(ROOT, "target", "bullet3-build", "lib", "Release")
-LIBS = [os.path.join(LIB_DIR, n) for n in ("LinearMath.lib", "BulletCollision.lib", "BulletDynamics.lib")]
+
+# Two Bullet builds may coexist: target/bullet3-build (single precision,
+# BT_USE_DOUBLE_PRECISION off) and target/bullet3-build-double (double
+# precision). Each precision gets its own recorder exe so switching costs one
+# rebuild of the (tiny) recorder, not of Bullet.
+BUILD_DIRS = {
+    "f32": os.path.join(ROOT, "target", "bullet3-build"),
+    "f64": os.path.join(ROOT, "target", "bullet3-build-double"),
+}
+EXES = {"f32": os.path.join(TOOLS, "bullet_record.exe"),
+        "f64": os.path.join(TOOLS, "bullet_record_f64.exe")}
+OBJS = {"f32": os.path.join(TOOLS, "bullet_record.obj"),
+        "f64": os.path.join(TOOLS, "bullet_record_f64.obj")}
+
+
+def lib_dir(precision):
+    return os.path.join(BUILD_DIRS[precision], "lib", "Release")
+
+
+def libs(precision):
+    return [os.path.join(lib_dir(precision), n)
+            for n in ("LinearMath.lib", "BulletCollision.lib", "BulletDynamics.lib")]
 
 
 def msvc_env():
@@ -53,12 +71,17 @@ def msvc_env():
     return env
 
 
-def build():
-    """Compile bullet_record.cpp -> bullet_record.exe. Returns exit code."""
+def build(precision="f32"):
+    """Compile bullet_record.cpp -> bullet_record[_f64].exe against the Bullet
+    libs of the given precision. Returns exit code."""
+    if precision not in BUILD_DIRS:
+        print(f"error: unknown precision {precision!r}", file=sys.stderr)
+        return 1
+    exe, obj = EXES[precision], OBJS[precision]
     if not os.path.exists(VCVARS):
         print(f"error: vcvars64.bat not found at {VCVARS}", file=sys.stderr)
         return 1
-    for lib in LIBS:
+    for lib in libs(precision):
         if not os.path.exists(lib):
             print(f"error: {lib} missing; run tools/parity.py first (it builds "
                   f"the Bullet libs), or build them via CMake", file=sys.stderr)
@@ -71,13 +94,18 @@ def build():
     full_env.update(env)
 
     cmd = ["cl", "/nologo", "/O2", "/EHsc", "/std:c++17",
-           f"/Fo{OBJ}", f"/I{os.path.join(ROOT, 'refs', 'bullet3', 'src')}",
-           SRC, f"/Fe:{EXE}", "/link", *LIBS]
+           f"/Fo{obj}", f"/I{os.path.join(ROOT, 'refs', 'bullet3', 'src')}",
+           SRC, f"/Fe:{exe}", "/link", *libs(precision)]
+    # The double-precision Bullet build defines BT_USE_DOUBLE_PRECISION
+    # (btScalar = double); the recorder must compile with the same define so
+    # its symbols match the double libs.
+    if precision == "f64":
+        cmd.insert(cmd.index(SRC), "/DBT_USE_DOUBLE_PRECISION")
     print("+", " ".join(cmd))
     r = subprocess.run(cmd, env=full_env)
     # The .obj is a build artifact; remove it so the tools dir stays clean.
-    if os.path.exists(OBJ):
-        os.remove(OBJ)
+    if os.path.exists(obj):
+        os.remove(obj)
     if r.returncode != 0:
         print("error: cl failed", file=sys.stderr)
     return r.returncode
