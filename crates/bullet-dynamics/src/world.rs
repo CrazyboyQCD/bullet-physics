@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use bullet_collision::broadphase::{AxisSweep3, BroadPhase};
-use bullet_collision::narrowphase;
+use bullet_collision::manifold::ContactManifold;
+use bullet_collision::narrowphase::{self, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
 use crate::body::RigidBody;
-use bullet_math::{Quaternion, Real, Vector3};
+use bullet_math::{Aabb, Quaternion, Real, Vector3};
 use crate::solver::sequential_impulse::{self, ContactConstraint, SPLIT_TURN_ERP};
 
 /// Scale applied to a cached impulse before the warm-start pass (Bullet's
@@ -114,6 +115,94 @@ impl PhysicsWorld {
             }
         }
         best
+    }
+
+    /// Indices of bodies whose broad-phase AABB overlaps `aabb` (exact AABB
+    /// test; the caller then runs the narrow phase on the candidates).
+    pub fn aabb_candidates(&self, aabb: Aabb) -> Vec<usize> {
+        self.broadphase.aabb_candidates(aabb)
+    }
+
+    /// Closest convex sweep of `shape` from `from` to `to` against every body
+    /// except `ignore`, returning the hit body index and the closest hit.
+    ///
+    /// Mirrors `btCollisionWorld::convexSweep` feeding a
+    /// `ClosestConvexResultCallback` (the character controller's step
+    /// sweeps). The broad phase prunes bodies whose AABB does not touch the
+    /// swept AABB of the moving shape.
+    pub fn convex_sweep_closest(
+        &self,
+        shape: &bullet_collision::shapes::CollisionShape,
+        from: Vector3,
+        ori: Quaternion,
+        to: Vector3,
+        ignore: Option<usize>,
+    ) -> Option<(usize, SweepHit)> {
+        let swept = shape
+            .world_aabb(from, ori)
+            .merged(&shape.world_aabb(to, ori));
+        let mut best: Option<(usize, SweepHit)> = None;
+        for i in self.broadphase.aabb_candidates(swept) {
+            if Some(i) == ignore {
+                continue;
+            }
+            let body = &self.bodies[i];
+            if let Some(hit) = narrowphase::convex_cast(
+                shape,
+                from,
+                ori,
+                to,
+                &body.shape,
+                body.position,
+                body.orientation,
+            ) && best.is_none_or(|(_, b)| hit.fraction < b.fraction)
+            {
+                best = Some((i, hit));
+            }
+        }
+        best
+    }
+
+    /// Contact manifolds between `shape` at `pos`/`ori` and every body except
+    /// `ignore` (the character controller's touching contacts and penetration
+    /// recovery, mirroring a ghost object's overlapping-pair manifolds).
+    pub fn contact_test(
+        &self,
+        shape: &bullet_collision::shapes::CollisionShape,
+        pos: Vector3,
+        ori: Quaternion,
+        ignore: Option<usize>,
+    ) -> Vec<(usize, ContactManifold)> {
+        let aabb = shape.world_aabb(pos, ori);
+        let mut out = Vec::new();
+        for i in self.broadphase.aabb_candidates(aabb) {
+            if Some(i) == ignore {
+                continue;
+            }
+            let body = &self.bodies[i];
+            if let Some(m) = narrowphase::collide(
+                shape,
+                pos,
+                ori,
+                &body.shape,
+                body.position,
+                body.orientation,
+            ) {
+                out.push((i, m));
+            }
+        }
+        out
+    }
+
+    /// Set a body's pose directly and refresh its broad-phase AABB. Used by
+    /// the character controller to move its kinematic body; the solver still
+    /// treats the body as immovable (static bodies are never integrated).
+    pub fn set_body_transform(&mut self, index: usize, position: Vector3, orientation: Quaternion) {
+        let body = &mut self.bodies[index];
+        body.position = position;
+        body.orientation = orientation;
+        let aabb = body.shape.world_aabb(position, orientation);
+        self.broadphase.set_aabb(index, aabb);
     }
 
     /// Advance the simulation by `dt` seconds.
@@ -391,6 +480,92 @@ mod tests {
             Vector3::new(0.6, 0.6, 0.6),
         );
         assert!(hit.is_none());
+    }
+
+    #[test]
+    fn convex_sweep_closest_hits_the_nearer_body() {
+        let mut world = PhysicsWorld::new();
+        // Two boxes on the path: a near one (face at x = 3) and a far one
+        // (face at x = 4). The probe starts at x = 8 and travels -X, so the
+        // far box (closer to the start) is the closest hit.
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 1.0, 1.0)),
+            Vector3::new(2.0, 0.0, 0.0),
+        ));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 1.0, 1.0)),
+            Vector3::new(5.0, 0.0, 0.0),
+        ));
+        // Sweep a small box from x = 8 to x = -2 (length 10). The far box
+        // spans x in [4, 6]; its +X face at x = 6 is hit by the probe's -X
+        // face at x - 0.5: entry when x = 6.5, fraction (8 - 6.5) / 10 = 0.15.
+        let probe = bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5));
+        let (index, hit) = world
+            .convex_sweep_closest(
+                &probe,
+                Vector3::new(8.0, 0.0, 0.0),
+                Quaternion::IDENTITY,
+                Vector3::new(-2.0, 0.0, 0.0),
+                None,
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+        assert_relative_eq!(hit.fraction, (8.0 - 6.5) / 10.0, epsilon = 1e-4);
+        assert_relative_eq!(hit.normal.x, 1.0, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn convex_sweep_closest_can_ignore_a_body() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(1.0)),
+            Vector3::ZERO,
+        ));
+        let probe = bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5));
+        // Sweeping into the box: hit when not ignored...
+        assert!(world
+            .convex_sweep_closest(
+                &probe,
+                Vector3::new(5.0, 0.0, 0.0),
+                Quaternion::IDENTITY,
+                Vector3::new(0.0, 0.0, 0.0),
+                None,
+            )
+            .is_some());
+        // ...and a miss when the only body is ignored.
+        assert!(world
+            .convex_sweep_closest(
+                &probe,
+                Vector3::new(5.0, 0.0, 0.0),
+                Quaternion::IDENTITY,
+                Vector3::new(0.0, 0.0, 0.0),
+                Some(0),
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn contact_test_reports_overlapping_bodies() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(1.0)),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(1.0)),
+            Vector3::new(5.0, 0.0, 0.0),
+        ));
+        let probe = bullet_collision::shapes::CollisionShape::sphere(0.5);
+        // The probe overlaps the first box (probe x-extent [0.4, 1.4] vs box
+        // x-extent [-1, 1]) but not the second.
+        let hits = world.contact_test(&probe, Vector3::new(0.9, 0.0, 0.0), Quaternion::IDENTITY, None);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, 0);
+        assert!(hits[0].1.points.iter().any(|p| p.penetration > 0.0));
+        // The probe itself can be ignored.
+        assert!(world
+            .contact_test(&probe, Vector3::new(0.9, 0.0, 0.0), Quaternion::IDENTITY, Some(0))
+            .is_empty());
     }
 
     /// A fresh contact point near a cached one keeps its impulse (scaled by
