@@ -697,4 +697,140 @@ mod tests {
             "slider allowed off-axis motion: {rel:?}"
         );
     }
+
+    /// A joint limit on a fixed-base revolute joint stops the joint at the
+    /// upper bound: released past it, the limit pushes the position back and
+    /// the joint never swings far outside `[lower, upper]`.
+    #[test]
+    fn joint_limit_clamps_revolute_joint() {
+        let mut world = MultiBodyWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(1.0, 0.0, 0.0),
+        );
+        mb.finalize_multidof();
+        // Start inside the limit with a velocity toward the upper bound.
+        mb.set_joint_pos_multidof(0, &[0.0]);
+        let ib = world.add_multibody(mb);
+        world.multibody_mut(ib).set_joint_vel_multidof(0, &[1.0]);
+        let snapshot = world.multibodies().to_vec();
+        let limit = MultiBodyConstraint::joint_limit(ib, 0, -0.3, 0.3, &snapshot);
+        world.add_constraint(limit);
+        let dt = 1.0 / 60.0;
+        let mut max_q: Real = 0.0;
+        let mut min_q: Real = 0.0;
+        for _ in 0..600 {
+            world.step_simulation(dt);
+            let q = world.multibody(ib).joint_pos_multidof(0)[0];
+            max_q = max_q.max(q);
+            min_q = min_q.min(q);
+        }
+        // The joint is clamped near the limits (a small overshoot is allowed
+        // for the per-step violation, but nothing like the unconstrained
+        // 5 rad/s · 10 s travel).
+        assert!(
+            max_q < 0.5 && min_q > -0.5,
+            "joint limit failed: q in [{min_q}, {max_q}]"
+        );
+        // The limit is unilateral: with no other torque the joint oscillates
+        // between the bounds and is not damped to rest, but it must have hit
+        // the bounds (velocity was large enough to reach them).
+        assert!(max_q > 0.28, "joint never reached the upper bound: {max_q}");
+        assert!(min_q < -0.28, "joint never reached the lower bound: {min_q}");
+    }
+
+    /// A spherical joint limit pulls a tilted joint back inside the swing
+    /// cone: the swing angle stays within the configured ranges.
+    #[test]
+    fn spherical_joint_limit_pulls_tilt_back() {
+        let mut world = MultiBodyWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_spherical(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::ZERO,
+            Vector3::new(0.0, 0.0, -1.0),
+        );
+        mb.finalize_multidof();
+        // Tilt the joint 60 degrees about X — far outside the 0.2 rad limit.
+        let half = bullet_math::FRAC_PI_2 / 3.0;
+        let q = [half.sin(), 0.0, 0.0, half.cos()];
+        mb.set_joint_pos_multidof(0, &q);
+        let ib = world.add_multibody(mb);
+        let snapshot = world.multibodies().to_vec();
+        let limit = MultiBodyConstraint::spherical_joint_limit(ib, 0, 0.2, 0.2, 0.2, 100.0, &snapshot);
+        world.add_constraint(limit);
+        let dt = 1.0 / 60.0;
+        let mut min_swing_x: Real = 2.0;
+        for _ in 0..600 {
+            world.step_simulation(dt);
+            let body = world.multibody(ib);
+            let jp = body.joint_pos_multidof(0);
+            let quat = Quaternion::from_xyzw(jp[0], jp[1], jp[2], jp[3]);
+            // Swing = rotation of the link's +Z axis (twist is about +Z, so
+            // the cone angle is the angle between Z and the rotated Z).
+            let z_rot = quat * Vector3::Z;
+            let swing = z_rot.angle_between(Vector3::Z);
+            min_swing_x = min_swing_x.min(swing);
+        }
+        // The limit drives the swing well inside the 0.2 rad range.
+        assert!(
+            min_swing_x < 0.25,
+            "spherical limit did not pull the swing inside the cone: {min_swing_x}"
+        );
+    }
+
+    /// A spherical joint motor drives a tilted joint back toward the desired
+    /// orientation (identity by default).
+    #[test]
+    fn spherical_joint_motor_returns_to_identity() {
+        let mut world = MultiBodyWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_spherical(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::ZERO,
+            Vector3::new(0.0, 0.0, -1.0),
+        );
+        mb.finalize_multidof();
+        let half = bullet_math::FRAC_PI_2 / 3.0;
+        let q = [half.sin(), 0.0, 0.0, half.cos()];
+        mb.set_joint_pos_multidof(0, &q);
+        let ib = world.add_multibody(mb);
+        let snapshot = world.multibodies().to_vec();
+        let motor = MultiBodyConstraint::spherical_joint_motor(ib, 0, 100.0, &snapshot);
+        world.add_constraint(motor);
+        let dt = 1.0 / 60.0;
+        let mut min_swing: Real = 2.0;
+        for _ in 0..600 {
+            world.step_simulation(dt);
+            let body = world.multibody(ib);
+            let jp = body.joint_pos_multidof(0);
+            let quat = Quaternion::from_xyzw(jp[0], jp[1], jp[2], jp[3]);
+            let z_rot = quat * Vector3::Z;
+            let swing = z_rot.angle_between(Vector3::Z);
+            min_swing = min_swing.min(swing);
+        }
+        // The motor drives the tilt to (near) zero.
+        assert!(
+            min_swing < 0.05,
+            "spherical motor did not return the joint to identity: {min_swing}"
+        );
+    }
 }

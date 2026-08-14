@@ -20,7 +20,8 @@ pub mod world;
 pub use body::{MultiBody, MultiBodyScratch};
 pub use constraint::{
     MultiBodyConstraint, MultiBodyConstraintKind, MultiBodyFixedConstraint, MultiBodyGearConstraint,
-    MultiBodyJointMotor, MultiBodyPoint2Point, MultiBodySliderConstraint,
+    MultiBodyJointLimit, MultiBodyJointMotor, MultiBodyPoint2Point, MultiBodySliderConstraint,
+    MultiBodySphericalJointLimit, MultiBodySphericalJointMotor,
 };
 pub use link::{JointType, MultiBodyLink};
 pub use world::MultiBodyWorld;
