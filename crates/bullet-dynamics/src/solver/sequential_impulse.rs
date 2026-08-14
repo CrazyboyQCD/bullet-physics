@@ -11,6 +11,16 @@ const SLOP: Real = 0.005;
 const BAUMGARTE: Real = 0.2;
 /// Minimum approach speed (m/s) below which restitution is disabled.
 const RESTITUTION_THRESHOLD: Real = 1.0;
+/// Penetration depth (m) above which the split-impulse pass takes over
+/// position correction (Bullet's `m_splitImpulsePenetrationThreshold = -0.04`,
+/// sign-flipped to our positive-penetration convention). Deeper contacts are
+/// corrected by the split pass only; shallower ones keep the Baumgarte bias.
+const SPLIT_IMPULSE_PENETRATION_THRESHOLD: Real = 0.04;
+/// Split-impulse positional correction factor (Bullet's `m_erp2`).
+const SPLIT_ERP2: Real = 0.2;
+/// Orientation scaling for the split-impulse turn velocity (Bullet's
+/// `m_splitImpulseTurnErp`, applied in `writebackVelocityAndTransform`).
+pub(crate) const SPLIT_TURN_ERP: Real = 0.1;
 
 /// A pre-built contact constraint between two bodies.
 pub struct ContactConstraint {
@@ -35,6 +45,13 @@ pub struct ContactConstraint {
     pub(crate) normal_impulse: Real,
     pub(crate) tangent1_impulse: Real,
     pub(crate) tangent2_impulse: Real,
+    /// Split-impulse (deep-penetration) state: whether this contact's
+    /// positional correction is handled by the split pass instead of the
+    /// Baumgarte bias, the target pseudo-impulse (`m_rhsPenetration`) and the
+    /// accumulated split impulse (`m_appliedPushImpulse`).
+    split_active: bool,
+    rhs_penetration: Real,
+    push_impulse: Real,
 }
 
 impl ContactConstraint {
@@ -55,8 +72,12 @@ impl ContactConstraint {
         let tangent2_mass =
             effective_mass(inv_mass_a, inv_mass_b, &inv_inertia_a, &inv_inertia_b, r_a, r_b, tangent2);
 
-        let friction = (a.friction * b.friction).sqrt();
-        let restitution = a.restitution.max(b.restitution);
+        // Combined material properties, matching Bullet's
+        // `btManifoldResult::calculateCombinedFriction` /
+        // `calculateCombinedRestitution`: plain products of the two bodies'
+        // coefficients (verified against refs/bullet3 on 2026-08-14).
+        let friction = a.friction * b.friction;
+        let restitution = a.restitution * b.restitution;
 
         ContactConstraint {
             body_a,
@@ -83,6 +104,13 @@ impl ContactConstraint {
             normal_impulse: cp.normal_impulse,
             tangent1_impulse: cp.tangent_impulse[0],
             tangent2_impulse: cp.tangent_impulse[1],
+            // Deep penetration switches position correction from the Baumgarte
+            // bias to the split-impulse pass (Bullet's `m_splitImpulse`
+            // branch in `setupContactConstraint`); the split impulse itself
+            // starts at zero every step, like `m_appliedPushImpulse`.
+            split_active: cp.penetration > SPLIT_IMPULSE_PENETRATION_THRESHOLD,
+            rhs_penetration: 0.0,
+            push_impulse: 0.0,
         }
     }
 }
@@ -146,6 +174,54 @@ pub fn solve(bodies: &mut [RigidBody], constraints: &mut [ContactConstraint], it
             solve_contact(bodies, c, inv_dt);
         }
     }
+
+    // Split-impulse pass (Bullet's `solveGroupCacheFriendlySplitImpulseIterations`,
+    // after the velocity iterations): deep-penetration contacts are pulled out
+    // of the surface by a pseudo impulse accumulated on each body's push
+    // velocity. It never touches the real velocities; the world applies the
+    // push velocity to the pose after position integration, so the penetration
+    // is corrected without injecting energy into the motion.
+    let split_rhs = |c: &mut ContactConstraint| {
+        if c.split_active {
+            c.rhs_penetration = c.penetration * SPLIT_ERP2 * inv_dt * c.normal_mass;
+        }
+    };
+    for c in constraints.iter_mut() {
+        split_rhs(c);
+    }
+    for _ in 0..iterations {
+        for c in constraints.iter_mut() {
+            if !c.split_active {
+                continue;
+            }
+            let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
+            // Push relative normal velocity at the contact point (the split
+            // counterpart of `rel.dot(normal)` in `solve_contact`).
+            let push_va = a.push_linear + a.push_angular.cross(c.r_a);
+            let push_vb = b.push_linear + b.push_angular.cross(c.r_b);
+            let push_vn = (push_vb - push_va).dot(c.normal);
+            // `delta = rhs - push_vn * mass` matches Bullet's
+            // `gResolveSplitPenetrationImpulse_scalar_reference` with our
+            // normal convention (A -> B) and zero CFM.
+            let delta = c.rhs_penetration - push_vn * c.normal_mass;
+            let old = c.push_impulse;
+            c.push_impulse = (old + delta).max(0.0);
+            let j = c.push_impulse - old;
+            if j != 0.0 {
+                apply_push(a, b, c, c.normal * j);
+            }
+        }
+    }
+}
+
+/// Accumulate a split-impulse positional push onto the bodies' push velocities
+/// (Bullet's `internalApplyPushImpulse`); same geometry as [`apply_impulse`]
+/// but written to `push_linear`/`push_angular` instead of the real velocities.
+fn apply_push(a: &mut RigidBody, b: &mut RigidBody, c: &ContactConstraint, impulse: Vector3) {
+    a.push_linear -= impulse * c.inv_mass_a;
+    b.push_linear += impulse * c.inv_mass_b;
+    a.push_angular -= c.inv_inertia_a * (c.r_a.cross(impulse));
+    b.push_angular += c.inv_inertia_b * (c.r_b.cross(impulse));
 }
 
 fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Real) {
@@ -156,12 +232,19 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
     let rel = vb - va;
     let vn = rel.dot(c.normal);
 
-    // Target normal velocity: restitution plus Baumgarte penetration correction.
+    // Target normal velocity: restitution plus Baumgarte penetration
+    // correction. For deep penetrations the Baumgarte term is dropped: the
+    // split-impulse pass corrects the position instead (Bullet's `m_rhs` =
+    // velocity-only branch in `setupContactConstraint`), so the velocity
+    // response stays a pure restitution/impact response without the energy
+    // injection of a large positional bias.
     let mut bias = 0.0;
     if vn < -RESTITUTION_THRESHOLD {
         bias = -c.restitution * vn;
     }
-    bias += BAUMGARTE * inv_dt * (c.penetration - SLOP).max(0.0);
+    if !c.split_active {
+        bias += BAUMGARTE * inv_dt * (c.penetration - SLOP).max(0.0);
+    }
 
     // Normal impulse, clamped to be non-negative.
     let lambda = c.normal_mass * (bias - vn);
@@ -206,4 +289,74 @@ fn apply_impulse(a: &mut RigidBody, b: &mut RigidBody, c: &ContactConstraint, im
     b.linear_velocity += impulse * c.inv_mass_b;
     a.angular_velocity -= c.inv_inertia_a * (c.r_a.cross(impulse));
     b.angular_velocity += c.inv_inertia_b * (c.r_b.cross(impulse));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use bullet_collision::shapes::CollisionShape;
+
+    /// Build a ground plane at y = 0 and a dynamic box sunk `penetration` into
+    /// it (contact point at the box bottom), with zero velocities so the
+    /// velocity iterations stay idle and only the split pass acts.
+    fn deep_contact(penetration: Real) -> (Vec<RigidBody>, Vec<ContactConstraint>) {
+        let ground = RigidBody::new_static(
+            CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        );
+        let cube = RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::splat(0.5)),
+            Vector3::new(0.0, 0.5 - penetration, 0.0),
+            1.0,
+        );
+        let cp = bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.0, -penetration, 0.0), // box bottom contact point
+            Vector3::Y,                           // normal A -> B (box -> plane)
+            penetration,
+        );
+        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &cube);
+        (vec![ground, cube], vec![c])
+    }
+
+    /// Deep penetration (> threshold): the split pass pushes the body out of
+    /// the surface (push velocity up) without touching the real velocity.
+    #[test]
+    fn split_impulse_pushes_deep_penetration_without_touching_velocity() {
+        let (mut bodies, mut constraints) = deep_contact(0.1);
+        solve(&mut bodies, &mut constraints, 10, 60.0);
+        // Split pass accumulated an upward positional push on the box.
+        assert!(bodies[1].push_linear.y > 0.0);
+        // The real velocity is untouched: zero approach speed means the
+        // velocity iterations produce no normal impulse.
+        assert_relative_eq!(bodies[1].linear_velocity.y, 0.0, epsilon = 1e-6);
+        // The Baumgarte bias is disabled for this contact (split takes over).
+        assert!(constraints[0].split_active);
+    }
+
+    /// Shallow penetration (< threshold): the split pass stays idle and the
+    /// Baumgarte bias handles position correction as before.
+    #[test]
+    fn split_impulse_ignores_shallow_penetration() {
+        let (mut bodies, mut constraints) = deep_contact(0.01);
+        solve(&mut bodies, &mut constraints, 10, 60.0);
+        assert!(!constraints[0].split_active);
+        assert_eq!(bodies[1].push_linear, Vector3::ZERO);
+    }
+
+    /// The split impulse is clamped below at zero (never pulls bodies into
+    /// the surface) and converges to the penetration target over iterations.
+    #[test]
+    fn split_impulse_converges_and_clamps() {
+        let (mut bodies, mut constraints) = deep_contact(0.1);
+        // Half the iterations of the default solve.
+        solve(&mut bodies, &mut constraints, 5, 60.0);
+        let push_full = bodies[1].push_linear.y;
+        let (mut bodies2, mut constraints2) = deep_contact(0.1);
+        solve(&mut bodies2, &mut constraints2, 20, 60.0);
+        // More iterations converge further toward removing the penetration;
+        // both stay positive (no pull-in).
+        assert!(push_full > 0.0);
+        assert!(bodies2[1].push_linear.y >= push_full);
+    }
 }

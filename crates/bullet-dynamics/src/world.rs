@@ -4,8 +4,8 @@ use bullet_collision::broadphase::{AxisSweep3, BroadPhase};
 use bullet_collision::narrowphase;
 use bullet_collision::raycast::{self, RayHit};
 use crate::body::RigidBody;
-use bullet_math::{Real, Vector3};
-use crate::solver::sequential_impulse::{self, ContactConstraint};
+use bullet_math::{Quaternion, Real, Vector3};
+use crate::solver::sequential_impulse::{self, ContactConstraint, SPLIT_TURN_ERP};
 
 /// Scale applied to a cached impulse before the warm-start pass (Bullet's
 /// `m_warmstartingFactor`): old impulses are faded slightly so the solver can
@@ -260,6 +260,27 @@ impl PhysicsWorld {
 
         for (i, body) in self.bodies.iter_mut().enumerate() {
             body.integrate_position(dt);
+            // Split-impulse positional correction (Bullet's
+            // `writebackVelocityAndTransform`): move the pose along the
+            // solver's push velocity so deep penetrations are corrected
+            // without changing the real velocities. The turn velocity is
+            // scaled by `m_splitImpulseTurnErp`. Push is cleared here; the
+            // solver starts every step from zero.
+            if body.is_active() && !body.is_static() && body.push_linear != Vector3::ZERO {
+                body.position += body.push_linear * dt;
+            }
+            if body.is_active() && !body.is_static() && body.push_angular != Vector3::ZERO {
+                let w = body.push_angular * SPLIT_TURN_ERP;
+                let dq = Quaternion::from_xyzw(
+                    w.x * dt * 0.5,
+                    w.y * dt * 0.5,
+                    w.z * dt * 0.5,
+                    0.0,
+                ) * body.orientation;
+                body.orientation = (body.orientation + dq).normalize();
+            }
+            body.push_linear = Vector3::ZERO;
+            body.push_angular = Vector3::ZERO;
             if ccd_clamps[i] < 1.0 {
                 let from = body.position - body.linear_velocity * dt;
                 body.position = from + (body.position - from) * ccd_clamps[i];

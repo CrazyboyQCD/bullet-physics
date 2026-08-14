@@ -49,6 +49,13 @@ pub struct RigidBody {
     ccd_motion_threshold: Real,
     /// CCD: radius of the swept sphere (Bullet's `m_ccdSweptSphereRadius`).
     ccd_swept_sphere_radius: Real,
+    /// Split-impulse positional correction accumulated by the solver this
+    /// step (Bullet's `m_pushVelocity` / `m_turnVelocity`): a pseudo velocity
+    /// that moves the body out of deep penetration without changing its real
+    /// velocity. Applied to the pose by the world after position integration,
+    /// then cleared.
+    pub(crate) push_linear: Vector3,
+    pub(crate) push_angular: Vector3,
 }
 
 impl RigidBody {
@@ -79,6 +86,8 @@ impl RigidBody {
             angular_sleeping_threshold: 1.0,
             ccd_motion_threshold: 0.0,
             ccd_swept_sphere_radius: 0.0,
+            push_linear: Vector3::ZERO,
+            push_angular: Vector3::ZERO,
         }
     }
 
@@ -106,6 +115,8 @@ impl RigidBody {
             angular_sleeping_threshold: 1.0,
             ccd_motion_threshold: 0.0,
             ccd_swept_sphere_radius: 0.0,
+            push_linear: Vector3::ZERO,
+            push_angular: Vector3::ZERO,
         }
     }
 
