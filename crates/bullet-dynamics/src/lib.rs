@@ -13,6 +13,7 @@ pub use character::KinematicCharacterController;
 pub use constraint::{
     AngularLimit, ConeTwistConstraint, ConeTwistMotor, Constraint, ConstraintKind,
     FixedConstraint, HingeConstraint, HingeMotor, JointFrame, Point2PointConstraint,
+    SliderConstraint, SliderMotor,
 };
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
 pub use world::PhysicsWorld;
