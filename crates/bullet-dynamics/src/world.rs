@@ -1,12 +1,14 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use bullet_collision::broadphase::{AxisSweep3, BroadPhase};
 use bullet_collision::manifold::ContactManifold;
 use bullet_collision::narrowphase::{self, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
 use crate::body::RigidBody;
+use crate::constraint::{self, Constraint};
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
-use crate::solver::sequential_impulse::{self, ContactConstraint, SPLIT_TURN_ERP};
+use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, SPLIT_TURN_ERP};
 
 /// Scale applied to a cached impulse before the warm-start pass (Bullet's
 /// `m_warmstartingFactor`): old impulses are faded slightly so the solver can
@@ -35,6 +37,12 @@ pub struct PhysicsWorld {
     /// Accumulated contact impulses from the previous step, keyed by body
     /// pair; the cache is rebuilt every step from the solved constraints.
     contact_cache: HashMap<(usize, usize), Vec<CachedContact>>,
+    /// Joints (Bullet's `btTypedConstraint` list added with `addConstraint`).
+    constraints: Vec<Constraint>,
+    /// Body pairs whose collision response is suppressed by a joint
+    /// (`disableCollisionsBetweenLinkedBodies`, Bullet's
+    /// `checkCollideWithOverride`), sorted `(min, max)`.
+    no_collision_pairs: HashSet<(usize, usize)>,
 }
 
 impl Default for PhysicsWorld {
@@ -51,6 +59,8 @@ impl PhysicsWorld {
             gravity: Vector3::new(0.0, -9.81, 0.0),
             iterations: 10,
             contact_cache: HashMap::new(),
+            constraints: Vec::new(),
+            no_collision_pairs: HashSet::new(),
         }
     }
 
@@ -222,6 +232,43 @@ impl PhysicsWorld {
         self.broadphase.set_aabb(index, aabb);
     }
 
+    /// Add a joint between two bodies and return its index (Bullet's
+    /// `addConstraint`; the joint suppresses collisions between its bodies by
+    /// default, see [`Constraint::set_disable_collisions`]).
+    pub fn add_constraint(&mut self, constraint: Constraint) -> usize {
+        if constraint.disable_collisions() {
+            let (a, b) = (constraint.body_a(), constraint.body_b());
+            self.no_collision_pairs.insert((a.min(b), a.max(b)));
+        }
+        self.constraints.push(constraint);
+        self.constraints.len() - 1
+    }
+
+    pub fn constraint(&self, index: usize) -> &Constraint {
+        &self.constraints[index]
+    }
+
+    pub fn constraint_mut(&mut self, index: usize) -> &mut Constraint {
+        &mut self.constraints[index]
+    }
+
+    pub fn constraints(&self) -> &[Constraint] {
+        &self.constraints
+    }
+
+    /// Remove a joint, dropping its index and the collision suppression it
+    /// applied (Bullet's `removeConstraint`; later joints shift down).
+    pub fn remove_constraint(&mut self, index: usize) {
+        self.constraints.remove(index);
+        self.no_collision_pairs.clear();
+        for c in &self.constraints {
+            if c.disable_collisions() {
+                let (a, b) = (c.body_a(), c.body_b());
+                self.no_collision_pairs.insert((a.min(b), a.max(b)));
+            }
+        }
+    }
+
     /// Advance the simulation by `dt` seconds.
     pub fn step_simulation(&mut self, dt: Real) {
         let inv_dt = 1.0 / dt;
@@ -251,10 +298,15 @@ impl PhysicsWorld {
         // 4. Broad phase: candidate overlapping pairs.
         let pairs = self.broadphase.compute_pairs();
 
-        // 5. Narrow phase: exact contact manifolds -> constraints.
+        // 5. Narrow phase: exact contact manifolds -> constraints. Pairs
+        // linked by a joint with `disable_collisions` are skipped (Bullet's
+        // `btCollisionObject::checkCollideWithOverride`).
         let mut constraints: Vec<ContactConstraint> = Vec::new();
         let mut contact_pairs: Vec<(usize, usize)> = Vec::new();
         for &(i, j) in &pairs {
+            if self.no_collision_pairs.contains(&(i.min(j), i.max(j))) {
+                continue;
+            }
             let a = &self.bodies[i];
             let b = &self.bodies[j];
             if let Some(mut manifold) = narrowphase::collide(
@@ -278,6 +330,14 @@ impl PhysicsWorld {
             }
         }
 
+        // 5a. Joint rows: flatten every enabled joint into its solver rows
+        // from the current (pre-integration) poses, like Bullet's
+        // `convertJoints` after `predictUnconstraintMotion`.
+        let mut joint_rows: Vec<ConstraintRow> = Vec::new();
+        for c in &self.constraints {
+            constraint::prepare_rows(c, &self.bodies, inv_dt, BAUMGARTE, &mut joint_rows);
+        }
+
         // 5b. Wake up sleeping bodies that touch an active body (Bullet's
         // island-based activation propagation: activation travels along the
         // contact graph one step at a time). A contact between two sleeping
@@ -291,9 +351,31 @@ impl PhysicsWorld {
                 self.bodies[i].activate();
             }
         }
+        // A joint links two bodies into one island: a sleeping body woken by
+        // motion of its linked partner would otherwise stay frozen while the
+        // constraint pulls on it.
+        for c in &self.constraints {
+            if !c.enabled() {
+                continue;
+            }
+            let (a, b) = (c.body_a(), c.body_b());
+            let a_active = self.bodies[a].is_active();
+            let b_active = self.bodies[b].is_active();
+            if a_active && !b_active {
+                self.bodies[b].activate();
+            } else if b_active && !a_active {
+                self.bodies[a].activate();
+            }
+        }
 
         // 6. Solve constraints (correct velocities).
-        sequential_impulse::solve(&mut self.bodies, &mut constraints, self.iterations, inv_dt);
+        sequential_impulse::solve(
+            &mut self.bodies,
+            &mut constraints,
+            &mut joint_rows,
+            self.iterations,
+            inv_dt,
+        );
 
         // 6b. Write back the solved impulses so the next step can warm start
         // from them (the cache is rebuilt every step, dropping stale pairs).

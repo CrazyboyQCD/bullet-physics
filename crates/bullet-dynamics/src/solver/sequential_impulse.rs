@@ -7,8 +7,10 @@ use bullet_math::{Matrix3, Real, Vector3};
 
 /// Allowed penetration slop before the Baumgarte term kicks in.
 const SLOP: Real = 0.005;
-/// Baumgarte positional-correction factor.
-const BAUMGARTE: Real = 0.2;
+/// Baumgarte positional-correction factor — also the default joint ERP
+/// (Bullet's `infoGlobal.m_erp`, which `btPoint2PointConstraint::getInfo2`
+/// uses for `m_constraintError` unless overridden).
+pub(crate) const BAUMGARTE: Real = 0.2;
 /// Minimum approach speed (m/s) below which restitution is disabled.
 const RESTITUTION_THRESHOLD: Real = 1.0;
 /// Penetration depth (m) above which the split-impulse pass takes over
@@ -52,6 +54,90 @@ pub struct ContactConstraint {
     split_active: bool,
     rhs_penetration: Real,
     push_impulse: Real,
+}
+
+/// Bounds on the accumulated impulse of a bilateral constraint row (Bullet's
+/// `m_lowerLimit` / `m_upperLimit`; the P2P default leaves them infinite, an
+/// optional `m_impulseClamp` makes them symmetric).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RowLimits {
+    /// `[-inf, +inf]`: a plain equality row (Bullet's default for joints).
+    Unbounded,
+    /// `[-clamp, clamp]` (Bullet's `btConstraintSetting::m_impulseClamp`).
+    Bilateral(Real),
+    /// `[0, +inf]`: a unilateral row (contacts); kept for completeness.
+    Unilateral,
+}
+
+/// One solver row of a joint constraint (Bullet's `btSolverConstraint`
+/// flattened for the non-contact pool): a bilateral equality along `normal`
+/// at the world pivot points `r_a`/`r_b` from each body's COM, driven by the
+/// position-error bias. Joint rows share the contact iteration loop (Bullet's
+/// `solveGroupCacheFriendly` solves both pools).
+pub struct ConstraintRow {
+    body_a: usize,
+    body_b: usize,
+    normal: Vector3,
+    r_a: Vector3,
+    r_b: Vector3,
+    inv_mass_a: Real,
+    inv_mass_b: Real,
+    inv_inertia_a: Matrix3,
+    inv_inertia_b: Matrix3,
+    mass: Real,
+    /// Velocity target: `k 路 (pivotA 鈭?pivotB) 路 n` with `k = fps 路 erp`
+    /// (Bullet's `m_constraintError`, pre-scaled by the ERP/fps and built
+    /// into `m_rhs` at `convertJoint`).
+    bias: Real,
+    limits: RowLimits,
+    impulse: Real,
+}
+
+impl ConstraintRow {
+    /// Build a bilateral row along `normal` at the given lever arms (Bullet's
+    /// `convertJoint`): the effective mass from both bodies, the bias from
+    /// the caller's position error, and the impulse clamp.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare(
+        body_a: usize,
+        body_b: usize,
+        normal: Vector3,
+        r_a: Vector3,
+        r_b: Vector3,
+        a: &RigidBody,
+        b: &RigidBody,
+        bias: Real,
+        limits: RowLimits,
+    ) -> Self {
+        let inv_inertia_a = a.inv_inertia_world();
+        let inv_inertia_b = b.inv_inertia_world();
+        let mass = effective_mass(
+            a.inv_mass(),
+            b.inv_mass(),
+            &inv_inertia_a,
+            &inv_inertia_b,
+            r_a,
+            r_b,
+            normal,
+        );
+        Self {
+            body_a,
+            body_b,
+            normal,
+            r_a,
+            r_b,
+            inv_mass_a: a.inv_mass(),
+            inv_mass_b: b.inv_mass(),
+            inv_inertia_a,
+            inv_inertia_b,
+            mass,
+            bias,
+            limits,
+            // Joints are not warm-started (Bullet resets
+            // `internalSetAppliedImpulse(0)` in `convertJoints`).
+            impulse: 0.0,
+        }
+    }
 }
 
 impl ContactConstraint {
@@ -157,8 +243,16 @@ fn two_bodies(bodies: &mut [RigidBody], a: usize, b: usize) -> (&mut RigidBody, 
     }
 }
 
-/// Solve all contact constraints with sequential-impulse (PGS) iterations.
-pub fn solve(bodies: &mut [RigidBody], constraints: &mut [ContactConstraint], iterations: u32, inv_dt: Real) {
+/// Solve all contact constraints and joint rows with sequential-impulse (PGS)
+/// iterations. Contacts warm-start from their cached impulses (Bullet's
+/// `SOLVER_USE_WARMSTARTING`); joints build from zero each step.
+pub fn solve(
+    bodies: &mut [RigidBody],
+    constraints: &mut [ContactConstraint],
+    joints: &mut [ConstraintRow],
+    iterations: u32,
+    inv_dt: Real,
+) {
     // Warm start: re-apply the impulses accumulated by the previous step
     // (Bullet's `SOLVER_USE_WARMSTARTING` pass), so resting contacts reach a
     // converged solution in a few iterations instead of rebuilding from zero.
@@ -172,6 +266,9 @@ pub fn solve(bodies: &mut [RigidBody], constraints: &mut [ContactConstraint], it
     for _ in 0..iterations {
         for c in constraints.iter_mut() {
             solve_contact(bodies, c, inv_dt);
+        }
+        for j in joints.iter_mut() {
+            solve_joint_row(bodies, j);
         }
     }
 
@@ -284,6 +381,33 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
     }
 }
 
+/// Solve one bilateral joint row (Bullet's `gResolveSingleConstraintRowGeneric`:
+/// drive the relative velocity along the row toward the position-error bias,
+/// clamping the accumulated impulse to the row limits).
+fn solve_joint_row(bodies: &mut [RigidBody], c: &mut ConstraintRow) {
+    let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
+
+    let va = a.linear_velocity + a.angular_velocity.cross(c.r_a);
+    let vb = b.linear_velocity + b.angular_velocity.cross(c.r_b);
+    let vn = (vb - va).dot(c.normal);
+
+    let lambda = c.mass * (c.bias - vn);
+    let old = c.impulse;
+    let new = match c.limits {
+        RowLimits::Unbounded => old + lambda,
+        RowLimits::Bilateral(clamp) => (old + lambda).clamp(-clamp, clamp),
+        RowLimits::Unilateral => (old + lambda).max(0.0),
+    };
+    c.impulse = new;
+    let j = new - old;
+    if j != 0.0 {
+        a.linear_velocity -= c.normal * (j * c.inv_mass_a);
+        b.linear_velocity += c.normal * (j * c.inv_mass_b);
+        a.angular_velocity -= c.inv_inertia_a * (c.r_a.cross(c.normal * j));
+        b.angular_velocity += c.inv_inertia_b * (c.r_b.cross(c.normal * j));
+    }
+}
+
 fn apply_impulse(a: &mut RigidBody, b: &mut RigidBody, c: &ContactConstraint, impulse: Vector3) {
     a.linear_velocity -= impulse * c.inv_mass_a;
     b.linear_velocity += impulse * c.inv_mass_b;
@@ -324,7 +448,7 @@ mod tests {
     #[test]
     fn split_impulse_pushes_deep_penetration_without_touching_velocity() {
         let (mut bodies, mut constraints) = deep_contact(0.1);
-        solve(&mut bodies, &mut constraints, 10, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], 10, 60.0);
         // Split pass accumulated an upward positional push on the box.
         assert!(bodies[1].push_linear.y > 0.0);
         // The real velocity is untouched: zero approach speed means the
@@ -339,7 +463,7 @@ mod tests {
     #[test]
     fn split_impulse_ignores_shallow_penetration() {
         let (mut bodies, mut constraints) = deep_contact(0.01);
-        solve(&mut bodies, &mut constraints, 10, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], 10, 60.0);
         assert!(!constraints[0].split_active);
         assert_eq!(bodies[1].push_linear, Vector3::ZERO);
     }
@@ -350,13 +474,14 @@ mod tests {
     fn split_impulse_converges_and_clamps() {
         let (mut bodies, mut constraints) = deep_contact(0.1);
         // Half the iterations of the default solve.
-        solve(&mut bodies, &mut constraints, 5, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], 5, 60.0);
         let push_full = bodies[1].push_linear.y;
         let (mut bodies2, mut constraints2) = deep_contact(0.1);
-        solve(&mut bodies2, &mut constraints2, 20, 60.0);
+        solve(&mut bodies2, &mut constraints2, &mut [], 20, 60.0);
         // More iterations converge further toward removing the penetration;
         // both stay positive (no pull-in).
         assert!(push_full > 0.0);
         assert!(bodies2[1].push_linear.y >= push_full);
     }
 }
+
