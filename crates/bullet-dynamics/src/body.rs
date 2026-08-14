@@ -43,6 +43,12 @@ pub struct RigidBody {
     /// `m_linearSleepingThreshold = 0.8` / `m_angularSleepingThreshold = 1.0`).
     pub linear_sleeping_threshold: Real,
     pub angular_sleeping_threshold: Real,
+    /// CCD: bodies moving farther than this per step (0 = disabled) are
+    /// swept as a sphere and clamped at the first impact (Bullet's
+    /// `m_ccdMotionThreshold`).
+    ccd_motion_threshold: Real,
+    /// CCD: radius of the swept sphere (Bullet's `m_ccdSweptSphereRadius`).
+    ccd_swept_sphere_radius: Real,
 }
 
 impl RigidBody {
@@ -71,6 +77,8 @@ impl RigidBody {
             deactivation_time: 0.0,
             linear_sleeping_threshold: 0.8,
             angular_sleeping_threshold: 1.0,
+            ccd_motion_threshold: 0.0,
+            ccd_swept_sphere_radius: 0.0,
         }
     }
 
@@ -96,6 +104,8 @@ impl RigidBody {
             deactivation_time: 0.0,
             linear_sleeping_threshold: 0.8,
             angular_sleeping_threshold: 1.0,
+            ccd_motion_threshold: 0.0,
+            ccd_swept_sphere_radius: 0.0,
         }
     }
 
@@ -189,6 +199,31 @@ impl RigidBody {
     pub fn disable_simulation(mut self) -> Self {
         self.activation_state = ActivationState::DisableSimulation;
         self
+    }
+
+    /// Enable continuous collision detection (Bullet's `setCcdMotionThreshold`
+    /// + `setCcdSweptSphereRadius`): bodies moving farther than
+    /// `motion_threshold` per step are swept as a sphere of
+    /// `swept_sphere_radius` and clamped at the first impact, so fast bodies
+    /// cannot tunnel through thin geometry. A common choice is the body's
+    /// smallest dimension for the threshold and its bounding-sphere radius for
+    /// the swept radius.
+    pub fn ccd(mut self, motion_threshold: Real, swept_sphere_radius: Real) -> Self {
+        self.ccd_motion_threshold = motion_threshold;
+        self.ccd_swept_sphere_radius = swept_sphere_radius;
+        self
+    }
+
+    /// CCD motion threshold (0 = disabled).
+    #[inline]
+    pub fn ccd_motion_threshold(&self) -> Real {
+        self.ccd_motion_threshold
+    }
+
+    /// CCD swept-sphere radius (0 = disabled).
+    #[inline]
+    pub fn ccd_swept_sphere_radius(&self) -> Real {
+        self.ccd_swept_sphere_radius
     }
 
     #[inline]

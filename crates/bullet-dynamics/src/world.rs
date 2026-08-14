@@ -214,9 +214,56 @@ impl PhysicsWorld {
             }
         }
 
-        // 7. Integrate positions with the corrected velocities.
-        for body in &mut self.bodies {
+        // 7. Integrate positions with the corrected velocities. Bodies that
+        // exceed their CCD motion threshold are clamped at the first
+        // swept-sphere impact so they cannot tunnel through thin geometry
+        // (Bullet's `integrateTransforms` CCD motion clamping; the collision
+        // response itself runs on the next step's narrow phase).
+        let ccd_clamps: Vec<Real> = (0..self.bodies.len())
+            .map(|i| {
+                let body = &self.bodies[i];
+                let threshold = body.ccd_motion_threshold();
+                if !body.is_active() || body.is_static() || threshold <= 0.0 {
+                    return 1.0;
+                }
+                let radius = body.ccd_swept_sphere_radius();
+                if radius <= 0.0 || !body.shape.is_convex() {
+                    return 1.0;
+                }
+                let from = body.position;
+                let to = from + body.linear_velocity * dt;
+                let square_motion = (to - from).length_squared();
+                if square_motion <= threshold * threshold {
+                    return 1.0;
+                }
+                let mut best = 1.0;
+                for j in 0..self.bodies.len() {
+                    if i == j {
+                        continue;
+                    }
+                    let other = &self.bodies[j];
+                    if let Some(hit) = narrowphase::swept_sphere_cast(
+                        from,
+                        to,
+                        radius,
+                        &other.shape,
+                        other.position,
+                        other.orientation,
+                    ) && hit.fraction < best
+                    {
+                        best = hit.fraction;
+                    }
+                }
+                best
+            })
+            .collect();
+
+        for (i, body) in self.bodies.iter_mut().enumerate() {
             body.integrate_position(dt);
+            if ccd_clamps[i] < 1.0 {
+                let from = body.position - body.linear_velocity * dt;
+                body.position = from + (body.position - from) * ccd_clamps[i];
+            }
         }
 
         // 8. Clear accumulated forces for the next step.
@@ -483,5 +530,70 @@ mod tests {
         let body = RigidBody::new_static(bullet_collision::shapes::CollisionShape::sphere(0.5), Vector3::ZERO);
         assert_eq!(body.activation_state(), ActivationState::IslandSleeping);
         assert!(!body.is_active());
+    }
+
+    /// CCD: a fast body whose one-step displacement would cross a thin static
+    /// wall is clamped at the swept-sphere impact instead of tunneling; the
+    /// same body without CCD sails straight through.
+    #[test]
+    fn ccd_clamps_fast_bodies_at_the_impact() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        // Thin static wall: box centered at y = 0.5, spanning y in [0.4, 0.6].
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        // Fast ball with CCD, starting above the wall; per-step motion is
+        // 2.0 > threshold 0.1 and the predicted position (y = -1) is past the
+        // wall, so the discrete narrow phase sees no contact.
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        // Control ball without CCD, offset in X so it misses the wall.
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(2.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0)),
+        );
+        let dt: Real = 1.0 / 60.0;
+        world.step_simulation(dt);
+        // The CCD ball is clamped at the wall's top surface (0.6 + 0.3).
+        assert_relative_eq!(world.body(1).position.y, 0.9, epsilon = 0.05);
+        // The control ball crossed the whole wall.
+        assert!(world.body(2).position.y < -0.5);
+    }
+
+    /// CCD only sweeps when the per-step motion exceeds the threshold; slower
+    /// bodies integrate normally.
+    #[test]
+    fn ccd_ignores_slow_motion() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -5.0, 0.0))
+            .ccd(1.0, 0.3),
+        );
+        // Per-step motion 5/60 < threshold 1.0: plain integration, no clamp.
+        world.step_simulation(1.0 / 60.0);
+        assert_relative_eq!(world.body(1).position.y, 1.0 - 5.0 / 60.0, epsilon = 1e-5);
     }
 }
