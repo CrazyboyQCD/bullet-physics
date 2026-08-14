@@ -998,16 +998,7 @@ const CONE_TWIST_FIX_THRESH: Real = 0.05;
 /// near-zero rotation axis is numerically unstable (the row's effective
 /// mass explodes as `1/|axis|²`), so the guard must be at Bullet's exact
 /// epsilon or the double-precision build re-excites the twist.
-const SIMD_EPSILON: Real = {
-    #[cfg(not(feature = "f64"))]
-    {
-        std::f32::EPSILON
-    }
-    #[cfg(feature = "f64")]
-    {
-        std::f64::EPSILON
-    }
-};
+const SIMD_EPSILON: Real = Real::EPSILON;
 
 /// The cone axis in constraint space (Bullet's `vTwist`).
 const CONE_TWIST_AXIS: Vector3 = Vector3::X;
