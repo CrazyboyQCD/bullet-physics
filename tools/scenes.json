@@ -512,17 +512,16 @@
         {
           "name": "ground",
           "shape": {
-            "type": "plane",
-            "normal": [
-              0,
-              1,
-              0
-            ],
-            "constant": 0.0
+            "type": "box",
+            "half_extents": [
+              25,
+              0.5,
+              25
+            ]
           },
           "position": [
             0,
-            0,
+            -0.5,
             0
           ],
           "mass": 0
