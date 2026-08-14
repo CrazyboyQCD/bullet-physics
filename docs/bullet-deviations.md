@@ -30,7 +30,6 @@ It is the canonical reference for "does X match Bullet?" — checked against
 
 - **Split impulse** (Bullet `m_splitImpulse = true` by default, threshold `-0.04`): we rely on Baumgarte alone for penetration recovery.
 - **Simulation islands** (union-find island manager + per-island solving): we solve all constraints globally. Activation propagation uses a simplified per-step contact-graph pass instead (a sleeping body touching an active one wakes up one hop per step); a sleeping body is never woken by another sleeping body, so stable stacks stay asleep.
-- **CCD** (continuous collision detection).
 - **CharacterController**, **Vehicle**.
 - **Joints**: Point2Point, Hinge, Generic6Dof, ConeTwist, Slider, Fixed.
 - **Featherstone multibody**.
@@ -46,3 +45,4 @@ It is the canonical reference for "does X match Bullet?" — checked against
 - Sleeping / activation: `ActivationState` mirrors `btCollisionObject::ActivationState` (`ACTIVE_TAG`, `ISLAND_SLEEPING`, `WANTS_DEACTIVATION`, `DISABLE_DEACTIVATION`, `DISABLE_SIMULATION`); sleeping thresholds default `0.8`/`1.0` (Bullet `m_linearSleepingThreshold`/`m_angularSleepingThreshold`), `DEACTIVATION_TIME = 2.0` (Bullet's hard-coded check), `updateDeactivation`/`goToSleep` semantics match (including `DISABLE_DEACTIVATION` early return), static bodies start asleep. See §1 for the `activate()` difference and §3 for the island-propagated wake-up simplification.
 - Ray cast semantics: `fraction ∈ [0, 1]`, normal pointing toward the ray origin (see §1 for the interior-start exception).
 - Broad-phase ray test: slab-method `segment_hits_aabb`, `gContactBreakingThreshold = 0.02` point matching for warm starting.
+- CCD: swept-sphere motion clamping in position integration, equivalent to `btDiscreteDynamicsWorld::integrateTransforms` (`ccdMotionThreshold` per-step threshold + `ccdSweptSphereRadius` cast sphere; the collision response happens on the next step's narrow phase). Targets: convex shapes (GJK distance on the inflated shape), planes (analytic), triangle meshes/heightfields (per-triangle analytic casts via the mesh BVH).
