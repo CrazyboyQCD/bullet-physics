@@ -20,6 +20,7 @@
 #include <BulletDynamics/Featherstone/btMultiBodyPoint2Point.h>
 #include <BulletDynamics/Featherstone/btMultiBodyFixedConstraint.h>
 #include <BulletDynamics/Featherstone/btMultiBodyJointMotor.h>
+#include <BulletDynamics/Featherstone/btMultiBodyGearConstraint.h>
 
 static const btScalar DT = btScalar(1) / btScalar(60);
 static const int DEFAULT_FRAMES = 300;
@@ -193,11 +194,109 @@ static void scene_fixed(int frames)
 	}
 }
 
+// Scene 7: a fixed-base prismatic (sliding) link released from rest; the
+// joint slides under gravity.
+static void scene_prismatic(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	btMultiBody* body = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	body->setupPrismatic(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+						 btVector3(0, 1, 0), btVector3(0, 0, 0), btVector3(0, 0, 0), false);
+	body->finalizeMultiDof();
+	btScalar qd0 = 0;
+	body->setJointVelMultiDof(0, &qd0);
+	world->addMultiBody(body);
+	addColliders(world, body);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		printf("%d %.6f %.6f\n", f, body->getJointPos(0), body->getJointVel(0));
+	}
+}
+
+// Scene 8: a fixed-base spherical joint - a 3D pendulum. The joint quaternion
+// and its angular velocity are recorded.
+static void scene_spherical(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	btMultiBody* body = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	body->setupSpherical(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+						 btVector3(0, 0, 0), btVector3(0, 0, -1));
+	body->finalizeMultiDof();
+	// Tilt the joint 60 degrees about X: COM swings like a spherical pendulum.
+	btScalar q[4] = {btSin(SIMD_HALF_PI / 3), 0, 0, btCos(SIMD_HALF_PI / 3)};
+	body->setJointPosMultiDof(0, q);
+	world->addMultiBody(body);
+	addColliders(world, body);
+	const btScalar* jp = body->getJointPosMultiDof(0);
+	const btScalar* jv = body->getJointVelMultiDof(0);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		jp = body->getJointPosMultiDof(0);
+		jv = body->getJointVelMultiDof(0);
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n", f, jp[0], jp[1], jp[2], jp[3], jv[0], jv[1], jv[2]);
+	}
+}
+
+// Scene 9: a fixed-base planar joint: rotation about Z plus two translations
+// in the XY plane. The link is released from rest with an initial X velocity.
+static void scene_planar(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	btMultiBody* body = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	body->setupPlanar(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+					  btVector3(0, 0, 1), btVector3(0, 0, 0));
+	body->finalizeMultiDof();
+	btScalar qd[3] = {0, 1, 0};
+	body->setJointVelMultiDof(0, qd);
+	world->addMultiBody(body);
+	addColliders(world, body);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btScalar* jp = body->getJointPosMultiDof(0);
+		const btScalar* jv = body->getJointVelMultiDof(0);
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f\n", f, jp[0], jp[1], jp[2], jv[0], jv[1], jv[2]);
+	}
+}
+
+// Scene 10: a gear (ratio 2) coupling two fixed-base revolute links; body A's
+// link is pushed by a motor, body B must rotate at half the rate.
+static void scene_gear(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	world->setGravity(btVector3(0, 0, 0));
+	btMultiBody* a = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	a->setupRevolute(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+					 btVector3(0, 0, 1), btVector3(0, 0, 0), btVector3(1, 0, 0));
+	a->finalizeMultiDof();
+	btMultiBody* b = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	b->setupRevolute(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+					 btVector3(0, 0, 1), btVector3(0, 0, 0), btVector3(1, 0, 0));
+	b->finalizeMultiDof();
+	world->addMultiBody(a);
+	world->addMultiBody(b);
+	addColliders(world, a);
+	addColliders(world, b);
+	btMultiBodyGearConstraint* gear = new btMultiBodyGearConstraint(a, 0, b, 0, btVector3(0, 0, 0), btVector3(0, 0, 0),
+																   btMatrix3x3::getIdentity(), btMatrix3x3::getIdentity());
+	gear->setGearRatio(2);
+	world->addMultiBodyConstraint(gear);
+	btMultiBodyJointMotor* motor = new btMultiBodyJointMotor(a, 0, 0, 1, 1000);
+	world->addMultiBodyConstraint(motor);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		printf("%d %.6f %.6f %.6f %.6f\n", f, a->getJointPos(0), a->getJointVel(0), b->getJointPos(0), b->getJointVel(0));
+	}
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s <free_base|pendulum|two_link|p2p|motor|fixed> [frames]\n", argv[0]);
+		fprintf(stderr, "usage: %s <free_base|pendulum|two_link|p2p|motor|fixed|prismatic|spherical|planar|gear> [frames]\n", argv[0]);
 		return 1;
 	}
 	const char* scene = argv[1];
@@ -214,6 +313,14 @@ int main(int argc, char** argv)
 		scene_motor(frames);
 	else if (!strcmp(scene, "fixed"))
 		scene_fixed(frames);
+	else if (!strcmp(scene, "prismatic"))
+		scene_prismatic(frames);
+	else if (!strcmp(scene, "spherical"))
+		scene_spherical(frames);
+	else if (!strcmp(scene, "planar"))
+		scene_planar(frames);
+	else if (!strcmp(scene, "gear"))
+		scene_gear(frames);
 	else
 	{
 		fprintf(stderr, "unknown scene %s\n", scene);
