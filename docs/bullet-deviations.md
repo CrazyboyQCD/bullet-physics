@@ -18,6 +18,9 @@ It is the canonical reference for "does X match Bullet?" — checked against
 | Broad phase | `AxisSweep3` (three-axis sweep-and-prune) as the default | `btDbvtBroadphase` (dynamic BVH tree) is Bullet's default; `btAxisSweep3` is opt-in | Sweep-and-prune with incremental sorted lists is simpler and fast for moderate scenes; DBVT deferred (see §3) |
 | Contact detection pose | Predicted pose (`position + v·dt` after velocity integration) | Current (previous-step) pose (`m_worldTransform`, detection runs before `integrateTransforms`) | Contacts are detected one step earlier on impact; transient impact frames differ by one step, rest states still converge. Measured in the `falling_box` parity scene: 0.155 m peak on the impact frame, within tolerance from the next frame on |
 | Friction directions | Two orthogonal tangent directions per contact | One velocity-dependent direction by default (`SOLVER_USE_2_FRICTION_DIRECTIONS` is off) | Slightly different friction response on asymmetric contacts; documented trade-off |
+| Vehicle: axle extraction | Wheel-friction axle is the right-axis **column** of the wheel basis (`-basis.col(right_axis)`, spin-invariant) | Right-axis **row** (`-basis.row(right_axis)`), which picks up a `cos(rotation)` factor from the accumulated wheel spin | The row extraction makes the steering direction oscillate at the wheel-spin frequency — the net turning washes out and a steered car drives straight with a small wobble (reproduced with the literal port). The column is the same direction for an unspun wheel and stays correct as the wheel rolls |
+| Vehicle: wheel raycast vs. chassis | Wheel rays explicitly exclude the chassis body | The ray may start inside the chassis; Bullet's interior-start rays miss (the `n · r` check), so the chassis never hits | We report interior-start rays (see above), so the exclusion is explicit here; same effective behavior |
+| Vehicle: ground object | The ground is always the fixed (static) body; the hit body index is stored in `WheelInfo::raycast_info.ground_body` but no impulse is applied to it | Same (`m_groundObject = &getFixedBody()`, with a `@todo` for dynamic ground) | Aligned with Bullet: driving on dynamic objects is not supported |
 
 ## 2. Numerical differences from Bullet defaults
 
@@ -31,11 +34,11 @@ It is the canonical reference for "does X match Bullet?" — checked against
 ## 3. Not yet implemented
 
 - **Simulation islands** (union-find island manager + per-island solving): we solve all constraints globally. Activation propagation uses a simplified per-step contact-graph pass instead (a sleeping body touching an active one wakes up one hop per step); a sleeping body is never woken by another sleeping body, so stable stacks stay asleep.
-- **Vehicle**.
 - **Joints**: Point2Point, Hinge, Generic6Dof, ConeTwist, Slider, Fixed.
 - **Featherstone multibody**.
 - **Full persistent-manifold point lifecycle** (lifetime tracking, friction anchors, contact-processed callbacks) — see §1.
 - **DbvtBroadphase** (Bullet's default dynamic-BVH broad phase): we use AxisSweep3 instead (see §1); revisit for very large dynamic scenes.
+- **Driving on dynamic objects** (vehicle): the suspension raycast ground is always the fixed body, like Bullet's `btRaycastVehicle` (see §1).
 
 ## 4. Aligned with Bullet (reference)
 
@@ -50,3 +53,4 @@ It is the canonical reference for "does X match Bullet?" — checked against
 - Ray cast semantics: `fraction ∈ [0, 1]`, normal pointing toward the ray origin (see §1 for the interior-start exception).
 - Broad-phase ray test: slab-method `segment_hits_aabb`, `gContactBreakingThreshold = 0.02` point matching for warm starting.
 - CCD: swept-sphere motion clamping in position integration, equivalent to `btDiscreteDynamicsWorld::integrateTransforms` (`ccdMotionThreshold` per-step threshold + `ccdSweptSphereRadius` cast sphere; the collision response happens on the next step's narrow phase). Targets: convex shapes (GJK distance on the inflated shape), planes (analytic), triangle meshes/heightfields (per-triangle analytic casts via the mesh BVH).
+- Raycast vehicle: `RaycastVehicle` is a port of `btRaycastVehicle` (`BulletDynamics/Vehicle`) — wheel rays from chassis connection points, spring-damper suspension scaled by the chassis mass, steering around the up axis, engine/brake impulses along the wheel forward direction, lateral friction via `resolveSingleBilateral` (0.2 damping), the friction-cone sliding clamp, and the `ROLLING_INFLUENCE_FIX` side-impulse application. Default tuning matches `btVehicleTuning` (stiffness 5.88, compression 0.83, damping 0.88, travel 500 cm, slip 10.5, max force 6000), `m_rollInfluence = 0.1`, `m_deltaRotation *= 0.99`. The vehicle runs after `step_simulation` like Bullet's actions after `integrateTransforms`. See §1 for the two deviations (axle extraction, chassis ray exclusion).
