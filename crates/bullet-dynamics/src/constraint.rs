@@ -52,6 +52,10 @@ pub enum ConstraintKind {
     /// with optional linear/angular limits and motors (Bullet's
     /// `btSliderConstraint`).
     Slider(SliderConstraint),
+    /// Generic six-degree-of-freedom joint: three linear and three angular
+    /// axes with independent limits and motors (Bullet's
+    /// `btGeneric6DofConstraint`).
+    Generic6Dof(Generic6DofConstraint),
 }
 
 impl ConstraintKind {
@@ -63,6 +67,7 @@ impl ConstraintKind {
             ConstraintKind::Fixed(_) | ConstraintKind::ConeTwist(_) | ConstraintKind::Slider(_) => {
                 panic!("not a point-to-point constraint")
             }
+            ConstraintKind::Generic6Dof(_) => panic!("not a point-to-point constraint"),
         }
     }
 
@@ -74,6 +79,7 @@ impl ConstraintKind {
             ConstraintKind::Fixed(_) | ConstraintKind::ConeTwist(_) | ConstraintKind::Slider(_) => {
                 panic!("not a hinge constraint")
             }
+            ConstraintKind::Generic6Dof(_) => panic!("not a hinge constraint"),
         }
     }
 
@@ -85,6 +91,7 @@ impl ConstraintKind {
             ConstraintKind::Fixed(_) | ConstraintKind::ConeTwist(_) | ConstraintKind::Slider(_) => {
                 panic!("not a hinge constraint")
             }
+            ConstraintKind::Generic6Dof(_) => panic!("not a hinge constraint"),
         }
     }
 
@@ -133,6 +140,22 @@ impl ConstraintKind {
         match self {
             ConstraintKind::Slider(slider) => slider,
             _ => panic!("not a slider constraint"),
+        }
+    }
+
+    /// Access to the [`Generic6DofConstraint`] parameters.
+    pub fn generic_6dof(&self) -> &Generic6DofConstraint {
+        match self {
+            ConstraintKind::Generic6Dof(dof) => dof,
+            _ => panic!("not a generic 6DOF constraint"),
+        }
+    }
+
+    /// Mutable access to the [`Generic6DofConstraint`] parameters.
+    pub fn generic_6dof_mut(&mut self) -> &mut Generic6DofConstraint {
+        match self {
+            ConstraintKind::Generic6Dof(dof) => dof,
+            _ => panic!("not a generic 6DOF constraint"),
         }
     }
 }
@@ -270,6 +293,27 @@ impl Constraint {
     pub fn slider(body_a: usize, body_b: usize, frame_a: JointFrame, frame_b: JointFrame) -> Self {
         Self {
             kind: ConstraintKind::Slider(SliderConstraint::new(frame_a, frame_b)),
+            body_a,
+            body_b,
+            enabled: true,
+            disable_collisions: true,
+        }
+    }
+
+    /// A generic six-degree-of-freedom joint (Bullet's
+    /// `btGeneric6DofConstraint`): three linear axes along the frame A
+    /// directions and three angular axes around the relative-rotation
+    /// axes, each with independent limits and an optional motor. Bullet's
+    /// defaults apply — linear locked, angular free — so a fresh joint
+    /// behaves like a ball joint.
+    pub fn generic_6dof(
+        body_a: usize,
+        body_b: usize,
+        frame_a: JointFrame,
+        frame_b: JointFrame,
+    ) -> Self {
+        Self {
+            kind: ConstraintKind::Generic6Dof(Generic6DofConstraint::new(frame_a, frame_b)),
             body_a,
             body_b,
             enabled: true,
@@ -1961,6 +2005,500 @@ impl SliderConstraint {
     }
 }
 
+/// A generic six-degree-of-freedom joint (Bullet's
+/// `btGeneric6DofConstraint`): three linear axes (the frame A X/Y/Z
+/// directions) and three angular axes (the relative-rotation axes of
+/// [`relative_rotation_info`]), each with independent limits and an
+/// optional motor.
+///
+/// Bullet's defaults are kept: all three linear limits are locked at zero
+/// and all three angular limits are free (`1.0 > −1.0`), so a fresh joint
+/// behaves like a ball joint (the frame origins stay coincident, rotation
+/// is free). A locked linear/angular axis produces an equality row
+/// (`lo == hi`); a free axis (`lo > hi`) produces nothing. The angular
+/// rows use the classic Euler-angle recipe (`calculateAngleInfo` /
+/// `get_limit_motor_info2`); the linear rows use the point-to-point-style
+/// lever arms instead of Bullet's frame-offset formulation (see
+/// `docs/bullet-deviations.md`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Generic6DofConstraint {
+    /// Constraint frame on body A (pivot + basis in A's COM frame).
+    pub frame_a: JointFrame,
+    /// Constraint frame on body B (pivot + basis in B's COM frame).
+    pub frame_b: JointFrame,
+    /// The three linear limit/motor axes (Bullet's
+    /// `btTranslationalLimitMotor`).
+    pub linear: TranslationalLimitMotor,
+    /// The three angular limit/motor axes (Bullet's
+    /// `btRotationalLimitMotor` array).
+    pub angular: [RotationalLimitMotor; 3],
+    /// Per-step state: the pivot offset in A's frame (Bullet's
+    /// `m_calculatedLinearDiff`), the relative Euler angles (Bullet's
+    /// `m_calculatedAxisAngleDiff`) and the world angular constraint axes.
+    pub current_linear_diff: Vector3,
+    pub euler_angles: Vector3,
+    pub angular_axes: [Vector3; 3],
+}
+
+/// The linear limit/motor parameters of one axis triplet (Bullet's
+/// `btTranslationalLimitMotor`). The parameters used by the solver rows are
+/// kept; the obsolete-solver fields (`limitSoftness`, `damping`,
+/// `restitution`, CFM) are omitted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TranslationalLimitMotor {
+    /// Lower limits along each axis (Bullet's `m_lowerLimit`).
+    pub lower_limit: Vector3,
+    /// Upper limits along each axis (Bullet's `m_upperLimit`).
+    pub upper_limit: Vector3,
+    /// Motor target velocities along each axis (Bullet's
+    /// `m_targetVelocity`).
+    pub target_velocity: Vector3,
+    /// Motor max forces along each axis, N (Bullet's `m_maxMotorForce`).
+    pub max_motor_force: Vector3,
+    /// Whether the motor on each axis is enabled (Bullet's
+    /// `m_enableMotor`).
+    pub enable_motor: [bool; 3],
+    /// Per-axis positional-correction factor at the limit (Bullet's
+    /// `m_stopERP`, default 0.2).
+    pub stop_erp: Vector3,
+    /// Per-step limit state (Bullet's `m_currentLimit`:
+    /// 0 = free, 1 = upper limit, 2 = lower limit) and the signed
+    /// violation (Bullet's `m_currentLimitError`).
+    pub current_limit: [i32; 3],
+    pub current_limit_error: Vector3,
+}
+
+impl Default for TranslationalLimitMotor {
+    fn default() -> Self {
+        Self {
+            lower_limit: Vector3::ZERO,
+            upper_limit: Vector3::ZERO,
+            target_velocity: Vector3::ZERO,
+            max_motor_force: Vector3::ZERO,
+            enable_motor: [false; 3],
+            stop_erp: Vector3::splat(0.2),
+            current_limit: [0; 3],
+            current_limit_error: Vector3::ZERO,
+        }
+    }
+}
+
+/// The angular limit/motor parameters of one rotation axis (Bullet's
+/// `btRotationalLimitMotor`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RotationalLimitMotor {
+    /// Lower limit, radians (Bullet's `m_loLimit`; default 1.0 = free).
+    pub lower_limit: Real,
+    /// Upper limit, radians (Bullet's `m_hiLimit`; default −1.0 = free).
+    pub upper_limit: Real,
+    /// Motor target velocity, rad/s (Bullet's `m_targetVelocity`).
+    pub target_velocity: Real,
+    /// Motor max force, N·m (Bullet's `m_maxMotorForce`, default 6.0).
+    pub max_motor_force: Real,
+    /// Whether the motor is enabled (Bullet's `m_enableMotor`).
+    pub enable_motor: bool,
+    /// Positional-correction factor at the limit (Bullet's `m_stopERP`,
+    /// default 0.2).
+    pub stop_erp: Real,
+    /// Bounce restitution at the limit (Bullet's `m_bounce`, default 0).
+    pub bounce: Real,
+    /// Per-step limit state (Bullet's `m_currentLimit`: 0 = free,
+    /// 1 = lower limit, 2 = upper limit), the signed violation, and the
+    /// current (adjusted) angle.
+    pub current_limit: i32,
+    pub current_limit_error: Real,
+    pub current_position: Real,
+}
+
+impl Default for RotationalLimitMotor {
+    fn default() -> Self {
+        Self {
+            lower_limit: 1.0,
+            upper_limit: -1.0,
+            target_velocity: 0.0,
+            max_motor_force: 6.0,
+            enable_motor: false,
+            stop_erp: 0.2,
+            bounce: 0.0,
+            current_limit: 0,
+            current_limit_error: 0.0,
+            current_position: 0.0,
+        }
+    }
+}
+
+impl Generic6DofConstraint {
+    /// A generic 6DOF joint with Bullet's defaults (linear locked, angular
+    /// free).
+    pub fn new(frame_a: JointFrame, frame_b: JointFrame) -> Self {
+        Self {
+            frame_a,
+            frame_b,
+            linear: TranslationalLimitMotor::default(),
+            angular: [
+                RotationalLimitMotor::default(),
+                RotationalLimitMotor::default(),
+                RotationalLimitMotor::default(),
+            ],
+            current_linear_diff: Vector3::ZERO,
+            euler_angles: Vector3::ZERO,
+            angular_axes: [Vector3::ZERO; 3],
+        }
+    }
+
+    /// Set the linear lower/upper limits along the frame axes (Bullet's
+    /// `setLinearLowerLimit`/`setLinearUpperLimit`).
+    pub fn set_linear_limits(&mut self, lower: Vector3, upper: Vector3) {
+        self.linear.lower_limit = lower;
+        self.linear.upper_limit = upper;
+    }
+
+    /// Set the angular lower/upper limits around the relative-rotation axes
+    /// (Bullet's `setAngularLowerLimit`/`setAngularUpperLimit`; the angles
+    /// are normalized like Bullet's `btNormalizeAngle`).
+    pub fn set_angular_limits(&mut self, lower: Vector3, upper: Vector3) {
+        for i in 0..3 {
+            self.angular[i].lower_limit = normalize_angle(lower[i]);
+            self.angular[i].upper_limit = normalize_angle(upper[i]);
+        }
+    }
+
+    /// Set one axis's limits; axes 0-2 are linear, 3-5 angular (Bullet's
+    /// `setLimit(axis, lo, hi)`).
+    pub fn set_limit(&mut self, axis: usize, lo: Real, hi: Real) {
+        if axis < 3 {
+            self.linear.lower_limit[axis] = lo;
+            self.linear.upper_limit[axis] = hi;
+        } else {
+            let i = axis - 3;
+            self.angular[i].lower_limit = normalize_angle(lo);
+            self.angular[i].upper_limit = normalize_angle(hi);
+        }
+    }
+
+    /// Enable the motor on `axis` (0-2 linear, 3-5 angular) at
+    /// `target_velocity` with `max_force` (Bullet's `getLimitMotor` +
+    /// `m_enableMotor`).
+    pub fn enable_motor(&mut self, axis: usize, target_velocity: Real, max_force: Real) {
+        if axis < 3 {
+            self.linear.enable_motor[axis] = true;
+            self.linear.target_velocity[axis] = target_velocity;
+            self.linear.max_motor_force[axis] = max_force;
+        } else {
+            let i = axis - 3;
+            self.angular[i].enable_motor = true;
+            self.angular[i].target_velocity = target_velocity;
+            self.angular[i].max_motor_force = max_force;
+        }
+    }
+
+    /// Disable the motor on `axis`.
+    pub fn disable_motor(&mut self, axis: usize) {
+        if axis < 3 {
+            self.linear.enable_motor[axis] = false;
+        } else {
+            self.angular[axis - 3].enable_motor = false;
+        }
+    }
+
+    /// The current relative Euler angle of `axis` (0-2; Bullet's
+    /// `getAngle`), updated by the last solve step.
+    pub fn get_angle(&self, axis: usize) -> Real {
+        self.euler_angles[axis]
+    }
+
+    /// The current pivot offset along `axis` (0-2, in A's frame; Bullet's
+    /// `getRelativePivotPosition`), updated by the last solve step.
+    pub fn get_relative_pivot_position(&self, axis: usize) -> Real {
+        self.current_linear_diff[axis]
+    }
+
+    /// Test the linear limit on `axis` (Bullet's
+    /// `btTranslationalLimitMotor::testLimitValue`): 0 = free, 2 = below
+    /// the lower limit, 1 = above the upper limit.
+    pub fn test_linear_limit(&mut self, axis: usize, test_value: Real) -> i32 {
+        let lo = self.linear.lower_limit[axis];
+        let hi = self.linear.upper_limit[axis];
+        if lo > hi {
+            self.linear.current_limit[axis] = 0;
+            self.linear.current_limit_error[axis] = 0.0;
+            return 0;
+        }
+        if test_value < lo {
+            self.linear.current_limit[axis] = 2;
+            self.linear.current_limit_error[axis] = test_value - lo;
+            return 2;
+        }
+        if test_value > hi {
+            self.linear.current_limit[axis] = 1;
+            self.linear.current_limit_error[axis] = test_value - hi;
+            return 1;
+        }
+        self.linear.current_limit[axis] = 0;
+        self.linear.current_limit_error[axis] = 0.0;
+        0
+    }
+
+    /// Test the rotational limit on `axis` (Bullet's
+    /// `testAngularLimitMotor`): updates the current position/error and
+    /// returns whether a row is needed.
+    pub fn test_angular_limit_motor(&mut self, axis: usize) -> bool {
+        let angle = self.euler_angles[axis];
+        let angle = adjust_angle_to_limits(
+            angle,
+            self.angular[axis].lower_limit,
+            self.angular[axis].upper_limit,
+        );
+        self.angular[axis].current_position = angle;
+        let m = &mut self.angular[axis];
+        if m.lower_limit > m.upper_limit {
+            m.current_limit = 0;
+            return m.enable_motor;
+        }
+        if angle < m.lower_limit {
+            m.current_limit = 1;
+            m.current_limit_error = angle - m.lower_limit;
+            if m.current_limit_error > bullet_math::PI {
+                m.current_limit_error -= 2.0 * bullet_math::PI;
+            } else if m.current_limit_error < -bullet_math::PI {
+                m.current_limit_error += 2.0 * bullet_math::PI;
+            }
+        } else if angle > m.upper_limit {
+            m.current_limit = 2;
+            m.current_limit_error = angle - m.upper_limit;
+            if m.current_limit_error > bullet_math::PI {
+                m.current_limit_error -= 2.0 * bullet_math::PI;
+            } else if m.current_limit_error < -bullet_math::PI {
+                m.current_limit_error += 2.0 * bullet_math::PI;
+            }
+        } else {
+            m.current_limit = 0;
+        }
+        m.current_limit != 0 || m.enable_motor
+    }
+
+    /// Flatten this 6DOF joint into its solver rows: the angular rows
+    /// first, then the linear rows (Bullet solves angular limits first
+    /// when the frame-offset formulation is on, for stability).
+    fn prepare_rows(
+        &mut self,
+        body_a: usize,
+        body_b: usize,
+        bodies: &[RigidBody],
+        inv_dt: Real,
+        erp: Real,
+        out: &mut Vec<ConstraintRow>,
+    ) {
+        // The global ERP is unused: the 6DOF rows use the per-axis
+        // `stop_erp` (0.2 by default, like Bullet's `m_stopERP`).
+        let _ = erp;
+        let a = &bodies[body_a];
+        let b = &bodies[body_b];
+        let tr_a = Matrix3::from_quat(a.orientation) * self.frame_a.basis;
+        let tr_b = Matrix3::from_quat(b.orientation) * self.frame_b.basis;
+        let pivot_a = a.position + a.orientation * self.frame_a.origin;
+        let pivot_b = b.position + b.orientation * self.frame_b.origin;
+        let r_a = pivot_a - a.position;
+        let r_b = pivot_b - b.position;
+
+        // Linear info: the pivot offset expressed in A's frame (Bullet's
+        // `calculateLinearInfo`), tested against the limits.
+        let diff = tr_a.transpose() * (pivot_b - pivot_a);
+        self.current_linear_diff = diff;
+        for i in 0..3 {
+            self.test_linear_limit(i, diff[i]);
+        }
+
+        // Angle info: the relative Euler angles and the angular constraint
+        // axes (Bullet's `calculateAngleInfo`).
+        let (euler, axes) = relative_rotation_info(&tr_a, &tr_b);
+        self.euler_angles = euler;
+        self.angular_axes = axes;
+
+        // Angular rows (Bullet's `setAngularLimits`, rotational = 1).
+        for i in 0..3 {
+            if self.test_angular_limit_motor(i) {
+                let m = self.angular[i];
+                // Bullet's bounce velocity: `angVelA·ax1 − angVelB·ax1`.
+                let row_vel = a.angular_velocity.dot(axes[i]) - b.angular_velocity.dot(axes[i]);
+                self.push_limit_motor_row(
+                    body_a,
+                    body_b,
+                    a,
+                    b,
+                    inv_dt,
+                    axes[i],
+                    false,
+                    Vector3::ZERO,
+                    Vector3::ZERO,
+                    m.current_limit,
+                    m.current_limit_error,
+                    m.lower_limit,
+                    m.upper_limit,
+                    m.stop_erp,
+                    m.enable_motor,
+                    m.target_velocity,
+                    m.max_motor_force,
+                    m.current_position,
+                    m.bounce,
+                    row_vel,
+                    out,
+                );
+            }
+        }
+
+        // Linear rows (Bullet's `setLinearLimits`, rotational = 0). The
+        // axis is frame A's column i; the angular jacobians use the
+        // point-to-point lever arms (deviation: Bullet's frame-offset
+        // formulation is not used).
+        for i in 0..3 {
+            if self.linear.current_limit[i] != 0 || self.linear.enable_motor[i] {
+                let ax1 = tr_a.col(i);
+                // Bullet's bounce velocity: `linVelA·ax1 − linVelB·ax1`.
+                let row_vel = a.linear_velocity.dot(ax1) - b.linear_velocity.dot(ax1);
+                self.push_limit_motor_row(
+                    body_a,
+                    body_b,
+                    a,
+                    b,
+                    inv_dt,
+                    ax1,
+                    true,
+                    r_a,
+                    r_b,
+                    self.linear.current_limit[i],
+                    self.linear.current_limit_error[i],
+                    self.linear.lower_limit[i],
+                    self.linear.upper_limit[i],
+                    self.linear.stop_erp[i],
+                    self.linear.enable_motor[i],
+                    self.linear.target_velocity[i],
+                    self.linear.max_motor_force[i],
+                    self.current_linear_diff[i],
+                    0.0,
+                    row_vel,
+                    out,
+                );
+            }
+        }
+    }
+
+    /// One limit/motor row (Bullet's `get_limit_motor_info2`): builds the
+    /// constraint error (Bullet's `m_constraintError`), the impulse window
+    /// and the bounce, then pushes the mirrored solver row. `linear`
+    /// selects the linear vs rotational error signs and the tag-velocity
+    /// flip; `row_vel` is Bullet's `J·v = axis·(velA − velB)` used by the
+    /// bounce test.
+    #[allow(clippy::too_many_arguments)]
+    fn push_limit_motor_row(
+        &self,
+        body_a: usize,
+        body_b: usize,
+        a: &RigidBody,
+        b: &RigidBody,
+        inv_dt: Real,
+        ax1: Vector3,
+        linear: bool,
+        lin_r_a: Vector3,
+        lin_r_b: Vector3,
+        limit: i32,
+        limit_err: Real,
+        lo: Real,
+        hi: Real,
+        stop_erp: Real,
+        powered: bool,
+        target_velocity: Real,
+        max_motor_force: Real,
+        current_pos: Real,
+        bounce: Real,
+        row_vel: Real,
+        out: &mut Vec<ConstraintRow>,
+    ) {
+        let mut powered = powered;
+        // Locked axes make the motor ineffective (Bullet's `if (limit &&
+        // (loLimit == hiLimit)) powered = false`).
+        if limit != 0 && lo == hi {
+            powered = false;
+        }
+        let mut row_error: Real = 0.0;
+        if powered && limit == 0 {
+            // The motor fades near the limits via `getMotorFactor`; the
+            // tag velocity flips sign for the linear axes (Bullet's
+            // `tag_vel = rotational ? target : -target`).
+            let tag_vel = if linear { -target_velocity } else { target_velocity };
+            let mot_fact = get_motor_factor(current_pos, lo, hi, tag_vel, inv_dt * stop_erp);
+            row_error += mot_fact * target_velocity;
+        }
+        if limit != 0 {
+            let k = inv_dt * stop_erp;
+            // Linear rows add `+k·err`, rotational rows `−k·err` (Bullet's
+            // `get_limit_motor_info2` branches).
+            row_error += if linear { k * limit_err } else { -k * limit_err };
+            // Bounce: only for incoming velocities, replacing the error
+            // when it exceeds what we already have.
+            if bounce > 0.0 {
+                if limit == 1 {
+                    if row_vel < 0.0 {
+                        let newc = -bounce * row_vel;
+                        if newc > row_error {
+                            row_error = newc;
+                        }
+                    }
+                } else if row_vel > 0.0 {
+                    let newc = -bounce * row_vel;
+                    if newc < row_error {
+                        row_error = newc;
+                    }
+                }
+            }
+        }
+        // The Bullet-side impulse window, mirrored through our row
+        // convention (our λ = −Bullet's λ).
+        let (lower, upper) = if powered && limit == 0 {
+            (-max_motor_force / inv_dt, max_motor_force / inv_dt)
+        } else if limit != 0 {
+            if lo == hi {
+                (-Real::INFINITY, Real::INFINITY)
+            } else if limit == 1 {
+                // Rotational low / linear high: `[0, +inf]` in Bullet.
+                (0.0, Real::INFINITY)
+            } else {
+                (-Real::INFINITY, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
+        let limits = mirrored_row_limits(lower, upper);
+        if linear {
+            out.push(ConstraintRow::prepare(
+                body_a,
+                body_b,
+                ax1,
+                lin_r_a.cross(ax1),
+                ax1,
+                lin_r_b.cross(ax1),
+                a,
+                b,
+                -row_error,
+                limits,
+            ));
+        } else {
+            out.push(ConstraintRow::prepare(
+                body_a,
+                body_b,
+                Vector3::ZERO,
+                ax1,
+                Vector3::ZERO,
+                ax1,
+                a,
+                b,
+                -row_error,
+                limits,
+            ));
+        }
+    }
+}
+
 /// Flatten a [`Constraint`] into its solver rows for this step (Bullet's
 /// `getInfo1` + `getInfo2` + `convertJoint`). Rows are appended to `out`.
 /// `inv_dt` is `1 / dt` (Bullet's `info2.fps`); `erp` is the global ERP
@@ -2048,6 +2586,16 @@ pub fn prepare_rows(
         }
         ConstraintKind::Slider(slider) => {
             slider.prepare_rows(
+                constraint.body_a,
+                constraint.body_b,
+                bodies,
+                inv_dt,
+                erp,
+                out,
+            );
+        }
+        ConstraintKind::Generic6Dof(dof) => {
+            dof.prepare_rows(
                 constraint.body_a,
                 constraint.body_b,
                 bodies,
@@ -2822,5 +3370,169 @@ mod tests {
             max_ang = max_ang.max(s.ang_pos.abs());
         }
         assert!(max_ang < 0.5, "box passed the angular limit: {max_ang}");
+    }
+
+    /// A fully locked generic 6DOF behaves like a fixed joint: an initial
+    /// spin and sideways push are killed, the relative orientation returns
+    /// to identity and the pivot stays on the anchor.
+    #[test]
+    fn generic_6dof_locked_is_rigid() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        let anchor = world.add_body(RigidBody::new_static(
+            CollisionShape::box_shape(Vector3::splat(0.2)),
+            Vector3::ZERO,
+        ));
+        let box_body = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::splat(0.3)),
+            Vector3::new(0.0, 1.0, 0.0),
+            1.0,
+        ));
+        // All six limits locked at zero (the default linear limits already
+        // lock; lock the angular ones too).
+        let mut dof = Constraint::generic_6dof(
+            box_body,
+            anchor,
+            JointFrame::new(Vector3::new(0.0, 0.5, 0.0), Matrix3::IDENTITY),
+            JointFrame::new(Vector3::new(0.0, 1.5, 0.0), Matrix3::IDENTITY),
+        );
+        dof.kind_mut()
+            .generic_6dof_mut()
+            .set_angular_limits(Vector3::ZERO, Vector3::ZERO);
+        world.add_constraint(dof);
+        world.body_mut(box_body).angular_velocity = Vector3::new(0.0, 0.0, 4.0);
+        world.body_mut(box_body).linear_velocity = Vector3::new(2.0, 0.0, 0.0);
+        let mut max_rel_angle: Real = 0.0;
+        for _ in 0..600 {
+            world.step_simulation(DT);
+            max_rel_angle =
+                max_rel_angle.max(quaternion_angle(&world.body(box_body).orientation));
+        }
+        let b = world.body(box_body);
+        assert!(
+            max_rel_angle < 0.5,
+            "relative orientation wandered during the kick: {max_rel_angle}"
+        );
+        assert!(
+            (b.position - Vector3::new(0.0, 1.0, 0.0)).length() < 0.03,
+            "box drifted from below the anchor: {:?}",
+            b.position
+        );
+    }
+
+    /// A generic 6DOF with one angular limit stops the spin around that
+    /// axis: the relative Euler angle stays inside the limit.
+    #[test]
+    fn generic_6dof_angular_limit_stops_the_spin() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let anchor = world.add_body(RigidBody::new_static(
+            CollisionShape::box_shape(Vector3::splat(0.2)),
+            Vector3::ZERO,
+        ));
+        let box_body = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::splat(0.3)),
+            Vector3::ZERO,
+            1.0,
+        ));
+        // Linear locked (default), angular X limited to ±0.4, Y/Z free.
+        let mut dof = Constraint::generic_6dof(
+            box_body,
+            anchor,
+            JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
+            JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
+        );
+        dof.kind_mut()
+            .generic_6dof_mut()
+            .set_angular_limits(Vector3::new(-0.4, -1.0, -1.0), Vector3::new(0.4, 1.0, 1.0));
+        world.add_constraint(dof);
+        // Spin the box around X: the X Euler angle swings against its limit.
+        world.body_mut(box_body).angular_velocity = Vector3::new(4.0, 0.0, 0.0);
+        let mut max_angle: Real = 0.0;
+        for _ in 0..300 {
+            world.step_simulation(DT);
+            let a = world.constraint(0).kind().generic_6dof().get_angle(0);
+            max_angle = max_angle.max(a.abs());
+        }
+        assert!(max_angle < 0.5, "box passed the angular limit: {max_angle}");
+        assert!(max_angle > 0.3, "box barely rotated: {max_angle}");
+    }
+
+    /// A generic 6DOF angular motor rotates the joint around the Z euler
+    /// axis at the target velocity.
+    #[test]
+    fn generic_6dof_motor_rotates_an_axis() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let anchor = world.add_body(RigidBody::new_static(
+            CollisionShape::box_shape(Vector3::splat(0.2)),
+            Vector3::ZERO,
+        ));
+        let box_body = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::splat(0.3)),
+            Vector3::ZERO,
+            1.0,
+        ));
+        let mut dof = Constraint::generic_6dof(
+            box_body,
+            anchor,
+            JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
+            JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
+        );
+        // Angular Z motor at 1 rad/s (axis 5 = angular Z).
+        dof.kind_mut().generic_6dof_mut().enable_motor(5, 1.0, 100.0);
+        world.add_constraint(dof);
+        for _ in 0..180 {
+            world.step_simulation(DT);
+        }
+        let angle = world.constraint(0).kind().generic_6dof().get_angle(2);
+        // 3 s at 1 rad/s of relative rotation around the Z euler axis.
+        assert!(
+            (angle.abs() - 3.0).abs() < 1.0,
+            "motor did not rotate the joint at 1 rad/s: angle {angle}"
+        );
+    }
+
+    /// A generic 6DOF with a linear limit stops the box sliding along that
+    /// axis: the pivot offset stays inside the limit.
+    #[test]
+    fn generic_6dof_linear_limit_stops_the_slide() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let anchor = world.add_body(RigidBody::new_static(
+            CollisionShape::box_shape(Vector3::splat(0.2)),
+            Vector3::ZERO,
+        ));
+        let box_body = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::splat(0.3)),
+            Vector3::new(0.2, 0.0, 0.0),
+            1.0,
+        ));
+        let mut dof = Constraint::generic_6dof(
+            box_body,
+            anchor,
+            JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
+            JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
+        );
+        // Linear X limited to ±0.3, Y/Z locked (default), angular free
+        // (default).
+        dof.kind_mut()
+            .generic_6dof_mut()
+            .set_linear_limits(Vector3::new(-0.3, 0.0, 0.0), Vector3::new(0.3, 0.0, 0.0));
+        world.add_constraint(dof);
+        // Push the box hard along X; the limit is a velocity bias, so the
+        // box rebounds and coasts back (no friction, like Bullet).
+        world.body_mut(box_body).linear_velocity = Vector3::new(4.0, 0.0, 0.0);
+        let mut max_x: Real = 0.0;
+        for _ in 0..180 {
+            world.step_simulation(DT);
+            max_x = max_x.max(world.body(box_body).position.x);
+        }
+        assert!(max_x < 0.34, "box passed the upper limit: {max_x}");
+        assert!(
+            world.body(box_body).position.x < 0.3,
+            "box did not return inside the limits: {:?}",
+            world.body(box_body).position
+        );
     }
 }

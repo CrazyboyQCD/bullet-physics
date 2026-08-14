@@ -12,8 +12,9 @@ pub use body::RigidBody;
 pub use character::KinematicCharacterController;
 pub use constraint::{
     AngularLimit, ConeTwistConstraint, ConeTwistMotor, Constraint, ConstraintKind,
-    FixedConstraint, HingeConstraint, HingeMotor, JointFrame, Point2PointConstraint,
-    SliderConstraint, SliderMotor,
+    FixedConstraint, Generic6DofConstraint, HingeConstraint, HingeMotor, JointFrame,
+    Point2PointConstraint, RotationalLimitMotor, SliderConstraint, SliderMotor,
+    TranslationalLimitMotor,
 };
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
 pub use world::PhysicsWorld;
