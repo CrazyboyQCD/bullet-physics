@@ -13,7 +13,7 @@
 //!
 //! ## License
 //!
-//! MIT OR Apache-2.0.
+//! zlib (same as upstream Bullet Physics).
 
 #![deny(unsafe_code)]
 
