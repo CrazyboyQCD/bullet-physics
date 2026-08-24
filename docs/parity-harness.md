@@ -1,9 +1,9 @@
 # Parity Harness — frame-by-frame numerical comparison with Bullet
 
 > Design for verifying that this Rust reimplementation reproduces Bullet's
-> behavior numerically, not just semantically. Landing path step 1–4 done
-> (falling_box, f32 pair) on 2026-08-14; see `docs/bullet-compare.md` for the
-> first report. Remaining scenes pending (see "Landing path").
+> behavior numerically, not just semantically. All six scenes are landed in
+> both precisions (f32 + f64 pairs, 2026-08-14); see `docs/bullet-compare.md`
+> for the ledger. This document records the harness design and run protocol.
 
 ## Goal and key preconditions
 
@@ -45,8 +45,9 @@ docs/
 - **Parameter contract**: every scene is defined once in `tools/scenes.json`
   (shapes/poses/masses/friction/restitution, dt as a fraction, iterations,
   recorded bodies); `tools/generate_scenes.py` derives the C++ and Rust scene
-  tables, so the two recorders can never drift apart. Scenes: `falling_box`
-  (done), `falling_capsule` (done), then `stacking`, `mesh`, `ccd`, sleeping.
+  tables, so the two recorders can never drift apart. Current scenes:
+  `falling_box`, `falling_capsule`, `stacking`, `mesh`, `ccd`, `sleeping`
+  (all landed in both precisions).
   Adding a scene = one JSON block + a parity run + a classification entry.
 - **Output format**: one line per frame,
   `t px py pz qx qy qz qw` (10 columns, `%.6f`), redirected to
@@ -67,6 +68,8 @@ mean deviation; classification columns are filled in manually.
 
 ## Landing path (get one scene working end-to-end first)
 
+All steps are done; the list records how the harness was landed.
+
 1. ✅ CMake-build `refs/bullet3` (only `LinearMath` + `BulletCollision` +
    `BulletDynamics` static libs; disable example/demo targets).
 2. ✅ Write `bullet_record.cpp` replicating `falling_box`; record the trajectory.
@@ -74,7 +77,7 @@ mean deviation; classification columns are filled in manually.
 4. ✅ Run `compare.py`; produce the first difference report; classify; log to
    `bullet-compare.md` (see `tools/parity.py --update-ledger` for the automated
    rerun).
-5. Extend to the remaining scenes (roughly half a day each); register each
+5. ✅ Extend to the remaining scenes; register each
    scene in `tools/parity.py`'s `EXAMPLES` map.
 
 ## Risks and mitigations

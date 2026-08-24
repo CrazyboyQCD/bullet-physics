@@ -1,7 +1,9 @@
 # Architecture
 
 This document describes the design of `bullet_physics`, a pure Rust
-reimplementation of the core of Bullet Physics.
+reimplementation of the core of Bullet Physics. It reflects the code as of
+phase 5b (Featherstone multibody + multibody constraints). Behavior-level
+differences from Bullet are tracked in `bullet-deviations.md`, not here.
 
 ## 1. Workspace crates
 
@@ -15,10 +17,10 @@ bullet-math  ──►  bullet-collision  ──►  bullet-dynamics  ──► 
 ```
 
 | Crate             | Contents                                                                 |
-| ----------------- | ------------------------------------------------------------------------ |
-| `bullet-math`     | `Real` scalar + `Vector3`/`Quaternion`/`Matrix3`/`Transform` aliases, `Aabb`, inertia helpers |
-| `bullet-collision`| `shapes` (CollisionShape enum), `broadphase`, `narrowphase` (GJK/EPA/SAT), `manifold` |
-| `bullet-dynamics` | `body` (RigidBody), `world` (PhysicsWorld), `solver` (sequential impulse) |
+| ------------------ | ------------------------------------------------------------------------ |
+| `bullet-math`     | `Real` scalar + `Vector3`/`Quaternion`/`Matrix3`/`Transform` aliases, `Aabb`, inertia helpers, spatial algebra (`btSpatialAlgebra.h` port) |
+| `bullet-collision`| `shapes` (10 shape kinds), `broadphase`, `narrowphase` (GJK/EPA/SAT/convex cast), `manifold`, `raycast` |
+| `bullet-dynamics` | `body` (RigidBody), `world` (PhysicsWorld), `solver`, `constraint` (joints), `character`, `vehicle`, `multibody` |
 | `bullet`          | Re-exports the crates plus a `prelude` for convenience                     |
 
 Each crate is independently versioned and publishable; the `bullet` facade is
@@ -37,6 +39,9 @@ with cargo features plus `cfg` switching:
 Every crate defines `f32` (default) and `f64` features; `f64` is forwarded to
 the upstream crates so a single `--features f64` on the facade switches the
 whole workspace. All code uses only the aliases, never a concrete precision.
+Precision-sensitive constants (EPA tolerances, twist-axis normalization,
+spherical-limit skip thresholds) follow Bullet's `BT_USE_DOUBLE_PRECISION`
+behavior per feature.
 
 ## 3. Math layer
 
@@ -44,75 +49,221 @@ whole workspace. All code uses only the aliases, never a concrete precision.
   `Quaternion = Quat` / `DQuat`, `Transform = Affine3A` / `DAffine3`.
 - `Aabb { min, max }` with `overlaps` / `merged` / `center` / `extents`.
 - `inertia_tensor_world` builds `R * diag(inv_I) * R^T` for solver use.
+- Precision-independent constants (`PI`, `FRAC_PI_2`, `FRAC_1_SQRT_2`) are
+  re-exported here because the toolchain lacks the associated float constants.
+- `spatial` ports `btSpatialAlgebra.h` (spatial motion/force vectors,
+  symmetric spatial dyads, spatial transform matrices) for the Featherstone
+  subsystem.
 
-## 4. Collision pipeline
+## 4. Shapes
 
-1. **Broad phase** (`BroadPhase` trait + `BruteForceBroadPhase`): coarse
-   AABB-based pair filtering. A `DbvtBroadPhase` is planned for performance.
-2. **Narrow phase**: exact convex-convex tests, dispatched on the
-   `CollisionShape` enum (no `dyn` in the hot path):
-   - `sphere-sphere`, `sphere-box` closed forms;
+`CollisionShape` is a value enum (cheap to clone, shareable across bodies —
+the equivalent of sharing one `btCollisionShape`): sphere, box, capsule,
+cylinder, cone (all `radius + half_height` along Y), convex hull, compound,
+plane, triangle mesh (internal BVH), heightfield (materialized as a triangle
+mesh). Mesh/heightfield bodies are static-only. Inertia: exact analytic
+formulas for the primitives, AABB-box approximation for hull/compound
+(matching Bullet).
+
+## 5. Collision pipeline
+
+1. **Broad phase**: `AxisSweep3` — three-axis sweep-and-prune over
+   incrementally maintained sorted lists (`O(n + k)` per step; static bodies
+   with unchanged AABBs cost nothing). `compute_pairs` intersects the three
+   axes' overlap sets (exact AABB pairs); `raycast_candidates` /
+   `aabb_candidates` prune ray and AABB queries via the slab method
+   (equivalent to `btAxisSweep3::rayTest`). A `DbvtBroadphase` port is a
+   roadmap item for very large scenes.
+2. **Narrow phase**, dispatched on the `CollisionShape` enum (no `dyn` in the
+   hot path):
+   - `sphere-sphere`, `sphere-box`, `plane-convex` closed forms;
    - `box-box` via the ODE `dBoxBox2` SAT (15 axes + face clipping);
    - generic convex pairs via **GJK** (Minkowski difference + simplex solve)
-     seeded into **EPA** for penetration depth.
+     seeded into **EPA** for penetration depth — a line-by-line port of
+     `btGjkEpa2` (same tolerances, winding rules, degeneracy aborts);
+   - `convex-mesh`: convex AABB → mesh local space → BVH candidate triangles →
+     per-triangle GJK+EPA, merged into one manifold and reduced to 4 points
+     (deepest point + greedy most-spread selection, Bullet's manifold
+     reduction). Concave-concave and plane-concave pairs return no contacts.
+   - compound shapes recurse into children.
 3. **Manifold**: `ContactPoint { position, normal, penetration, impulses }`
-   collected into a `ContactManifold`.
+   collected into a `ContactManifold`. Unlike Bullet's persistent manifolds,
+   manifolds are rebuilt every step; a normal-impulse cache keyed by body pair
+   provides warm starting (see §7).
 
-## 5. Dynamics & simulation loop
+## 6. Queries
+
+- **Raycast** (`raycast.rs`): analytic intersections for the primitive shapes,
+  GJK-distance bisection for convex hulls, BVH + Möller–Trumbore (double
+  sided) for meshes/heightfields. Bullet `rayTest` semantics: `fraction` is a
+  segment parameter, the normal points toward the ray origin; interior starts
+  report `fraction = 0` (a documented deviation). `PhysicsWorld` queries
+  (`raycast_closest`, `raycast_closest_excluding`) prune with the broad phase
+  first.
+- **Convex sweeps** (`narrowphase/convex_sweep.rs`): Minkowski GJK distance
+  walk for convex targets, analytic planes, BVH-pruned per-triangle casts for
+  meshes — the backend of `PhysicsWorld::convex_sweep_closest`, which feeds
+  the character controller (equivalent of `btCollisionWorld::convexSweep` for
+  a closest-hit query).
+- **Contact test**: `PhysicsWorld::contact_test` returns the overlap manifold
+  of a body pair without adding contacts to the solver.
+
+## 7. Dynamics & simulation loop
 
 `PhysicsWorld::step_simulation` mirrors `btDiscreteDynamicsWorld`:
 
 1. integrate velocities (gravity + accumulated forces, semi-implicit Euler);
-2. predict positions for contact detection;
-3. update broad-phase AABBs;
+2. predict positions (`position + v·dt`) for contact detection;
+3. update broad-phase AABBs (sleeping bodies skip — they do not move);
 4. compute broad-phase pairs;
-5. narrow phase → contact manifolds → constraints;
-6. solve constraints (correct velocities);
-7. integrate positions with the corrected velocities;
-8. clear accumulated forces.
+5. narrow phase → contact manifolds → warm-start matching (cached normal
+   impulses inherited for points within `gContactBreakingThreshold` with a
+   consistent normal; friction impulses are never inherited — a documented
+   deviation that prevents tangent-basis rotation oscillation);
+6. joint rows flattened from the current poses (`convertJoints` equivalent);
+7. wake-up propagation: a sleeping body touching (or joint-linked to) an
+   active body wakes; two sleeping bodies never wake each other;
+8. solve constraints (correct velocities);
+9. write solved impulses back to the warm-start cache;
+10. deactivation check (`updateDeactivation` / `goToSleep` semantics);
+11. integrate positions with the corrected velocities — CCD fast-movers are
+    clamped at the first swept-sphere TOI, and split-impulse push velocities
+    are applied to the pose here;
+12. clear accumulated forces.
 
-## 6. Solver
+**Sleeping**: `ActivationState` mirrors Bullet's five states; thresholds
+0.8 linear / 1.0 angular, `DEACTIVATION_TIME = 2 s`; static bodies start
+asleep; `apply_force` auto-activates.
+
+**CCD**: bodies with a motion threshold exceeding their per-step displacement
+are swept as a sphere of `sweptSphereRadius` against convex shapes (GJK on the
+inflated shape), planes (analytic) and meshes (per-triangle analytic casts via
+the BVH); the position is clamped at the first TOI and the response happens on
+the next step's narrow phase (Bullet's `integrateTransforms` behavior).
+
+## 8. Solver
 
 `sequential_impulse` implements a projected Gauss-Seidel contact solver:
-normal impulse (non-negative, with restitution and Baumgarte stabilization) and
-two tangent friction directions clamped by Coulomb's law.
+normal impulses (non-negative, with restitution above a velocity threshold and
+Baumgarte stabilization past a 5 mm slop), two tangent friction directions
+clamped by Coulomb's law, friction/restitution combined as products (matching
+`btManifoldResult`), and a **split-impulse** pass: penetrations deeper than
+0.04 m drop the Baumgarte bias from the velocity solve and are corrected by a
+post-iteration pseudo-impulse accumulated on each body's push velocity,
+applied to the pose after position integration (never touching the real
+velocities). Joint rows share the PGS loop with contact rows.
 
-## 7. Memory management
+## 9. Joints (rigid-body constraints)
+
+`Constraint` (`dynamics/constraint.rs`, Bullet's `ConstraintSolver` module)
+with a `ConstraintKind` enum mirroring the six Bullet joints:
+
+| Kind           | Bullet class              | Formulation notes |
+|----------------|---------------------------|-------------------|
+| `Point2Point`  | `btPoint2PointConstraint` | three world-axis bilateral rows, ERP bias, optional impulse clamp |
+| `Hinge`        | `btHingeConstraint`       | classic `getInfo2Internal`: pivot rows + two axis-alignment rows + optional limit/motor row (`btAngularLimit` math) |
+| `Fixed`        | `btFixedConstraint`       | pivot rows + three angular rows driving the relative Euler angles to zero |
+| `ConeTwist`    | `btConeTwistConstraint`   | elliptical swing limit + one-sided twist limit + motor with in-cone target clamping |
+| `Slider`       | `btSliderConstraint`      | frame-offset formulation: blended axis, two angular + two linear ortho rows, limit/motor rows |
+| `Generic6Dof`  | `btGeneric6DofConstraint` | classic recipe: Euler-angle angular rows along `m_calculatedAxis`, frame-column linear rows, per-axis limit motors |
+
+Rows are explicit Jacobians (`ConstraintRow`) with one-sided/bilateral clamp
+windows; joints are not warm-started (Bullet default); pairs linked by a joint
+skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
+
+## 10. Featherstone multibody
+
+`bullet_dynamics::multibody` is a self-contained port of
+`BulletDynamics/Featherstone`:
+
+- `MultiBody` (`btMultiBody`): the five joint types (revolute, prismatic,
+  spherical, planar, fixed), forward kinematics, `compTreeLinkVelocities`,
+  the articulated-body algorithm (up-down-up passes, per-link `D⁻¹` scatter
+  layout, gyro/Coriolis terms, damping), 6×6 spatial-inertia solve for the
+  base, constraint-impulse response reusing the ABA factorization, and the
+  exponential-map position integrator.
+- `MultiBodyConstraint`: point-to-point, fixed, slider, joint motor, gear,
+  joint limit, spherical joint limit, spherical joint motor — the
+  `fillMultiBodyConstraint` recipe (unit-impulse response, `jacDiagABInv`,
+  split-penetration RHS suppression like Bullet's defaults).
+- `MultiBodyWorld` (`btMultiBodyDynamicsWorld` multibody-only subset):
+  gravity → ABA velocity integration → row conversion + PGS (10×1 iterations,
+  alternating direction) → writeback with `±maxCoordinateVelocity` clamping →
+  position integration → sleeping check. Collision integration
+  (`btMultiBodyLinkCollider`) is the next roadmap item.
+
+## 11. Higher-level features
+
+- **Kinematic character controller** (`character.rs`): port of
+  `btKinematicCharacterController` (stepUp / stepForwardAndStrafe / stepDown
+  double-sweep, Quake-2 anti-oscillation, penetration recovery). The character
+  is a static solid body moved through world queries (`convex_sweep_closest`,
+  `contact_test`).
+- **Raycast vehicle** (`vehicle.rs`): port of `btRaycastVehicle` — wheel rays,
+  spring-damper suspension scaled by chassis mass, steering/drive/brake
+  impulses, lateral friction with the friction-cone sliding clamp and
+  `ROLLING_INFLUENCE_FIX`. Runs after `step_simulation` like Bullet's actions;
+  wheel rays explicitly exclude the chassis.
+
+## 12. Memory management
 
 - Arenas (`Vec<RigidBody>`) owned by `PhysicsWorld`; bodies are addressed by
-  index.
-- No per-step heap allocation on the hot path (broad-phase pairs, manifolds,
-  and constraints are collected into reusable buffers).
+  index (body removal is not supported yet — indices double as broad-phase
+  proxy handles; see deviations §3).
+- No per-step heap allocation on the hot path beyond reusable buffers.
 - `CollisionShape` is a value enum, cheap to clone and shareable across bodies
   (equivalent to Bullet sharing one `btCollisionShape`).
 
-## 8. Roadmap
+## 13. Verification strategy
 
-- **Phase 1 (done)**: MVP end-to-end rigid-body pipeline — sphere/box shapes,
-  brute-force broad phase, GJK/EPA + specialized narrow phase, sequential
-  impulse solver, falling-box demo.
-- **Phase 2**: capsule/cylinder/cone/convex-hull/compound/plane shapes, raycast,
-  `AxisSweep3`, triangle mesh (BVH) and heightfield.
-- **Phase 3**: sleeping/activation, CCD, character controller, vehicle.
-- **Phase 4**: constraints (Point2Point, Hinge, Generic6Dof, ...).
-- **Phase 5**: Featherstone multibody.
-- Serialization is deferred until the core is complete.
+- **Unit tests**: 176 tests (110 collision + 66 dynamics), all run in both
+  precisions; `python tools/check.py` runs them plus the 8 demo assertions.
+- **Parity harness** (`docs/parity-harness.md`): frame-by-frame trajectory
+  comparison against the real Bullet static library (C++ and Rust recorders
+  driven from one `tools/scenes.json`), 6 scenes × f32/f64; the difference
+  ledger `docs/bullet-compare.md` classifies every exceedance as a known
+  trade-off or an implementation problem.
+- **Multibody probes**: `tools/multibody_probe.cpp` vs
+  `crates/bullet/examples/multibody_probe.rs`, 13 scenes × f32/f64 against
+  the real Bullet library.
 
-## 9. Bullet → Rust mapping
+## 14. Roadmap
+
+- **Phase 1 (done)**: MVP end-to-end rigid-body pipeline.
+- **Phase 2 (done)**: all primitive + convex + compound + plane shapes,
+  raycast, `AxisSweep3`, triangle mesh (BVH) and heightfield, warm starting,
+  manifold reduction.
+- **Phase 3 (done)**: sleeping/activation, CCD, character controller, vehicle.
+- **Phase 4 (done)**: the six rigid-body joints.
+- **Phase 5 (done)**: Featherstone multibody core, constraints and world;
+  phase 5b added the joint-limit / spherical limit / spherical motor
+  constraints.
+- **Next**: multibody collision integration (`btMultiBodyLinkCollider` in a
+  unified world). Later candidates: DBVT broadphase, simulation islands,
+  serialization.
+
+## 15. Bullet → Rust mapping
 
 | Bullet 3                                | Rust module / type                          |
 | ---------------------------------------- | ------------------------------------------- |
 | `btScalar`                               | `bullet_math::Real`                         |
 | `btVector3` / `btQuaternion` / `btMatrix3x3` / `btTransform` | `Vector3` / `Quaternion` / `Matrix3` / `Transform` |
+| `btSpatialAlgebra.h`                     | `bullet_math::spatial`                      |
 | `btAlignedObjectArray<T>`                | `Vec<T>`                                    |
 | `btCollisionShape`                       | `bullet_collision::shapes::CollisionShape`  |
-| `btBoxShape` / `btSphereShape`           | `BoxShape` / `Sphere`                       |
-| `btDbvtBroadphase` / `btAxisSweep3`      | `broadphase::DbvtBroadPhase` / `AxisSweep3` |
+| `btBoxShape` / `btSphereShape` / …       | `CollisionShape::Box` / `::Sphere` / …      |
+| `btBvhTriangleMeshShape` / `btHeightfieldTerrainShape` | `CollisionShape::TriangleMesh` / `::Heightfield` |
+| `btAxisSweep3`                           | `broadphase::AxisSweep3` (default)          |
+| `btDbvtBroadphase`                       | not ported (roadmap)                        |
 | `btGjkPairDetector` + `btVoronoiSimplexSolver` | `narrowphase::gjk`                    |
 | `btGjkEpa2`                              | `narrowphase::epa`                          |
-| `btPersistentManifold`                   | `manifold::ContactManifold`                 |
+| `btCollisionWorld::rayTest` / `convexSweep` | `raycast::raycast`, `PhysicsWorld::raycast_closest` / `narrowphase::convex_cast` |
+| `btPersistentManifold`                   | `manifold::ContactManifold` (+ impulse cache) |
 | `btRigidBody` / `btCollisionObject`      | `dynamics::RigidBody`                       |
 | `btDiscreteDynamicsWorld`                | `dynamics::PhysicsWorld`                    |
 | `btSequentialImpulseConstraintSolver`    | `solver::sequential_impulse`                |
-| `btTypedConstraint` subclasses           | `solver::joints` (planned)                  |
-| Featherstone `btMultiBody*`              | `multibody` (planned)                       |
+| `btTypedConstraint` subclasses           | `constraint::{Constraint, ConstraintKind}`   |
+| `btKinematicCharacterController`         | `dynamics::KinematicCharacterController`    |
+| `btRaycastVehicle`                       | `dynamics::RaycastVehicle`                  |
+| `btMultiBody` / `btMultiBodyConstraint` / `btMultiBodyDynamicsWorld` | `multibody::{MultiBody, MultiBodyConstraint, MultiBodyWorld}` |
+| `btMultiBodyLinkCollider`                | not ported (next roadmap item)              |

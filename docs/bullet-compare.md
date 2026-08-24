@@ -768,7 +768,7 @@ Total exceedances: 10 (pos tol 0.01, ang tol 0.01)
 
 f64 pair of the f32 scene above: identical pattern and classification - one-step impact phase offset (10 frames) plus the slop rest offset. The deviations are structural (contact detection pose, slop), not precision-related.
 
-## Next scenes (pending)
+## Scene inventory (all landed)
 
 | Scene | Status | Notes |
 |---|---|---|
