@@ -4,19 +4,19 @@
 //! (`btMultiBody`, `btMultiBodyDynamicsWorld`, `btMultiBodyConstraint`).
 //!
 //! Unlike the rigid-body [`bullet::dynamics::PhysicsWorld`], articulated
-//! bodies are stepped through their own [`bullet::dynamics::MultiBodyWorld`];
+//! bodies are stepped through the fused [`bullet::dynamics::PhysicsWorld`];
 //! joints between them are `btMultiBody*`-style constraints solved by the
 //! multibody projected Gauss-Seidel solver inside
 //! `world.step_simulation(dt)`.
 //!
 //! Run with `cargo run --example multibody`.
 
-use bullet::dynamics::{MultiBody, MultiBodyConstraint, MultiBodyWorld};
+use bullet::dynamics::{MultiBody, MultiBodyConstraint, PhysicsWorld};
 use bullet::math::{Quaternion, Real, Vector3};
 
 fn main() {
     // --- Scene 1: fixed-base revolute pendulum released from the horizontal.
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
     let mut pendulum = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
     pendulum.setup_revolute(
@@ -50,7 +50,7 @@ fn main() {
     let slider_idx = world.add_multibody(slider);
     let snapshot = world.multibodies().to_vec();
     let motor = MultiBodyConstraint::joint_motor(slider_idx, 0, 0, 2.0, 100.0, &snapshot);
-    world.add_constraint(motor);
+    world.add_multibody_constraint(motor);
 
     // --- Scene 3: two free bases tethered by a point-to-point constraint
     // (the pair falls as one body).
@@ -63,7 +63,7 @@ fn main() {
     let ib = world.add_multibody(b);
     let snapshot = world.multibodies().to_vec();
     let tether = MultiBodyConstraint::point2point(ia, None, ib, None, Vector3::ZERO, Vector3::ZERO, &snapshot);
-    world.add_constraint(tether);
+    world.add_multibody_constraint(tether);
 
     // --- Scene 4: two geared revolute links (ratio 2) driven by a motor on
     // the first; the second must spin at half speed in the opposite sense.
@@ -95,9 +95,9 @@ fn main() {
     let igb = world.add_multibody(gb);
     let snapshot = world.multibodies().to_vec();
     let gear = MultiBodyConstraint::gear(iga, 0, igb, 0, 2.0, &snapshot);
-    world.add_constraint(gear);
+    world.add_multibody_constraint(gear);
     let gear_motor = MultiBodyConstraint::joint_motor(iga, 0, 0, 1.0, 100.0, &snapshot);
-    world.add_constraint(gear_motor);
+    world.add_multibody_constraint(gear_motor);
 
     let dt: Real = 1.0 / 60.0;
     let mut bottom_speeds = Vec::new();

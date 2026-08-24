@@ -10,7 +10,7 @@
 
 use bullet::dynamics::multibody::constraint::MultiBodyConstraint;
 use bullet::dynamics::MultiBody;
-use bullet::dynamics::MultiBodyWorld;
+use bullet::dynamics::PhysicsWorld;
 use bullet::math::{Quaternion, Real, Vector3};
 
 fn main() {
@@ -40,7 +40,7 @@ fn main() {
 }
 
 fn scene_free_base(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
     let mut body = MultiBody::new(0, 1.0, Vector3::ONE, false, false);
     body.set_linear_damping(0.0);
@@ -60,7 +60,7 @@ fn scene_free_base(dt: Real, frames: usize) {
 }
 
 fn scene_pendulum(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
     let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
     body.setup_revolute(
@@ -84,7 +84,7 @@ fn scene_pendulum(dt: Real, frames: usize) {
 }
 
 fn scene_two_link(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
     let mut body = MultiBody::new(2, 1.0, Vector3::ONE, true, false);
     body.setup_revolute(
@@ -123,7 +123,7 @@ fn scene_two_link(dt: Real, frames: usize) {
 }
 
 fn scene_p2p(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
     let mut a = MultiBody::new(0, 1.0, Vector3::ONE, false, false);
     let mut b = MultiBody::new(0, 2.0, Vector3::splat(1.5), false, false);
@@ -134,7 +134,7 @@ fn scene_p2p(dt: Real, frames: usize) {
     let ib = world.add_multibody(b);
     let snapshot = world.multibodies().to_vec();
     let c = MultiBodyConstraint::point2point(ia, None, ib, None, Vector3::ZERO, Vector3::ZERO, &snapshot);
-    world.add_constraint(c);
+    world.add_multibody_constraint(c);
     for f in 0..frames {
         world.step_simulation(dt);
         let pa = world.multibody(ia).base_pos();
@@ -147,7 +147,7 @@ fn scene_p2p(dt: Real, frames: usize) {
 }
 
 fn scene_motor(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::ZERO);
     let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
     body.setup_revolute(
@@ -164,7 +164,7 @@ fn scene_motor(dt: Real, frames: usize) {
     let ib = world.add_multibody(body);
     let snapshot = world.multibodies().to_vec();
     let motor = MultiBodyConstraint::joint_motor(ib, 0, 0, 2.0, 1000.0, &snapshot);
-    world.add_constraint(motor);
+    world.add_multibody_constraint(motor);
     for f in 0..frames {
         world.step_simulation(dt);
         let body = world.multibody(ib);
@@ -172,7 +172,7 @@ fn scene_motor(dt: Real, frames: usize) {
     }
 }
 
-fn scene_fixed(dt: Real, frames: usize) {    let mut world = MultiBodyWorld::new();
+fn scene_fixed(dt: Real, frames: usize) {    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
     let mut a = MultiBody::new(0, 1.0, Vector3::ONE, false, false);
     let mut b = MultiBody::new(0, 1.0, Vector3::ONE, false, false);
@@ -193,7 +193,7 @@ fn scene_fixed(dt: Real, frames: usize) {    let mut world = MultiBodyWorld::new
         bullet::math::Matrix3::IDENTITY,
         &snapshot,
     );
-    world.add_constraint(c);
+    world.add_multibody_constraint(c);
     for f in 0..frames {
         world.step_simulation(dt);
         let pa = world.multibody(ia).base_pos();
@@ -207,7 +207,7 @@ fn scene_fixed(dt: Real, frames: usize) {    let mut world = MultiBodyWorld::new
 }
 
 fn scene_prismatic(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
     let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
     body.setup_prismatic(
@@ -230,7 +230,7 @@ fn scene_prismatic(dt: Real, frames: usize) {
 }
 
 fn scene_spherical(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
     let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
     body.setup_spherical(
@@ -261,7 +261,7 @@ fn scene_spherical(dt: Real, frames: usize) {
 }
 
 fn scene_planar(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
     let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
     body.setup_planar(
@@ -289,7 +289,7 @@ fn scene_planar(dt: Real, frames: usize) {
 }
 
 fn scene_gear(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::ZERO);
     let mut a = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
     a.setup_revolute(
@@ -319,9 +319,9 @@ fn scene_gear(dt: Real, frames: usize) {
     let ib = world.add_multibody(b);
     let snapshot = world.multibodies().to_vec();
     let gear = MultiBodyConstraint::gear(ia, 0, ib, 0, 2.0, &snapshot);
-    world.add_constraint(gear);
+    world.add_multibody_constraint(gear);
     let motor = MultiBodyConstraint::joint_motor(ia, 0, 0, 1.0, 1000.0, &snapshot);
-    world.add_constraint(motor);
+    world.add_multibody_constraint(motor);
     for f in 0..frames {
         world.step_simulation(dt);
         let a = world.multibody(ia);
@@ -337,7 +337,7 @@ fn scene_gear(dt: Real, frames: usize) {
 }
 
 fn scene_joint_limit(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::ZERO);
     let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
     body.setup_revolute(
@@ -356,7 +356,7 @@ fn scene_joint_limit(dt: Real, frames: usize) {
     let ib = world.add_multibody(body);
     let snapshot = world.multibodies().to_vec();
     let limit = MultiBodyConstraint::joint_limit(ib, 0, -0.3, 0.3, &snapshot);
-    world.add_constraint(limit);
+    world.add_multibody_constraint(limit);
     for f in 0..frames {
         world.step_simulation(dt);
         let body = world.multibody(ib);
@@ -365,7 +365,7 @@ fn scene_joint_limit(dt: Real, frames: usize) {
 }
 
 fn scene_spherical_limit(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::ZERO);
     let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
     body.setup_spherical(
@@ -384,7 +384,7 @@ fn scene_spherical_limit(dt: Real, frames: usize) {
     let ib = world.add_multibody(body);
     let snapshot = world.multibodies().to_vec();
     let limit = MultiBodyConstraint::spherical_joint_limit(ib, 0, 0.3, 0.3, 0.5, 100.0, &snapshot);
-    world.add_constraint(limit);
+    world.add_multibody_constraint(limit);
     for f in 0..frames {
         world.step_simulation(dt);
         let body = world.multibody(ib);
@@ -398,7 +398,7 @@ fn scene_spherical_limit(dt: Real, frames: usize) {
 }
 
 fn scene_spherical_motor(dt: Real, frames: usize) {
-    let mut world = MultiBodyWorld::new();
+    let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::ZERO);
     let mut body = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
     body.setup_spherical(
@@ -417,7 +417,7 @@ fn scene_spherical_motor(dt: Real, frames: usize) {
     let ib = world.add_multibody(body);
     let snapshot = world.multibodies().to_vec();
     let motor = MultiBodyConstraint::spherical_joint_motor(ib, 0, 100.0, &snapshot);
-    world.add_constraint(motor);
+    world.add_multibody_constraint(motor);
     for f in 0..frames {
         world.step_simulation(dt);
         let body = world.multibody(ib);

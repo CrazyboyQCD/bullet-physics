@@ -17,6 +17,6 @@ pub use constraint::{
     Point2PointConstraint, RotationalLimitMotor, SliderConstraint, SliderMotor,
     TranslationalLimitMotor,
 };
-pub use multibody::{MultiBody, MultiBodyConstraint, MultiBodyWorld};
+pub use multibody::{MultiBody, MultiBodyConstraint};
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
 pub use world::PhysicsWorld;

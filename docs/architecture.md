@@ -186,11 +186,13 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
   joint limit, spherical joint limit, spherical joint motor — the
   `fillMultiBodyConstraint` recipe (unit-impulse response, `jacDiagABInv`,
   split-penetration RHS suppression like Bullet's defaults).
-- `MultiBodyWorld` (`btMultiBodyDynamicsWorld` multibody-only subset):
-  gravity → ABA velocity integration → row conversion + PGS (10×1 iterations,
-  alternating direction) → writeback with `±maxCoordinateVelocity` clamping →
-  position integration → sleeping check. Collision integration
-  (`btMultiBodyLinkCollider`) is the next roadmap item.
+- `PhysicsWorld` steps the multibodies inline (the `btMultiBodyDynamicsWorld`
+  fusion, phase A of `docs/multibody-collision.md`): gravity → ABA velocity
+  integration → row conversion + PGS (10×1 iterations, alternating
+  direction) → writeback with `±maxCoordinateVelocity` clamping → position
+  integration → sleeping check, interleaved with the rigid-body stages.
+  Collision integration (`btMultiBodyLinkCollider`) is the next roadmap
+  item.
 
 ## 11. Higher-level features
 
@@ -265,5 +267,5 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
 | `btTypedConstraint` subclasses           | `constraint::{Constraint, ConstraintKind}`   |
 | `btKinematicCharacterController`         | `dynamics::KinematicCharacterController`    |
 | `btRaycastVehicle`                       | `dynamics::RaycastVehicle`                  |
-| `btMultiBody` / `btMultiBodyConstraint` / `btMultiBodyDynamicsWorld` | `multibody::{MultiBody, MultiBodyConstraint, MultiBodyWorld}` |
+| `btMultiBody` / `btMultiBodyConstraint` / `btMultiBodyDynamicsWorld` | `multibody::{MultiBody, MultiBodyConstraint}`, stepped by `dynamics::PhysicsWorld` |
 | `btMultiBodyLinkCollider`                | not ported (next roadmap item)              |

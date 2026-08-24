@@ -7,6 +7,8 @@ use bullet_collision::narrowphase::{self, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
 use crate::body::RigidBody;
 use crate::constraint::{self, Constraint};
+use crate::multibody::body::{MultiBody, MultiBodyScratch};
+use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
 use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, SPLIT_TURN_ERP};
 
@@ -28,7 +30,11 @@ struct CachedContact {
     normal_impulse: Real,
 }
 
-/// A discrete rigid-body simulation world, mirroring `btDiscreteDynamicsWorld`.
+/// A discrete rigid-body simulation world, mirroring `btDiscreteDynamicsWorld`
+/// extended with the Featherstone multibody list of `btMultiBodyDynamicsWorld`
+/// (phase A of the collision-integration design: one fused world, stepping
+/// both subsystems; link-collider collision integration follows in later
+/// phases — see `docs/multibody-collision.md`).
 pub struct PhysicsWorld {
     bodies: Vec<RigidBody>,
     broadphase: AxisSweep3,
@@ -43,6 +49,22 @@ pub struct PhysicsWorld {
     /// (`disableCollisionsBetweenLinkedBodies`, Bullet's
     /// `checkCollideWithOverride`), sorted `(min, max)`.
     no_collision_pairs: HashSet<(usize, usize)>,
+    /// Featherstone articulated bodies (Bullet's `btMultiBody` list, added
+    /// with `addMultiBody`).
+    multibodies: Vec<MultiBody>,
+    /// Multibody constraints (Bullet's `btMultiBodyConstraint` list).
+    mb_constraints: Vec<MultiBodyConstraint>,
+    /// Inner iterations for the multibody non-contact rows per outer
+    /// iteration (Bullet's `m_numNonContactInnerIterations`, default 1).
+    num_non_contact_inner_iterations: u32,
+    /// Multibody constraint error-reduction factor (Bullet's `m_erp`, 0.2).
+    mb_erp: Real,
+    /// Multibody solver scratch shared across steps.
+    mb_scratch: MultiBodyScratch,
+    /// Multibody solver pool (jacobians + velocity deltas).
+    mb_data: SolverData,
+    /// Flattened multibody constraint rows for the current step.
+    mb_rows: Vec<SolverRow>,
 }
 
 impl Default for PhysicsWorld {
@@ -61,6 +83,13 @@ impl PhysicsWorld {
             contact_cache: HashMap::new(),
             constraints: Vec::new(),
             no_collision_pairs: HashSet::new(),
+            multibodies: Vec::new(),
+            mb_constraints: Vec::new(),
+            num_non_contact_inner_iterations: 1,
+            mb_erp: 0.2,
+            mb_scratch: MultiBodyScratch::default(),
+            mb_data: SolverData::default(),
+            mb_rows: Vec::new(),
         }
     }
 
@@ -99,6 +128,70 @@ impl PhysicsWorld {
 
     pub fn bodies(&self) -> &[RigidBody] {
         &self.bodies
+    }
+
+    /// Inner iterations for the multibody non-contact (joint) rows per outer
+    /// iteration (Bullet's `m_numNonContactInnerIterations`, default 1).
+    pub fn set_num_non_contact_inner_iterations(&mut self, n: u32) {
+        self.num_non_contact_inner_iterations = n;
+    }
+
+    /// Multibody constraint error-reduction factor (Bullet's `m_erp`,
+    /// default 0.2).
+    pub fn set_multibody_erp(&mut self, erp: Real) {
+        self.mb_erp = erp;
+    }
+
+    /// Add a finalized multibody (Bullet's `addMultiBody`) and return its
+    /// index.
+    pub fn add_multibody(&mut self, body: MultiBody) -> usize {
+        self.multibodies.push(body);
+        self.multibodies.len() - 1
+    }
+
+    pub fn multibody(&self, index: usize) -> &MultiBody {
+        &self.multibodies[index]
+    }
+
+    pub fn multibody_mut(&mut self, index: usize) -> &mut MultiBody {
+        &mut self.multibodies[index]
+    }
+
+    pub fn multibodies(&self) -> &[MultiBody] {
+        &self.multibodies
+    }
+
+    pub fn num_multibodies(&self) -> usize {
+        self.multibodies.len()
+    }
+
+    /// Add a multibody constraint (Bullet's `addMultiBodyConstraint`) and
+    /// return its index.
+    pub fn add_multibody_constraint(&mut self, constraint: MultiBodyConstraint) -> usize {
+        self.mb_constraints.push(constraint);
+        self.mb_constraints.len() - 1
+    }
+
+    pub fn multibody_constraint(&self, index: usize) -> &MultiBodyConstraint {
+        &self.mb_constraints[index]
+    }
+
+    pub fn multibody_constraint_mut(&mut self, index: usize) -> &mut MultiBodyConstraint {
+        &mut self.mb_constraints[index]
+    }
+
+    pub fn multibody_constraints(&self) -> &[MultiBodyConstraint] {
+        &self.mb_constraints
+    }
+
+    pub fn num_multibody_constraints(&self) -> usize {
+        self.mb_constraints.len()
+    }
+
+    /// Remove a multibody constraint by index (swaps the last one in to keep
+    /// the list dense).
+    pub fn remove_multibody_constraint(&mut self, index: usize) {
+        self.mb_constraints.swap_remove(index);
     }
 
     /// Cast a ray against every body and return the closest hit together with
@@ -278,6 +371,20 @@ impl PhysicsWorld {
             body.integrate_velocities(self.gravity, dt);
         }
 
+        // 1m. Multibody gravity (Bullet's `applyGravity` over the `btMultiBody`
+        // list) and the external-force pass: forward kinematics, constraint
+        // forces cleared, articulated-body algorithm (`solveExternalForces`).
+        for mb in &mut self.multibodies {
+            if !mb.is_awake() {
+                continue;
+            }
+            mb.add_base_force(self.gravity * mb.base_mass());
+            for j in 0..mb.num_links() {
+                mb.add_link_force(j, self.gravity * mb.link_mass(j));
+            }
+        }
+        self.mb_solve_external_forces(dt);
+
         // 2. Predicted positions (used only for contact detection).
         let predicted: Vec<Vector3> = self
             .bodies
@@ -392,6 +499,12 @@ impl PhysicsWorld {
         }
         self.contact_cache = next_cache;
 
+        // 6bm. Multibody internal constraints: row conversion, PGS over the
+        // non-contact pool and writeback into the generalized velocities
+        // (Bullet's `solveInternalConstraints` running the multibody part of
+        // `solveMultiBodyGroup`; contact rows join in a later phase).
+        self.mb_solve_internal_constraints(dt);
+
         // 6c. Deactivation: bodies below the sleeping thresholds for longer
         // than `DEACTIVATION_TIME` seconds go to sleep (Bullet's
         // `updateActivationState` between solving and integrating).
@@ -479,6 +592,138 @@ impl PhysicsWorld {
         for body in &mut self.bodies {
             body.clear_forces();
         }
+
+        // 8m. Multibody position integration (`integrateMultiBodyTransforms`;
+        // sleeping bodies have their velocities cleared), force clearing and
+        // the motion/sleep check.
+        self.mb_integrate_transforms(dt);
+        for mb in &mut self.multibodies {
+            if mb.is_awake() {
+                mb.clear_forces_and_torques();
+            }
+            mb.check_motion_and_sleep(dt);
+        }
+    }
+
+    /// Refresh link transforms, clear constraint forces, then integrate the
+    /// generalized velocities with the articulated-body algorithm (Bullet's
+    /// `solveExternalForces`).
+    fn mb_solve_external_forces(&mut self, dt: Real) {
+        for mb in &mut self.multibodies {
+            mb.forward_kinematics();
+        }
+        for mb in &mut self.multibodies {
+            if !mb.is_awake() {
+                continue;
+            }
+            mb.clear_constraint_forces();
+            mb.compute_accelerations_aba(dt, &mut self.mb_scratch, false);
+        }
+    }
+
+    /// Convert all multibody constraints into rows and solve them with
+    /// projected Gauss-Seidel (Bullet's `solveInternalConstraints` +
+    /// `btMultiBodyConstraintSolver::solveMultiBodyGroup` for the non-contact
+    /// pool).
+    fn mb_solve_internal_constraints(&mut self, dt: Real) {
+        // Wake bodies linked to an awake body by a constraint (the island
+        // merge in `calculateSimulationIslands`).
+        let mut wake = vec![false; self.multibodies.len()];
+        for c in &self.mb_constraints {
+            let a_awake = self.multibodies[c.body_a()].is_awake();
+            let b_awake = self.multibodies[c.body_b()].is_awake();
+            if a_awake || b_awake {
+                wake[c.body_a()] = true;
+                wake[c.body_b()] = true;
+            }
+        }
+        for (i, &w) in wake.iter().enumerate() {
+            if w {
+                self.multibodies[i].wake_up();
+            }
+        }
+
+        // Reset the solver scratch and companion ids (Bullet's
+        // `solveGroupCacheFriendlySetup`).
+        self.mb_data.reset();
+        self.mb_rows.clear();
+        for mb in &mut self.multibodies {
+            mb.companion_id = -1;
+        }
+
+        // Convert the constraints into rows.
+        {
+            let PhysicsWorld {
+                multibodies,
+                mb_constraints: constraints,
+                mb_data: data,
+                mb_scratch: scratch,
+                mb_rows: rows,
+                mb_erp: erp,
+                ..
+            } = self;
+            for (i, c) in constraints.iter_mut().enumerate() {
+                c.create_constraint_rows(i, rows, data, scratch, multibodies, dt, *erp);
+            }
+        }
+
+        // PGS iterations over the non-contact rows, alternating direction by
+        // iteration parity (Bullet's `solveSingleIteration`).
+        let n = self.mb_rows.len();
+        let outer = self.iterations as usize;
+        let inner = self.num_non_contact_inner_iterations as usize;
+        for iteration in 0..outer {
+            for _ in 0..inner {
+                if iteration % 2 == 0 {
+                    for j in 0..n {
+                        resolve_row(&mut self.mb_rows[j], &mut self.mb_data);
+                    }
+                } else {
+                    for j in (0..n).rev() {
+                        resolve_row(&mut self.mb_rows[j], &mut self.mb_data);
+                    }
+                }
+            }
+        }
+
+        // Write the accumulated impulses back into the constraints (Bullet's
+        // `writeBackSolverBodyToMultiBody`).
+        for row in &self.mb_rows {
+            self.mb_constraints[row.org_constraint]
+                .set_applied_impulse(row.org_dof_index, row.applied_impulse);
+        }
+        for row in &self.mb_rows {
+            let imp = row.applied_impulse;
+            let unit_a = self.mb_data.delta_velocities_unit_impulse
+                [row.jac_a_index..row.jac_a_index + row.ndof_a]
+                .to_vec();
+            let unit_b = self.mb_data.delta_velocities_unit_impulse
+                [row.jac_b_index..row.jac_b_index + row.ndof_b]
+                .to_vec();
+            let mb = &mut self.multibodies[row.multi_body_a];
+            mb.apply_delta_vee(&unit_a, imp);
+            let mb = &mut self.multibodies[row.multi_body_b];
+            mb.apply_delta_vee(&unit_b, imp);
+        }
+        // Flush any split-impulse deltas (no-op unless split impulses are
+        // used; kept for fidelity with `solveInternalConstraints`).
+        for mb in &mut self.multibodies {
+            mb.process_delta_vee_2();
+        }
+    }
+
+    /// Integrate the positions of the awake multibodies and freeze the
+    /// sleeping ones (Bullet's `integrateMultiBodyTransforms`).
+    fn mb_integrate_transforms(&mut self, dt: Real) {
+        for mb in &mut self.multibodies {
+            if !mb.is_awake() {
+                mb.clear_velocities();
+                continue;
+            }
+            mb.add_split_v();
+            mb.step_positions(dt);
+            mb.subtract_split_v();
+        }
     }
 }
 
@@ -525,6 +770,64 @@ fn warm_start_impulses(points: &mut [bullet_collision::manifold::ContactPoint], 
         if best_d2 <= breaking_sq && p.normal.dot(cache[i].normal) >= NORMAL_EPS {
             p.normal_impulse = cache[i].normal_impulse * WARM_STARTING_FACTOR;
             used[i] = true;
+        }
+    }
+}
+
+/// Solve one multibody constraint row (Bullet's
+/// `resolveSingleConstraintRowGeneric`): compute the impulse needed to meet
+/// `rhs` given the currently accumulated velocity deltas of both bodies,
+/// clamp it to the row window, and add its effect to the accumulated deltas.
+fn resolve_row(row: &mut SolverRow, data: &mut SolverData) {
+    let ndof_a = row.ndof_a;
+    let ndof_b = row.ndof_b;
+    let da_index = row.delta_vel_a_index as usize;
+    let db_index = row.delta_vel_b_index as usize;
+
+    let mut delta_impulse = row.rhs - row.applied_impulse * row.cfm;
+
+    let mut delta_vel_a_dot_n = 0.0;
+    {
+        let jac = &data.jacobians[row.jac_a_index..row.jac_a_index + ndof_a];
+        let dv = &data.delta_velocities[da_index..da_index + ndof_a];
+        for i in 0..ndof_a {
+            delta_vel_a_dot_n += jac[i] * dv[i];
+        }
+    }
+    let mut delta_vel_b_dot_n = 0.0;
+    {
+        let jac = &data.jacobians[row.jac_b_index..row.jac_b_index + ndof_b];
+        let dv = &data.delta_velocities[db_index..db_index + ndof_b];
+        for i in 0..ndof_b {
+            delta_vel_b_dot_n += jac[i] * dv[i];
+        }
+    }
+    delta_impulse -= (delta_vel_a_dot_n + delta_vel_b_dot_n) * row.jac_diag_ab_inv;
+    let sum = row.applied_impulse + delta_impulse;
+    if sum < row.lower_limit {
+        delta_impulse = row.lower_limit - row.applied_impulse;
+        row.applied_impulse = row.lower_limit;
+    } else if sum > row.upper_limit {
+        delta_impulse = row.upper_limit - row.applied_impulse;
+        row.applied_impulse = row.upper_limit;
+    } else {
+        row.applied_impulse = sum;
+    }
+
+    // Accumulate the effect of this impulse into both bodies' delta
+    // velocities (Bullet's `applyDeltaVee`).
+    {
+        let unit = &data.delta_velocities_unit_impulse[row.jac_a_index..row.jac_a_index + ndof_a];
+        let dv = &mut data.delta_velocities[da_index..da_index + ndof_a];
+        for i in 0..ndof_a {
+            dv[i] += unit[i] * delta_impulse;
+        }
+    }
+    {
+        let unit = &data.delta_velocities_unit_impulse[row.jac_b_index..row.jac_b_index + ndof_b];
+        let dv = &mut data.delta_velocities[db_index..db_index + ndof_b];
+        for i in 0..ndof_b {
+            dv[i] += unit[i] * delta_impulse;
         }
     }
 }
