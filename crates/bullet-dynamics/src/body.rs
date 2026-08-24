@@ -212,9 +212,9 @@ impl RigidBody {
         self
     }
 
-    /// Enable continuous collision detection (Bullet's `setCcdMotionThreshold`
-    /// + `setCcdSweptSphereRadius`): bodies moving farther than
-    /// `motion_threshold` per step are swept as a sphere of
+    /// Enable continuous collision detection (Bullet's
+    /// `setCcdMotionThreshold` and `setCcdSweptSphereRadius`): bodies moving
+    /// farther than `motion_threshold` per step are swept as a sphere of
     /// `swept_sphere_radius` and clamped at the first impact, so fast bodies
     /// cannot tunnel through thin geometry. A common choice is the body's
     /// smallest dimension for the threshold and its bounding-sphere radius for

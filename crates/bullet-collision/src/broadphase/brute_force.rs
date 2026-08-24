@@ -46,10 +46,10 @@ impl BroadPhase for BruteForceBroadPhase {
                 continue;
             };
             for (j, b) in self.aabbs.iter().enumerate().skip(i + 1) {
-                if let Some(b) = b {
-                    if a.overlaps(b) {
-                        pairs.push((i, j));
-                    }
+                if let Some(b) = b
+                    && a.overlaps(b)
+                {
+                    pairs.push((i, j));
                 }
             }
         }

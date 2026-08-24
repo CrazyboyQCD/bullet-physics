@@ -953,6 +953,7 @@ impl MultiBodyConstraint {
     /// (`rel_vel`), like Bullet (callers such as the joint limit override
     /// `rhs` from it).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::useless_conversion)] // Vec3A -> Vector3 narrowing is a no-op in f64 builds
     fn fill_row(
         &self,
         row: &mut SolverRow,

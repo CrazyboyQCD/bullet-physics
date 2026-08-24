@@ -133,12 +133,12 @@ impl BroadPhase for AxisSweep3 {
         // and max[k] >= q.min[k]. The per-axis lists are sorted by min, so the
         // first condition is a prefix; intersect the three axes' prefixes.
         let mut sets: [HashSet<usize>; 3] = [HashSet::new(), HashSet::new(), HashSet::new()];
-        for k in 0..3 {
+        for (k, set) in sets.iter_mut().enumerate() {
             let order = &self.order[k];
             let cut = order.partition_point(|&i| {
                 self.aabbs[i].as_ref().unwrap().min[k] <= query.max[k]
             });
-            sets[k] = order[..cut]
+            *set = order[..cut]
                 .iter()
                 .copied()
                 .filter(|&i| self.aabbs[i].as_ref().unwrap().max[k] >= query.min[k])

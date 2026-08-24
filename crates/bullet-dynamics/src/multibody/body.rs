@@ -489,6 +489,9 @@ impl MultiBody {
         self.base_quat = rot;
     }
 
+    // `Vector3::from` narrows the glam `Vec3A` affine columns to `Vector3`;
+    // it is an identity conversion (and clippy-useless) in f64 builds.
+    #[allow(clippy::useless_conversion)]
     pub fn set_base_world_transform(&mut self, tr: &Transform) {
         self.base_pos = Vector3::from(tr.translation);
         let m = Matrix3::from_cols(
@@ -501,6 +504,7 @@ impl MultiBody {
 
     /// The world orientation of link `i`, extracted from its cached world
     /// transform (Bullet's `m_cachedWorldTransform.getRotation()`).
+    #[allow(clippy::useless_conversion)] // see set_base_world_transform
     pub fn link_world_orientation(&self, i: usize) -> Quaternion {
         let m3 = self.links[i].cached_world_transform.matrix3;
         let m = Matrix3::from_cols(
@@ -656,9 +660,9 @@ impl MultiBody {
             omega[i + 1] = o;
             vel[i + 1] = v;
             let joint_vel = self.joint_vel_multidof(i);
-            for dof in 0..link.dof_count {
-                omega[i + 1] += joint_vel[dof] * link.axis_top(dof);
-                vel[i + 1] += joint_vel[dof] * link.axis_bottom(dof);
+            for (dof, &qv) in joint_vel.iter().enumerate() {
+                omega[i + 1] += qv * link.axis_top(dof);
+                vel[i + 1] += qv * link.axis_bottom(dof);
             }
         }
     }
@@ -687,9 +691,7 @@ impl MultiBody {
     }
 
     pub fn clear_velocities(&mut self) {
-        for v in &mut self.velocities {
-            *v = 0.0;
-        }
+        self.velocities.fill(0.0);
     }
 
     pub fn add_base_force(&mut self, f: Vector3) {
@@ -758,19 +760,17 @@ impl MultiBody {
     /// clamping every component to `±max_coordinate_velocity` (Bullet's
     /// `applyDeltaVeeMultiDof`).
     pub fn apply_delta_vee(&mut self, delta_vee: &[Real], multiplier: Real) {
-        for dof in 0..6 + self.dof_count {
-            self.velocities[dof] += delta_vee[dof] * multiplier;
-            self.velocities[dof] = self
-                .velocities[dof]
-                .clamp(-self.max_coordinate_velocity, self.max_coordinate_velocity);
+        for (v, &d) in self.velocities.iter_mut().zip(delta_vee) {
+            *v += d * multiplier;
+            *v = (*v).clamp(-self.max_coordinate_velocity, self.max_coordinate_velocity);
         }
     }
 
     /// Accumulate into `delta_v` (Bullet's `applyDeltaVeeMultiDof2`), used
     /// for split impulses.
     pub fn apply_delta_vee_2(&mut self, delta_vee: &[Real], multiplier: Real) {
-        for dof in 0..6 + self.dof_count {
-            self.delta_v[dof] += delta_vee[dof] * multiplier;
+        for (v, &d) in self.delta_v.iter_mut().zip(delta_vee) {
+            *v += d * multiplier;
         }
     }
 
@@ -784,14 +784,12 @@ impl MultiBody {
     pub fn subtract_split_v(&mut self) {
         let split = self.split_v.clone();
         self.apply_delta_vee(&split, -1.0);
-        for v in &mut self.split_v {
-            *v = 0.0;
-        }
+        self.split_v.fill(0.0);
     }
 
     pub fn apply_delta_split_vee(&mut self, delta_vee: &[Real], multiplier: Real) {
-        for dof in 0..6 + self.dof_count {
-            self.split_v[dof] += delta_vee[dof] * multiplier;
+        for (v, &d) in self.split_v.iter_mut().zip(delta_vee) {
+            *v += d * multiplier;
         }
     }
 
@@ -800,9 +798,7 @@ impl MultiBody {
     pub fn process_delta_vee_2(&mut self) {
         let delta = self.delta_v.clone();
         self.apply_delta_vee(&delta, 1.0);
-        for v in &mut self.delta_v {
-            *v = 0.0;
-        }
+        self.delta_v.fill(0.0);
     }
 
     fn mul_matrix(p_a: &[Real], p_b: &[Real], rows_a: usize, cols_a: usize, rows_b: usize, cols_b: usize, p_c: &mut [Real]) {
@@ -917,8 +913,8 @@ impl MultiBody {
             let mut spat_joint_vel = SpatialMotionVector::zero();
             let vel_start = 6 + self.links[i].dof_offset;
             let joint_vel = &self.velocities[vel_start..vel_start + self.links[i].dof_count];
-            for dof in 0..self.links[i].dof_count {
-                spat_joint_vel += self.links[i].axes[dof] * joint_vel[dof];
+            for (dof, &qv) in joint_vel.iter().enumerate() {
+                spat_joint_vel += self.links[i].axes[dof] * qv;
             }
             scratch.spat_vel[i + 1] += spat_joint_vel;
 
@@ -1019,34 +1015,36 @@ impl MultiBody {
 
             // h · D⁻¹
             let mut spat_force_temps = [SpatialForceVector::zero(); 6];
-            for dof in 0..dof_count {
-                spat_force_temps[dof] = SpatialForceVector::zero();
+            for (dof, temp) in spat_force_temps.iter_mut().enumerate().take(dof_count) {
                 for dof2 in 0..dof_count {
-                    spat_force_temps[dof] +=
+                    *temp +=
                         self.h[dof_offset + dof2] * self.inv_d[inv_di_start + dof2 * dof_count + dof];
                 }
             }
             // Î -= h D⁻¹ hᵀ
             let mut dyad_temp = scratch.spat_inertia[i + 1];
-            for dof in 0..dof_count {
-                dyad_temp -= symmetric_spatial_outer_product_force(&self.h[dof_offset + dof], &spat_force_temps[dof]);
+            for (dof, temp) in spat_force_temps.iter().enumerate().take(dof_count) {
+                dyad_temp -= symmetric_spatial_outer_product_force(&self.h[dof_offset + dof], temp);
             }
             scratch.spat_inertia[parent_idx] += from_parent.transform_inverse_dyad(&dyad_temp);
 
             // D⁻¹ Y
             let mut inv_d_times_y = [0.0; 6];
-            for dof in 0..dof_count {
+            for (dof, slot) in inv_d_times_y.iter_mut().enumerate().take(dof_count) {
                 let mut acc = 0.0;
                 for dof2 in 0..dof_count {
                     acc += self.inv_d[inv_di_start + dof * dof_count + dof2] * y[dof_offset + dof2];
                 }
-                inv_d_times_y[dof] = acc;
+                *slot = acc;
             }
             // ẑ_p += X⁻¹ (ẑ_i + Î ĉ + h D⁻¹ Y)
             spat_force_temps[0] = scratch.zero_acc[i + 1]
                 + scratch.spat_inertia[i + 1].apply(&scratch.coriolis[i]);
-            for dof in 0..dof_count {
-                spat_force_temps[0] += self.h[dof_offset + dof] * inv_d_times_y[dof];
+            for (h_row, &dy) in self.h[dof_offset..dof_offset + dof_count]
+                .iter()
+                .zip(&inv_d_times_y)
+            {
+                spat_force_temps[0] += *h_row * dy;
             }
             spat_force_temps[1] = from_parent.transform_inverse_force(&spat_force_temps[0]);
             scratch.zero_acc[parent_idx] += spat_force_temps[1];

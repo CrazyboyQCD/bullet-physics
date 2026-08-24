@@ -301,6 +301,7 @@ impl RaycastVehicle {
     /// the ray direction (usually down) and `wheel_axle_cs` the axle direction
     /// (chassis-local). The wheel's world pose is initialized from the current
     /// chassis pose.
+    #[allow(clippy::too_many_arguments)] // mirrors Bullet's addWheel signature
     pub fn add_wheel(
         &mut self,
         world: &PhysicsWorld,

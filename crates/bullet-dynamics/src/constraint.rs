@@ -29,6 +29,10 @@ use crate::solver::sequential_impulse::{ConstraintRow, RowLimits};
 
 /// The specific kind of a [`Constraint`] and its parameters (Bullet's
 /// constraint subclasses).
+// The variants carry their full parameter payload by value (cloneable,
+// comparable) matching the engine's value-semantics style; the f64 build
+// doubles the largest variant's size past clippy's threshold.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstraintKind {
     /// Ball-socket joint: keep `pivot_a` (on body A) coincident with
@@ -1695,10 +1699,7 @@ impl SliderConstraint {
         let delta = pivot_b - pivot_a;
         let ax1_a = tr_a.col(0);
         // Per-axis offsets (m_depth) and limit tests.
-        let mut depth = [0.0; 3];
-        for i in 0..3 {
-            depth[i] = delta.dot(tr_a.col(i));
-        }
+        let mut depth: [Real; 3] = std::array::from_fn(|i| delta.dot(tr_a.col(i)));
         self.lin_pos = depth[0];
         self.solve_lin_limit = false;
         if self.lower_lin_limit <= self.upper_lin_limit {
@@ -2307,18 +2308,18 @@ impl Generic6DofConstraint {
         self.angular_axes = axes;
 
         // Angular rows (Bullet's `setAngularLimits`, rotational = 1).
-        for i in 0..3 {
+        for (i, &axis) in axes.iter().enumerate() {
             if self.test_angular_limit_motor(i) {
                 let m = self.angular[i];
                 // Bullet's bounce velocity: `angVelA·ax1 − angVelB·ax1`.
-                let row_vel = a.angular_velocity.dot(axes[i]) - b.angular_velocity.dot(axes[i]);
+                let row_vel = a.angular_velocity.dot(axis) - b.angular_velocity.dot(axis);
                 self.push_limit_motor_row(
                     body_a,
                     body_b,
                     a,
                     b,
                     inv_dt,
-                    axes[i],
+                    axis,
                     false,
                     Vector3::ZERO,
                     Vector3::ZERO,

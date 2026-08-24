@@ -584,7 +584,11 @@ mod tests {
         // Entry: |y - x| = r * sqrt(2), i.e. y = 1 + 0.2 * sqrt(2) ≈ 1.2828,
         // over a 4-unit drop from y = 3: fraction = (3 - 1.2828) / 4.
         let h = cast(Vector3::new(1.0, 3.0, 0.6), Vector3::new(1.0, -1.0, 0.6), 0.2, &mesh).unwrap();
-        assert_relative_eq!(h.fraction, (3.0 - (1.0 + 0.2 * 1.41421356)) / 4.0, epsilon = 1e-3);
+        assert_relative_eq!(
+            h.fraction,
+            (3.0 - (1.0 + 0.4 * bullet_math::FRAC_1_SQRT_2)) / 4.0,
+            epsilon = 1e-3
+        );
         // The slope surface normal points up and toward -X.
         assert!(h.normal.y > 0.6);
         assert!(h.normal.x < -0.1);

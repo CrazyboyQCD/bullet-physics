@@ -94,7 +94,7 @@ fn main() {
             );
         }
         world.add_body(body);
-        if spec.record.iter().any(|r| *r == b.name) {
+        if spec.record.contains(&b.name) {
             record_idx.push(i);
         }
     }
