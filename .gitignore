@@ -13,3 +13,6 @@
 /tools/bullet_scenes.h
 /crates/bullet/src/parity_scenes.rs
 /tools/_vcvars_env.bat
+
+# Local agent handoff notes, not part of the published repo
+/HANDOFF.md
