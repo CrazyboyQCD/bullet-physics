@@ -20,6 +20,8 @@ pub trait BroadPhase {
     fn set_aabb(&mut self, proxy: usize, aabb: Aabb);
     /// Remove a proxy.
     fn destroy_proxy(&mut self, proxy: usize);
+    /// The current AABB of a proxy, if the slot is live.
+    fn proxy_aabb(&self, proxy: usize) -> Option<Aabb>;
     /// Compute all currently overlapping `(proxy_a, proxy_b)` pairs.
     fn compute_pairs(&self) -> Vec<(usize, usize)>;
     /// Indices of proxies whose AABB the segment `ray_from -> ray_to` crosses.

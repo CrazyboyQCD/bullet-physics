@@ -25,6 +25,7 @@ use bullet_math::spatial::{
 use bullet_math::{Matrix3, Quaternion, Real, Transform, Vector3};
 
 use super::link::{JointType, MultiBodyLink};
+use bullet_collision::shapes::CollisionShape;
 
 const INITIAL_SLEEP_EPSILON: Real = 0.05; // squared velocity (m² s⁻²)
 const INITIAL_SLEEP_TIMEOUT: Real = 2.0; // seconds
@@ -82,6 +83,19 @@ impl MultiBodyScratch {
     }
 }
 
+/// A collider attached to a multibody's base or a link — the value form of
+/// Bullet's `btMultiBodyLinkCollider`: the collision shape plus surface
+/// parameters. The link/base association lives in the slot the collider is
+/// stored in; the world registers each collider as a broad-phase proxy.
+#[derive(Debug, Clone)]
+pub struct LinkCollider {
+    pub shape: CollisionShape,
+    /// Friction contribution (combined per contact like rigid bodies).
+    pub friction: Real,
+    /// Restitution contribution.
+    pub restitution: Real,
+}
+
 /// A Featherstone articulated rigid body.
 #[derive(Clone)]
 pub struct MultiBody {
@@ -137,6 +151,11 @@ pub struct MultiBody {
     max_applied_impulse: Real,
     max_coordinate_velocity: Real,
     has_self_collision: bool,
+    /// Collider on the base (Bullet's base `btMultiBodyLinkCollider`).
+    base_collider: Option<LinkCollider>,
+    /// Colliders on the links, parallel to `links` (Bullet's per-link
+    /// `m_collider`).
+    link_colliders: Vec<Option<LinkCollider>>,
     pos_updated: bool,
     dof_count: usize,
     pos_var_count: usize,
@@ -182,6 +201,8 @@ impl MultiBody {
             max_applied_impulse: 1000.0,
             max_coordinate_velocity: 100.0,
             has_self_collision: true,
+            base_collider: None,
+            link_colliders: vec![None; n_links],
             pos_updated: false,
             dof_count: 0,
             pos_var_count: 0,
@@ -1643,6 +1664,108 @@ impl MultiBody {
 
     pub fn has_self_collision(&self) -> bool {
         self.has_self_collision
+    }
+
+    /// Attach a collider to the base (Bullet's base
+    /// `btMultiBodyLinkCollider`). The world registers it as a broad-phase
+    /// proxy at the next step.
+    pub fn set_base_collider(&mut self, shape: CollisionShape, friction: Real, restitution: Real) {
+        self.base_collider = Some(LinkCollider { shape, friction, restitution });
+    }
+
+    /// Attach a collider to link `i` (Bullet's link `m_collider`).
+    pub fn set_link_collider(
+        &mut self,
+        i: usize,
+        shape: CollisionShape,
+        friction: Real,
+        restitution: Real,
+    ) {
+        self.link_colliders[i] = Some(LinkCollider { shape, friction, restitution });
+    }
+
+    pub fn base_collider(&self) -> Option<&LinkCollider> {
+        self.base_collider.as_ref()
+    }
+
+    pub fn link_collider(&self, i: usize) -> Option<&LinkCollider> {
+        self.link_colliders[i].as_ref()
+    }
+
+    /// The base's world orientation (the inverse of `base_quat`, which maps
+    /// world vectors into the base frame).
+    pub fn base_world_orientation(&self) -> Quaternion {
+        self.base_quat.inverse()
+    }
+
+    /// The world position of link `i`'s frame origin, from the cached FK
+    /// transform (`m_cachedWorldTransform.getOrigin()`).
+    pub fn link_world_position(&self, i: usize) -> Vector3 {
+        #[allow(clippy::useless_conversion)] // Vec3A -> Vector3, identity in f64
+        Vector3::from(self.links[i].cached_world_transform.translation)
+    }
+
+    /// Whether the colliders of links `a` and `b` (`-1` = base) of this body
+    /// may collide — port of `btMultiBodyLinkCollider::checkCollideWithOverride`
+    /// for two colliders of the same multibody. Adjacent links collide by
+    /// default; `disable_parent_collision` / `disable_all_parent_collision`
+    /// (Bullet's link flags `BT_MULTIBODYLINKFLAGS_DISABLE_PARENT_COLLISION` /
+    /// `_DISABLE_ALL_PARENT_COLLISION`) opt out per link, and
+    /// [`set_has_self_collision`](Self::set_has_self_collision) disables
+    /// self-collision for the whole body.
+    pub fn colliders_collide(&self, a: i32, b: i32) -> bool {
+        if !self.has_self_collision {
+            return false;
+        }
+        // Does link `link` disable collision with ancestor `other`?
+        let excludes = |link: usize, other: i32| -> bool {
+            let l = &self.links[link];
+            if l.disable_all_parent_collision {
+                // Walk the ancestor chain including the base (Bullet's loop
+                // reaches -1 and compares it against the base collider).
+                let mut p = link as i32;
+                loop {
+                    if p == -1 {
+                        break;
+                    }
+                    p = match self.links[p as usize].parent {
+                        Some(pp) => pp as i32,
+                        None => -1,
+                    };
+                    if p == other {
+                        return true;
+                    }
+                }
+                false
+            } else if l.disable_parent_collision {
+                match l.parent {
+                    Some(pp) => pp as i32 == other,
+                    None => other == -1,
+                }
+            } else {
+                false
+            }
+        };
+        if a >= 0 && excludes(a as usize, b) {
+            return false;
+        }
+        if b >= 0 && excludes(b as usize, a) {
+            return false;
+        }
+        true
+    }
+
+    /// Disable collisions between link `i`'s collider and its direct parent
+    /// (`all_ancestors = false`) or all of its ancestors including the base
+    /// (`true`) — Bullet's link flags
+    /// `BT_MULTIBODYLINKFLAGS_DISABLE_(ALL_)PARENT_COLLISION`.
+    pub fn set_link_parent_collision_disabled(&mut self, i: usize, all_ancestors: bool) {
+        let link = &mut self.links[i];
+        if all_ancestors {
+            link.disable_all_parent_collision = true;
+        } else {
+            link.disable_parent_collision = true;
+        }
     }
 
     pub fn set_pos_updated(&mut self, updated: bool) {

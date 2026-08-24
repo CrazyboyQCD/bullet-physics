@@ -20,6 +20,23 @@ const WARM_STARTING_FACTOR: Real = 0.85;
 /// a cached one (Bullet's `gContactBreakingThreshold`), keeping its impulse.
 const CONTACT_BREAKING_THRESHOLD: Real = 0.02;
 
+/// A multibody collider registered in the broad phase: `(multibody, link)`
+/// with `link = -1` for the base, plus its proxy id once assigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ColliderEntry {
+    mb: usize,
+    link: i32,
+    proxy: Option<usize>,
+}
+
+/// What a broad-phase proxy slot belongs to (rigid bodies and multibody
+/// link colliders share one proxy index space).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyOwner {
+    Body(usize),
+    Collider(usize),
+}
+
 /// A cached contact point from the previous step: the accumulated normal
 /// impulse is re-applied on the next step's warm-start pass (the
 /// persistent-manifold `m_appliedImpulse` cache in Bullet). Friction impulses
@@ -49,6 +66,16 @@ pub struct PhysicsWorld {
     /// (`disableCollisionsBetweenLinkedBodies`, Bullet's
     /// `checkCollideWithOverride`), sorted `(min, max)`.
     no_collision_pairs: HashSet<(usize, usize)>,
+    /// Broad-phase proxy id for each rigid body (proxy ids are shared with
+    /// the multibody link colliders, so they no longer coincide with body
+    /// indices).
+    body_proxies: Vec<usize>,
+    /// Multibody colliders registered in the broad phase (Bullet's
+    /// `btMultiBodyLinkCollider` list), one entry per attached collider.
+    collider_entries: Vec<ColliderEntry>,
+    /// Owner of every broad-phase proxy slot, for translating proxy pairs
+    /// and query candidates back to bodies or colliders.
+    proxy_owners: Vec<ProxyOwner>,
     /// Featherstone articulated bodies (Bullet's `btMultiBody` list, added
     /// with `addMultiBody`).
     multibodies: Vec<MultiBody>,
@@ -83,6 +110,9 @@ impl PhysicsWorld {
             contact_cache: HashMap::new(),
             constraints: Vec::new(),
             no_collision_pairs: HashSet::new(),
+            body_proxies: Vec::new(),
+            collider_entries: Vec::new(),
+            proxy_owners: Vec::new(),
             multibodies: Vec::new(),
             mb_constraints: Vec::new(),
             num_non_contact_inner_iterations: 1,
@@ -108,14 +138,18 @@ impl PhysicsWorld {
 
     /// Add a body and return its index.
     ///
-    /// MVP note: body indices coincide with broad-phase proxy indices, so
-    /// removal is not yet supported.
+    /// Broad-phase proxy ids are shared with multibody link colliders, so
+    /// they are tracked in [`PhysicsWorld::body_proxies`] (visible to tests);
+    /// body removal is not yet supported.
     pub fn add_body(&mut self, body: RigidBody) -> usize {
         let aabb = body.shape.world_aabb(body.position, body.orientation);
         let proxy = self.broadphase.create_proxy(aabb);
-        debug_assert_eq!(proxy, self.bodies.len());
+        let index = self.bodies.len();
         self.bodies.push(body);
-        proxy
+        debug_assert_eq!(proxy, self.proxy_owners.len());
+        self.proxy_owners.push(ProxyOwner::Body(index));
+        self.body_proxies.push(proxy);
+        index
     }
 
     pub fn body(&self, index: usize) -> &RigidBody {
@@ -194,6 +228,80 @@ impl PhysicsWorld {
         self.mb_constraints.swap_remove(index);
     }
 
+    /// Register any attached-but-unregistered multibody colliders as
+    /// broad-phase proxies (Bullet's `addCollisionObject` when a
+    /// `btMultiBodyLinkCollider` is added). Forward kinematics must have run
+    /// this step so the world transforms are fresh.
+    fn register_pending_colliders(&mut self) {
+        let mut wanted: Vec<(usize, i32)> = Vec::new();
+        for (mb_i, mb) in self.multibodies.iter().enumerate() {
+            if mb.base_collider().is_some() {
+                wanted.push((mb_i, -1));
+            }
+            for l in 0..mb.num_links() {
+                if mb.link_collider(l).is_some() {
+                    wanted.push((mb_i, l as i32));
+                }
+            }
+        }
+        for (mb_i, link) in wanted {
+            if self
+                .collider_entries
+                .iter()
+                .any(|e| e.mb == mb_i && e.link == link)
+            {
+                continue;
+            }
+            self.collider_entries.push(ColliderEntry {
+                mb: mb_i,
+                link,
+                proxy: None,
+            });
+        }
+        // Assign broad-phase proxies to the new entries.
+        for i in 0..self.collider_entries.len() {
+            if self.collider_entries[i].proxy.is_some() {
+                continue;
+            }
+            let aabb = {
+                let e = &self.collider_entries[i];
+                let mb = &self.multibodies[e.mb];
+                if e.link < 0 {
+                    mb.base_collider()
+                        .expect("registered base collider")
+                        .shape
+                        .world_aabb(mb.base_pos(), mb.base_world_orientation())
+                } else {
+                    let l = e.link as usize;
+                    mb.link_collider(l)
+                        .expect("registered link collider")
+                        .shape
+                        .world_aabb(mb.link_world_position(l), mb.link_world_orientation(l))
+                }
+            };
+            let proxy = self.broadphase.create_proxy(aabb);
+            self.collider_entries[i].proxy = Some(proxy);
+            debug_assert_eq!(proxy, self.proxy_owners.len());
+            self.proxy_owners.push(ProxyOwner::Collider(i));
+        }
+    }
+
+    /// The `(multibody, link, collider)` triple behind a collider proxy
+    /// owner (`None` for rigid-body owners).
+    fn collider_of(&self, owner: ProxyOwner) -> Option<(usize, i32, &crate::multibody::LinkCollider)> {
+        let ProxyOwner::Collider(e) = owner else {
+            return None;
+        };
+        let ent = &self.collider_entries[e];
+        let mb = &self.multibodies[ent.mb];
+        let col = if ent.link < 0 {
+            mb.base_collider()?
+        } else {
+            mb.link_collider(ent.link as usize)?
+        };
+        Some((ent.mb, ent.link, col))
+    }
+
     /// Cast a ray against every body and return the closest hit together with
     /// the body index (Bullet's `rayTest` with a closest-result callback).
     ///
@@ -218,7 +326,13 @@ impl PhysicsWorld {
         ignore: Option<usize>,
     ) -> Option<(usize, RayHit)> {
         let mut best: Option<(usize, RayHit)> = None;
-        for i in self.broadphase.raycast_candidates(ray_from, ray_to) {
+        for p in self.broadphase.raycast_candidates(ray_from, ray_to) {
+            // Link colliders join the world queries together with their
+            // contact response (phase C); until then only rigid bodies are
+            // tested.
+            let ProxyOwner::Body(i) = self.proxy_owners[p] else {
+                continue;
+            };
             if Some(i) == ignore {
                 continue;
             }
@@ -239,8 +353,17 @@ impl PhysicsWorld {
 
     /// Indices of bodies whose broad-phase AABB overlaps `aabb` (exact AABB
     /// test; the caller then runs the narrow phase on the candidates).
+    /// Multibody link colliders overlap too but are not reported until they
+    /// join the queries in phase C.
     pub fn aabb_candidates(&self, aabb: Aabb) -> Vec<usize> {
-        self.broadphase.aabb_candidates(aabb)
+        self.broadphase
+            .aabb_candidates(aabb)
+            .into_iter()
+            .filter_map(|p| match self.proxy_owners[p] {
+                ProxyOwner::Body(i) => Some(i),
+                ProxyOwner::Collider(_) => None,
+            })
+            .collect()
     }
 
     /// Closest convex sweep of `shape` from `from` to `to` against every body
@@ -262,7 +385,10 @@ impl PhysicsWorld {
             .world_aabb(from, ori)
             .merged(&shape.world_aabb(to, ori));
         let mut best: Option<(usize, SweepHit)> = None;
-        for i in self.broadphase.aabb_candidates(swept) {
+        for p in self.broadphase.aabb_candidates(swept) {
+            let ProxyOwner::Body(i) = self.proxy_owners[p] else {
+                continue;
+            };
             if Some(i) == ignore {
                 continue;
             }
@@ -295,7 +421,10 @@ impl PhysicsWorld {
     ) -> Vec<(usize, ContactManifold)> {
         let aabb = shape.world_aabb(pos, ori);
         let mut out = Vec::new();
-        for i in self.broadphase.aabb_candidates(aabb) {
+        for p in self.broadphase.aabb_candidates(aabb) {
+            let ProxyOwner::Body(i) = self.proxy_owners[p] else {
+                continue;
+            };
             if Some(i) == ignore {
                 continue;
             }
@@ -322,7 +451,7 @@ impl PhysicsWorld {
         body.position = position;
         body.orientation = orientation;
         let aabb = body.shape.world_aabb(position, orientation);
-        self.broadphase.set_aabb(index, aabb);
+        self.broadphase.set_aabb(self.body_proxies[index], aabb);
     }
 
     /// Add a joint between two bodies and return its index (Bullet's
@@ -399,7 +528,37 @@ impl PhysicsWorld {
                 continue;
             }
             let aabb = body.shape.world_aabb(predicted[i], body.orientation);
-            self.broadphase.set_aabb(i, aabb);
+            self.broadphase.set_aabb(self.body_proxies[i], aabb);
+        }
+
+        // 3m. Register new multibody colliders in the broad phase and refresh
+        // the collider AABBs from the FK world transforms (Bullet's
+        // `updateCollisionObjectWorldTransforms`; detection uses the current
+        // pose, unlike the rigid bodies' predicted pose — recorded
+        // deviation). Sleeping multibodies keep their AABBs like sleeping
+        // bodies.
+        self.register_pending_colliders();
+        for e in &self.collider_entries {
+            let Some(proxy) = e.proxy else {
+                continue;
+            };
+            let mb = &self.multibodies[e.mb];
+            if !mb.is_awake() {
+                continue;
+            }
+            let aabb = if e.link < 0 {
+                mb.base_collider()
+                    .expect("registered base collider")
+                    .shape
+                    .world_aabb(mb.base_pos(), mb.base_world_orientation())
+            } else {
+                let l = e.link as usize;
+                mb.link_collider(l)
+                    .expect("registered link collider")
+                    .shape
+                    .world_aabb(mb.link_world_position(l), mb.link_world_orientation(l))
+            };
+            self.broadphase.set_aabb(proxy, aabb);
         }
 
         // 4. Broad phase: candidate overlapping pairs.
@@ -410,7 +569,42 @@ impl PhysicsWorld {
         // `btCollisionObject::checkCollideWithOverride`).
         let mut constraints: Vec<ContactConstraint> = Vec::new();
         let mut contact_pairs: Vec<(usize, usize)> = Vec::new();
-        for &(i, j) in &pairs {
+        for &(pi, pj) in &pairs {
+            let (owner_a, owner_b) = (self.proxy_owners[pi], self.proxy_owners[pj]);
+            let (ProxyOwner::Body(i), ProxyOwner::Body(j)) = (owner_a, owner_b) else {
+                // Multibody link-collider pair (mixed or collider-collider):
+                // run the narrow phase at the current FK pose. Phase B is
+                // detection-only — the manifold is computed and dropped; the
+                // contact rows land in phase C. Self-collision filtering
+                // mirrors `checkCollideWithOverride`.
+                let Some((mb_a, l_a, ca)) = self.collider_of(owner_a) else {
+                    continue;
+                };
+                let Some((mb_b, l_b, cb)) = self.collider_of(owner_b) else {
+                    continue;
+                };
+                if mb_a == mb_b && !self.multibodies[mb_a].colliders_collide(l_a, l_b) {
+                    continue;
+                }
+                let (pa, qa) = if l_a < 0 {
+                    let mb = &self.multibodies[mb_a];
+                    (mb.base_pos(), mb.base_world_orientation())
+                } else {
+                    let mb = &self.multibodies[mb_a];
+                    let l = l_a as usize;
+                    (mb.link_world_position(l), mb.link_world_orientation(l))
+                };
+                let (pb, qb) = if l_b < 0 {
+                    let mb = &self.multibodies[mb_b];
+                    (mb.base_pos(), mb.base_world_orientation())
+                } else {
+                    let mb = &self.multibodies[mb_b];
+                    let l = l_b as usize;
+                    (mb.link_world_position(l), mb.link_world_orientation(l))
+                };
+                let _manifold = narrowphase::collide(&ca.shape, pa, qa, &cb.shape, pb, qb);
+                continue;
+            };
             if self.no_collision_pairs.contains(&(i.min(j), i.max(j))) {
                 continue;
             }
@@ -1193,5 +1387,252 @@ mod tests {
         // Per-step motion 5/60 < threshold 1.0: plain integration, no clamp.
         world.step_simulation(1.0 / 60.0);
         assert_relative_eq!(world.body(1).position.y, 1.0 - 5.0 / 60.0, epsilon = 1e-5);
+    }
+
+    /// A fixed-base pendulum with a sphere collider on the link: the collider
+    /// registers as a broad-phase proxy with the FK pose AABB and refreshes
+    /// as the body moves (phase B of the multibody collision design).
+    #[test]
+    fn link_collider_registers_and_updates_aabb() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        world.add_multibody(mb);
+        world.step_simulation(1.0 / 60.0);
+        // The link COM hangs 1 m below the pivot; the sphere AABB spans
+        // y ∈ [−1.5, −0.5].
+        let entry = world
+            .collider_entries
+            .iter()
+            .find(|e| e.mb == 0 && e.link == 0)
+            .expect("collider registered");
+        let proxy = entry.proxy.expect("proxy assigned");
+        let aabb = world.broadphase.proxy_aabb(proxy).unwrap();
+        assert_relative_eq!(aabb.min.y, -1.5, epsilon = 1e-4);
+        assert_relative_eq!(aabb.max.y, -0.5, epsilon = 1e-4);
+        // Moving the base moves the collider with the next FK pass.
+        world.multibody_mut(0).base_pos = Vector3::new(0.0, 5.0, 0.0);
+        world.step_simulation(1.0 / 60.0);
+        let aabb = world.broadphase.proxy_aabb(proxy).unwrap();
+        assert_relative_eq!(aabb.min.y, 3.5, epsilon = 1e-4);
+    }
+
+    /// A sleeping multibody keeps its collider AABB (like sleeping rigid
+    /// bodies): the refresh is skipped until the body wakes.
+    #[test]
+    fn sleeping_multibody_keeps_collider_aabb() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, true);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        world.add_multibody(mb);
+        for _ in 0..150 {
+            // 2.5 s > the 2 s sleep timeout.
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(!world.multibody(0).is_awake());
+        let proxy = world.collider_entries[0].proxy.unwrap();
+        let before = world.broadphase.proxy_aabb(proxy).unwrap();
+        // Teleport the base: the sleeping body skips the AABB refresh.
+        world.multibody_mut(0).base_pos = Vector3::new(3.0, 0.0, 0.0);
+        world.step_simulation(1.0 / 60.0);
+        let after = world.broadphase.proxy_aabb(proxy).unwrap();
+        assert_eq!(before, after);
+    }
+
+    /// A link collider overlapping a static rigid body produces a translated
+    /// mixed broad-phase pair.
+    #[test]
+    fn link_collider_pairs_with_rigid_body() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        // Sink the link so its sphere (r = 0.5, centered 0.6 below the
+        // plane) overlaps the ground.
+        mb.base_pos = Vector3::new(0.0, 0.4, 0.0);
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        world.add_multibody(mb);
+        world.step_simulation(1.0 / 60.0);
+        let mixed = world
+            .broadphase
+            .compute_pairs()
+            .into_iter()
+            .filter(|(a, b)| {
+                matches!(world.proxy_owners[*a], ProxyOwner::Body(_))
+                    ^ matches!(world.proxy_owners[*b], ProxyOwner::Body(_))
+            })
+            .count();
+        assert_eq!(mixed, 1, "one rigid-collider pair expected");
+    }
+
+    /// Self-collision filtering between two overlapping link colliders of
+    /// one chain: the broad phase reports the AABB pair (both colliders are
+    /// registered); the `checkCollideWithOverride` port
+    /// ([`MultiBody::colliders_collide`]) decides whether the narrow phase
+    /// runs on it — adjacent links collide by default, `has_self_collision =
+    /// false` and the per-link parent-collision flags opt out.
+    #[test]
+    fn self_collision_filtering() {
+        // Two overlapping link colliders on one chain register and produce
+        // one collider-collider broad-phase pair.
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = crate::multibody::MultiBody::new(2, 1.0, Vector3::ONE, true, false);
+        // Both links sit at the base origin with overlapping spheres.
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::ZERO,
+        );
+        mb.setup_revolute(
+            1,
+            1.0,
+            Vector3::ONE,
+            Some(0),
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::ZERO,
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        mb.set_link_collider(
+            1,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        world.add_multibody(mb);
+        world.step_simulation(1.0 / 60.0);
+        let collider_pairs = world
+            .broadphase
+            .compute_pairs()
+            .into_iter()
+            .filter(|(a, b)| {
+                matches!(world.proxy_owners[*a], ProxyOwner::Collider(_))
+                    && matches!(world.proxy_owners[*b], ProxyOwner::Collider(_))
+            })
+            .count();
+        assert_eq!(collider_pairs, 1);
+
+        // The filter itself (`checkCollideWithOverride` port) on a 3-link
+        // chain: base - 0 - 1 - 2. `-1` is the base.
+        let mut mb = crate::multibody::MultiBody::new(3, 1.0, Vector3::ONE, true, false);
+        for i in 0..3 {
+            mb.setup_revolute(
+                i,
+                1.0,
+                Vector3::ONE,
+                if i == 0 { None } else { Some(i - 1) },
+                Quaternion::IDENTITY,
+                Vector3::Z,
+                Vector3::ZERO,
+                Vector3::ZERO,
+            );
+        }
+        mb.finalize_multidof();
+        // Default: everything collides (Bullet's default).
+        assert!(mb.colliders_collide(0, 1));
+        assert!(mb.colliders_collide(-1, 0));
+        assert!(mb.colliders_collide(0, 2)); // non-adjacent
+        // Whole-body opt-out.
+        mb.set_has_self_collision(false);
+        assert!(!mb.colliders_collide(0, 1));
+        assert!(!mb.colliders_collide(-1, 0));
+        mb.set_has_self_collision(true);
+        // Direct-parent opt-out on link 1: only (1, 0) is excluded.
+        mb.set_link_parent_collision_disabled(1, false);
+        assert!(!mb.colliders_collide(1, 0));
+        assert!(mb.colliders_collide(1, 2));
+        assert!(mb.colliders_collide(1, -1));
+        // All-ancestors opt-out on link 2: parent and grandparent excluded,
+        // others not (fresh body to keep the flags independent).
+        let mut mb = crate::multibody::MultiBody::new(3, 1.0, Vector3::ONE, true, false);
+        for i in 0..3 {
+            mb.setup_revolute(
+                i,
+                1.0,
+                Vector3::ONE,
+                if i == 0 { None } else { Some(i - 1) },
+                Quaternion::IDENTITY,
+                Vector3::Z,
+                Vector3::ZERO,
+                Vector3::ZERO,
+            );
+        }
+        mb.finalize_multidof();
+        mb.set_link_parent_collision_disabled(2, true);
+        assert!(!mb.colliders_collide(2, 1));
+        assert!(!mb.colliders_collide(2, 0));
+        // The base is part of the ancestor walk, like Bullet's loop reaching
+        // m_parent == -1.
+        assert!(!mb.colliders_collide(2, -1));
+        // The exclusion is symmetric (Bullet checks both sides), and pairs
+        // without a flagged member are unaffected.
+        assert!(!mb.colliders_collide(1, 2));
+        assert!(mb.colliders_collide(0, 1));
     }
 }

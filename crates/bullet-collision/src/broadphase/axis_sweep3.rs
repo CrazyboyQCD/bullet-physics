@@ -111,6 +111,10 @@ impl BroadPhase for AxisSweep3 {
         }
     }
 
+    fn proxy_aabb(&self, proxy: usize) -> Option<Aabb> {
+        self.aabbs[proxy]
+    }
+
     fn compute_pairs(&self) -> Vec<(usize, usize)> {
         let x = self.axis_pairs(0);
         let y = self.axis_pairs(1);

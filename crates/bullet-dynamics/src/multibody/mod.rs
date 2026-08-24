@@ -18,7 +18,7 @@ pub mod link;
 #[cfg(test)]
 mod world_tests;
 
-pub use body::{MultiBody, MultiBodyScratch};
+pub use body::{LinkCollider, MultiBody, MultiBodyScratch};
 pub use constraint::{
     MultiBodyConstraint, MultiBodyConstraintKind, MultiBodyFixedConstraint, MultiBodyGearConstraint,
     MultiBodyJointLimit, MultiBodyJointMotor, MultiBodyPoint2Point, MultiBodySliderConstraint,

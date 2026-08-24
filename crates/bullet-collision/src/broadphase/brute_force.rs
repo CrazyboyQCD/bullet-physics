@@ -39,6 +39,10 @@ impl BroadPhase for BruteForceBroadPhase {
         self.aabbs[proxy] = None;
     }
 
+    fn proxy_aabb(&self, proxy: usize) -> Option<Aabb> {
+        self.aabbs[proxy]
+    }
+
     fn compute_pairs(&self) -> Vec<(usize, usize)> {
         let mut pairs = Vec::new();
         for i in 0..self.aabbs.len() {

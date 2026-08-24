@@ -86,6 +86,13 @@ pub struct MultiBodyLink {
     /// World transform of the link, refreshed by
     /// [`crate::multibody::MultiBody::forward_kinematics`].
     pub cached_world_transform: Transform,
+    /// Skip collisions between this link's collider and its direct parent's
+    /// (Bullet's `BT_MULTIBODYLINKFLAGS_DISABLE_PARENT_COLLISION`).
+    pub disable_parent_collision: bool,
+    /// Skip collisions between this link's collider and **all** of its
+    /// ancestors including the base (Bullet's
+    /// `BT_MULTIBODYLINKFLAGS_DISABLE_ALL_PARENT_COLLISION`).
+    pub disable_all_parent_collision: bool,
 }
 
 impl Default for MultiBodyLink {
@@ -114,6 +121,8 @@ impl Default for MultiBodyLink {
             pos_var_count: 0,
             joint_type: JointType::Fixed,
             cached_world_transform: Transform::IDENTITY,
+            disable_parent_collision: false,
+            disable_all_parent_collision: false,
         }
     }
 }
