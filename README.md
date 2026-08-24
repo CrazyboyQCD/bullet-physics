@@ -5,7 +5,7 @@ A pure Rust physics engine reimplementing the core of
 a high-performance, modern physics library in the Rust ecosystem.
 
 - **Math**: [`glam`](https://crates.io/crates/glam) with SIMD acceleration.
-- **License**: MIT OR Apache-2.0.
+- **License**: zlib (same as upstream Bullet Physics).
 - **Safety**: `#![deny(unsafe_code)]`.
 
 ## Workspace layout
@@ -80,5 +80,5 @@ for _ in 0..300 {
 
 ## License
 
-Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at
-your option.
+Licensed under the [zlib license](LICENSE). This project is a reimplementation
+of Bullet Physics, which is also zlib licensed.
