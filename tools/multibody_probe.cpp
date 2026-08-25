@@ -376,11 +376,266 @@ static void scene_spherical_motor(int frames)
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Collider scenes (multibody-collision.md §7): link/base colliders meeting
+// static and dynamic rigid bodies. Unlike addColliders above (tiny filler
+// spheres only there to drive the island manager), these attach real shapes
+// and need the FK caches refreshed before the first step.
+// ---------------------------------------------------------------------------
+
+// Refresh the cached FK transforms after posing (setJointPos/setBasePos) so
+// freshly attached colliders start at the posed configuration instead of the
+// constructor defaults.
+static void refreshFk(btMultiBody* body)
+{
+	btAlignedObjectArray<btQuaternion> world_to_local;
+	btAlignedObjectArray<btVector3> local_origin;
+	body->forwardKinematics(world_to_local, local_origin);
+}
+
+// A static ground box, top surface at y = 0, half extents (50, 0.5, 50).
+static void addGroundBox(btMultiBodyDynamicsWorld* world)
+{
+	btBoxShape* shape = new btBoxShape(btVector3(50, btScalar(0.5), 50));
+	btDefaultMotionState* ms = new btDefaultMotionState(
+		btTransform(btQuaternion(0, 0, 0, 1), btVector3(0, btScalar(-0.5), 0)));
+	btRigidBody::btRigidBodyConstructionInfo ci(0, ms, shape, btVector3(0, 0, 0));
+	world->addRigidBody(new btRigidBody(ci));
+}
+
+// Attach a friction-0.5 sphere collider to link `i` (or the base for -1) at
+// the current FK pose. Dynamic colliders (moving links, free bases) join the
+// DefaultFilter group like the official demos — the addCollisionObject
+// default (StaticFilter) never pairs against static geometry (whose mask
+// excludes Static), silently disabling the collision.
+static void attachSphere(btMultiBodyDynamicsWorld* world, btMultiBody* body, int link, btScalar radius)
+{
+	btMultiBodyLinkCollider* col = new btMultiBodyLinkCollider(body, link);
+	col->setCollisionShape(new btSphereShape(radius));
+	col->setFriction(btScalar(0.5));
+	col->setWorldTransform(link < 0 ? body->getBaseWorldTransform()
+									: body->getLink(link).m_cachedWorldTransform);
+	bool is_dynamic = link >= 0 || !body->hasFixedBase();
+	int group = is_dynamic ? int(btBroadphaseProxy::DefaultFilter)
+						   : int(btBroadphaseProxy::StaticFilter);
+	int mask = is_dynamic ? int(btBroadphaseProxy::AllFilter)
+						  : int(btBroadphaseProxy::AllFilter ^ btBroadphaseProxy::StaticFilter);
+	world->addCollisionObject(col, group, mask);
+	if (link < 0)
+		body->setBaseCollider(col);
+	else
+		body->getLink(link).m_collider = col;
+}
+
+// Scene 14 (§7.1 link_ground): a fixed-base pendulum with a sphere collider
+// on the link swings from the horizontal into a static ground box. The pivot
+// sits 1.25 m up so the arc's lowest point (link COM y = 0.25, r = 0.3)
+// penetrates 0.05 m — a shallow, clean first impact. Records the joint state
+// plus the link COM trajectory.
+static void scene_link_ground(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	addGroundBox(world);
+	btMultiBody* body = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	body->setupRevolute(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+						btVector3(0, 0, 1), btVector3(0, 0, 0), btVector3(0, -1, 0));
+	body->finalizeMultiDof();
+	// q = +pi/2 rotates the COM from straight down to (+1, 0) — the horizontal
+	// release, the same pose as the `pendulum` scene.
+	btScalar q = SIMD_HALF_PI;
+	body->setJointPosMultiDof(0, &q);
+	body->setBasePos(btVector3(0, btScalar(1.25), 0));
+	refreshFk(body);
+	world->addMultiBody(body);
+	attachSphere(world, body, 0, btScalar(0.3));
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3& p = body->getLink(0).m_cachedWorldTransform.getOrigin();
+		printf("%d %.6f %.6f %.6f %.6f %.6f\n", f, body->getJointPos(0), body->getJointVel(0), p[0], p[1], p[2]);
+	}
+}
+
+// Scene 15 (§7.2 base_ground): a free base with a box collider drops onto the
+// ground from y = 3; records the base position and velocity (impact impulses
+// and the rest height).
+static void scene_base_ground(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	addGroundBox(world);
+	btMultiBody* body = new btMultiBody(0, 1, btVector3(1, 1, 1), false, false);
+	body->setLinearDamping(0);
+	body->setAngularDamping(0);
+	body->finalizeMultiDof();
+	body->setBasePos(btVector3(0, 3, 0));
+	refreshFk(body);
+	world->addMultiBody(body);
+	btMultiBodyLinkCollider* col = new btMultiBodyLinkCollider(body, -1);
+	col->setCollisionShape(new btBoxShape(btVector3(btScalar(0.5), btScalar(0.5), btScalar(0.5))));
+	col->setFriction(btScalar(0.5));
+	col->setWorldTransform(body->getBaseWorldTransform());
+	world->addCollisionObject(col, btBroadphaseProxy::DefaultFilter, btBroadphaseProxy::AllFilter);
+	body->setBaseCollider(col);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3& p = body->getBasePos();
+		const btVector3& v = body->getBaseVel();
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f\n", f, p[0], p[1], p[2], v[0], v[1], v[2]);
+	}
+}
+
+// Scene 16 (§7.3 mb_pushes_rb): a motorized link with a sphere collider
+// sweeps through a free-floating dynamic box (gravity off, no ground).
+// The link COM starts at (+1, 0) and circles clockwise at 2 rad/s; the box
+// sits at the bottom of the arc. Records the box trajectory/velocity and the
+// link COM.
+static void scene_mb_pushes_rb(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	world->setGravity(btVector3(0, 0, 0));
+	btMultiBody* body = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	body->setupRevolute(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+						btVector3(0, 0, 1), btVector3(0, 0, 0), btVector3(1, 0, 0));
+	body->finalizeMultiDof();
+	refreshFk(body);
+	world->addMultiBody(body);
+	attachSphere(world, body, 0, btScalar(0.3));
+	btMultiBodyJointMotor* motor = new btMultiBodyJointMotor(body, 0, 0, -2, 1000);
+	world->addMultiBodyConstraint(motor);
+	btBoxShape* shape = new btBoxShape(btVector3(btScalar(0.5), btScalar(0.5), btScalar(0.5)));
+	btDefaultMotionState* ms = new btDefaultMotionState(
+		btTransform(btQuaternion(0, 0, 0, 1), btVector3(0, -1, 0)));
+	btRigidBody::btRigidBodyConstructionInfo ci(1, ms, shape, btVector3(0, 0, 0));
+	btRigidBody* box = new btRigidBody(ci);
+	box->setActivationState(DISABLE_DEACTIVATION);
+	world->addRigidBody(box);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3& p = box->getWorldTransform().getOrigin();
+		const btVector3& v = box->getLinearVelocity();
+		const btVector3& lp = body->getLink(0).m_cachedWorldTransform.getOrigin();
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+			   f, p[0], p[1], p[2], v[0], v[1], v[2], lp[0], lp[1], lp[2]);
+	}
+}
+
+// Scene 17 (§7.4 rb_hits_mb): a dynamic rigid sphere falls at 6 m/s onto the
+// base sphere collider of a free multibody floating at the origin. Records
+// both trajectories plus the sphere velocity (impulse exchange).
+static void scene_rb_hits_mb(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	btMultiBody* body = new btMultiBody(0, 1, btVector3(1, 1, 1), false, false);
+	body->setLinearDamping(0);
+	body->setAngularDamping(0);
+	body->finalizeMultiDof();
+	refreshFk(body);
+	world->addMultiBody(body);
+	attachSphere(world, body, -1, btScalar(0.5));
+	btSphereShape* shape = new btSphereShape(btScalar(0.5));
+	btDefaultMotionState* ms = new btDefaultMotionState(
+		btTransform(btQuaternion(0, 0, 0, 1), btVector3(0, 3, 0)));
+	btRigidBody::btRigidBodyConstructionInfo ci(1, ms, shape, btVector3(0, 0, 0));
+	btRigidBody* ball = new btRigidBody(ci);
+	ball->setLinearVelocity(btVector3(0, -6, 0));
+	ball->setActivationState(DISABLE_DEACTIVATION);
+	world->addRigidBody(ball);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3& mbp = body->getBasePos();
+		const btVector3& p = ball->getWorldTransform().getOrigin();
+		const btVector3& v = ball->getLinearVelocity();
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+			   f, mbp[0], mbp[1], mbp[2], p[0], p[1], p[2], v[0], v[1], v[2]);
+	}
+}
+
+// Scene 18 (§7.5 mb_mb): two free single-link multibodies with sphere
+// colliders on their links collide head-on (A drifts +X at 2 m/s into B at
+// rest 3 m away, gravity off). The e/d vectors are zero so each link COM
+// rides on its base. Records both base positions.
+static void scene_mb_mb(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	world->setGravity(btVector3(0, 0, 0));
+	btMultiBody* a = new btMultiBody(1, 1, btVector3(1, 1, 1), false, false);
+	a->setupRevolute(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+					 btVector3(0, 0, 1), btVector3(0, 0, 0), btVector3(0, 0, 0));
+	a->setLinearDamping(0);
+	a->setAngularDamping(0);
+	a->finalizeMultiDof();
+	a->setBaseVel(btVector3(2, 0, 0));
+	refreshFk(a);
+	btMultiBody* b = new btMultiBody(1, 1, btVector3(1, 1, 1), false, false);
+	b->setupRevolute(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+					 btVector3(0, 0, 1), btVector3(0, 0, 0), btVector3(0, 0, 0));
+	b->setLinearDamping(0);
+	b->setAngularDamping(0);
+	b->finalizeMultiDof();
+	b->setBasePos(btVector3(3, 0, 0));
+	refreshFk(b);
+	world->addMultiBody(a);
+	world->addMultiBody(b);
+	attachSphere(world, a, 0, btScalar(0.5));
+	attachSphere(world, b, 0, btScalar(0.5));
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3& pa = a->getBasePos();
+		const btVector3& pb = b->getBasePos();
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f\n", f, pa[0], pa[1], pa[2], pb[0], pb[1], pb[2]);
+	}
+}
+
+// Scene 19 (§7.6 self_collision): a fixed-base 3-link chain — link 0 hanging
+// down from the base, link 1 hanging below link 0, and link 2 a sibling of
+// link 1 whose COM sits at (+0.6, +0.2, 0) (e = (+0.6, +1, 0) from link 0's
+// COM, d = (0, +0.2, 0)), overlapping the base sphere by ~0.17 m — a
+// non-adjacent pair, and the offset keeps a torque arm on both joint axes
+// (a COM on the base-to-sphere line would make the contact force pass
+// through both pivot axes and the row degenerate to zero). Phase `on` (default self-collision): the contact kicks the chain
+// apart while gravity swings it; phase `off` (setHasSelfCollision(false)):
+// the overlapping pair is filtered and the chain evolves under pure ABA.
+// Records the three joint positions in two labelled phases.
+static void scene_self_collision(int frames)
+{
+	for (int phase = 0; phase < 2; ++phase)
+	{
+		btMultiBodyDynamicsWorld* world = makeWorld();
+		btMultiBody* body = new btMultiBody(3, 1, btVector3(1, 1, 1), true, false);
+		body->setupRevolute(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+							btVector3(0, 0, 1), btVector3(0, 0, 0), btVector3(0, -1, 0));
+		body->setupRevolute(1, 1, btVector3(1, 1, 1), 0, btQuaternion(0, 0, 0, 1),
+							btVector3(0, 0, 1), btVector3(0, -1, 0), btVector3(0, 0, 0));
+		body->setupRevolute(2, 1, btVector3(1, 1, 1), 0, btQuaternion(0, 0, 0, 1),
+							btVector3(0, 0, 1), btVector3(btScalar(0.6), 1, 0), btVector3(0, btScalar(0.2), 0));
+		body->finalizeMultiDof();
+		if (phase == 1)
+			body->setHasSelfCollision(false);
+		refreshFk(body);
+		world->addMultiBody(body);
+		attachSphere(world, body, -1, btScalar(0.5));
+		attachSphere(world, body, 0, btScalar(0.3));
+		attachSphere(world, body, 1, btScalar(0.3));
+		attachSphere(world, body, 2, btScalar(0.3));
+		const char* label = phase == 0 ? "on" : "off";
+		for (int f = 0; f < frames; ++f)
+		{
+			world->stepSimulation(DT, 1, DT);
+			printf("%s %d %.6f %.6f %.6f\n", label, f,
+				   body->getJointPos(0), body->getJointPos(1), body->getJointPos(2));
+		}
+	}
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s <free_base|pendulum|two_link|p2p|motor|fixed|prismatic|spherical|planar|gear|joint_limit|spherical_limit|spherical_motor> [frames]\n", argv[0]);
+		fprintf(stderr, "usage: %s <free_base|pendulum|two_link|p2p|motor|fixed|prismatic|spherical|planar|gear|joint_limit|spherical_limit|spherical_motor|link_ground|base_ground|mb_pushes_rb|rb_hits_mb|mb_mb|self_collision> [frames]\n", argv[0]);
 		return 1;
 	}
 	const char* scene = argv[1];
@@ -411,6 +666,18 @@ int main(int argc, char** argv)
 		scene_spherical_limit(frames);
 	else if (!strcmp(scene, "spherical_motor"))
 		scene_spherical_motor(frames);
+	else if (!strcmp(scene, "link_ground"))
+		scene_link_ground(frames);
+	else if (!strcmp(scene, "base_ground"))
+		scene_base_ground(frames);
+	else if (!strcmp(scene, "mb_pushes_rb"))
+		scene_mb_pushes_rb(frames);
+	else if (!strcmp(scene, "rb_hits_mb"))
+		scene_rb_hits_mb(frames);
+	else if (!strcmp(scene, "mb_mb"))
+		scene_mb_mb(frames);
+	else if (!strcmp(scene, "self_collision"))
+		scene_self_collision(frames);
 	else
 	{
 		fprintf(stderr, "unknown scene %s\n", scene);
