@@ -1931,7 +1931,7 @@ fn shortest_arc_quat(v0: Vector3, v1: Vector3) -> Quaternion {
 
 /// Bullet's `btPlaneSpace1`: an orthonormal pair `(p, q)` spanning the plane
 /// perpendicular to `n`.
-fn plane_space1(n: Vector3) -> (Vector3, Vector3) {
+pub(crate) fn plane_space1(n: Vector3) -> (Vector3, Vector3) {
     if n.z.abs() > bullet_math::FRAC_1_SQRT_2 {
         // Choose p in the y-z plane.
         let a = n.y * n.y + n.z * n.z;

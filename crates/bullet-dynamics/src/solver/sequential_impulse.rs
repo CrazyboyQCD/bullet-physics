@@ -6,13 +6,13 @@ use crate::body::RigidBody;
 use bullet_math::{Matrix3, Real, Vector3};
 
 /// Allowed penetration slop before the Baumgarte term kicks in.
-const SLOP: Real = 0.005;
+pub(crate) const SLOP: Real = 0.005;
 /// Baumgarte positional-correction factor — also the default joint ERP
 /// (Bullet's `infoGlobal.m_erp`, which `btPoint2PointConstraint::getInfo2`
 /// uses for `m_constraintError` unless overridden).
 pub(crate) const BAUMGARTE: Real = 0.2;
 /// Minimum approach speed (m/s) below which restitution is disabled.
-const RESTITUTION_THRESHOLD: Real = 1.0;
+pub(crate) const RESTITUTION_THRESHOLD: Real = 1.0;
 /// Penetration depth (m) above which the split-impulse pass takes over
 /// position correction (Bullet's `m_splitImpulsePenetrationThreshold = -0.04`,
 /// sign-flipped to our positive-penetration convention). Deeper contacts are
@@ -270,31 +270,52 @@ pub fn solve(
     iterations: u32,
     inv_dt: Real,
 ) {
-    // Warm start: re-apply the impulses accumulated by the previous step
-    // (Bullet's `SOLVER_USE_WARMSTARTING` pass), so resting contacts reach a
-    // converged solution in a few iterations instead of rebuilding from zero.
+    warm_start(bodies, constraints);
+    for _ in 0..iterations {
+        velocity_iteration(bodies, constraints, joints, inv_dt);
+    }
+    split_impulse_pass(bodies, constraints, iterations, inv_dt);
+}
+
+/// Re-apply the impulses accumulated by the previous step (Bullet's
+/// `SOLVER_USE_WARMSTARTING` pass), so resting contacts reach a converged
+/// solution in a few iterations instead of rebuilding from zero.
+pub(crate) fn warm_start(bodies: &mut [RigidBody], constraints: &mut [ContactConstraint]) {
     for c in constraints.iter_mut() {
         let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
         apply_impulse(a, b, c, c.normal * c.normal_impulse);
         apply_impulse(a, b, c, c.tangent1 * c.tangent1_impulse);
         apply_impulse(a, b, c, c.tangent2 * c.tangent2_impulse);
     }
+}
 
-    for _ in 0..iterations {
-        for c in constraints.iter_mut() {
-            solve_contact(bodies, c, inv_dt);
-        }
-        for j in joints.iter_mut() {
-            solve_joint_row(bodies, j);
-        }
+/// One PGS sweep over the rigid contact and joint rows.
+pub(crate) fn velocity_iteration(
+    bodies: &mut [RigidBody],
+    constraints: &mut [ContactConstraint],
+    joints: &mut [ConstraintRow],
+    inv_dt: Real,
+) {
+    for c in constraints.iter_mut() {
+        solve_contact(bodies, c, inv_dt);
     }
+    for j in joints.iter_mut() {
+        solve_joint_row(bodies, j);
+    }
+}
 
-    // Split-impulse pass (Bullet's `solveGroupCacheFriendlySplitImpulseIterations`,
-    // after the velocity iterations): deep-penetration contacts are pulled out
-    // of the surface by a pseudo impulse accumulated on each body's push
-    // velocity. It never touches the real velocities; the world applies the
-    // push velocity to the pose after position integration, so the penetration
-    // is corrected without injecting energy into the motion.
+/// Split-impulse pass (Bullet's `solveGroupCacheFriendlySplitImpulseIterations`,
+/// after the velocity iterations): deep-penetration contacts are pulled out
+/// of the surface by a pseudo impulse accumulated on each body's push
+/// velocity. It never touches the real velocities; the world applies the
+/// push velocity to the pose after position integration, so the penetration
+/// is corrected without injecting energy into the motion.
+pub(crate) fn split_impulse_pass(
+    bodies: &mut [RigidBody],
+    constraints: &mut [ContactConstraint],
+    iterations: u32,
+    inv_dt: Real,
+) {
     let split_rhs = |c: &mut ContactConstraint| {
         if c.split_active {
             c.rhs_penetration = c.penetration * SPLIT_ERP2 * inv_dt * c.normal_mass;

@@ -14,6 +14,7 @@
 
 pub mod body;
 pub mod constraint;
+pub(crate) mod contact;
 pub mod link;
 #[cfg(test)]
 mod world_tests;

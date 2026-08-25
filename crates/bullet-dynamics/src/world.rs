@@ -8,6 +8,7 @@ use bullet_collision::raycast::{self, RayHit};
 use crate::body::RigidBody;
 use crate::constraint::{self, Constraint};
 use crate::multibody::body::{MultiBody, MultiBodyScratch};
+use crate::multibody::contact::{self, ContactSide, MbContactRow, PendingContact};
 use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
 use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, SPLIT_TURN_ERP};
@@ -92,6 +93,12 @@ pub struct PhysicsWorld {
     mb_data: SolverData,
     /// Flattened multibody constraint rows for the current step.
     mb_rows: Vec<SolverRow>,
+    /// Mixed/collider contact manifolds collected by the narrow phase this
+    /// step (converted into solver rows at solve time, when the multibodies
+    /// can be borrowed mutably).
+    mb_pending_contacts: Vec<PendingContact>,
+    /// Flattened multibody contact rows for the current step.
+    mb_contact_rows: Vec<MbContactRow>,
 }
 
 impl Default for PhysicsWorld {
@@ -120,6 +127,8 @@ impl PhysicsWorld {
             mb_scratch: MultiBodyScratch::default(),
             mb_data: SolverData::default(),
             mb_rows: Vec::new(),
+            mb_pending_contacts: Vec::new(),
+            mb_contact_rows: Vec::new(),
         }
     }
 
@@ -284,22 +293,6 @@ impl PhysicsWorld {
             debug_assert_eq!(proxy, self.proxy_owners.len());
             self.proxy_owners.push(ProxyOwner::Collider(i));
         }
-    }
-
-    /// The `(multibody, link, collider)` triple behind a collider proxy
-    /// owner (`None` for rigid-body owners).
-    fn collider_of(&self, owner: ProxyOwner) -> Option<(usize, i32, &crate::multibody::LinkCollider)> {
-        let ProxyOwner::Collider(e) = owner else {
-            return None;
-        };
-        let ent = &self.collider_entries[e];
-        let mb = &self.multibodies[ent.mb];
-        let col = if ent.link < 0 {
-            mb.base_collider()?
-        } else {
-            mb.link_collider(ent.link as usize)?
-        };
-        Some((ent.mb, ent.link, col))
     }
 
     /// Cast a ray against every body and return the closest hit together with
@@ -569,40 +562,84 @@ impl PhysicsWorld {
         // `btCollisionObject::checkCollideWithOverride`).
         let mut constraints: Vec<ContactConstraint> = Vec::new();
         let mut contact_pairs: Vec<(usize, usize)> = Vec::new();
+        self.mb_pending_contacts.clear();
         for &(pi, pj) in &pairs {
             let (owner_a, owner_b) = (self.proxy_owners[pi], self.proxy_owners[pj]);
             let (ProxyOwner::Body(i), ProxyOwner::Body(j)) = (owner_a, owner_b) else {
                 // Multibody link-collider pair (mixed or collider-collider):
-                // run the narrow phase at the current FK pose. Phase B is
-                // detection-only — the manifold is computed and dropped; the
-                // contact rows land in phase C. Self-collision filtering
-                // mirrors `checkCollideWithOverride`.
-                let Some((mb_a, l_a, ca)) = self.collider_of(owner_a) else {
+                // run the narrow phase at the current FK pose and collect the
+                // manifold for the contact rows (converted at solve time).
+                // Self-collision filtering mirrors `checkCollideWithOverride`.
+                let resolve = |owner: ProxyOwner| -> Option<(ContactSide, &bullet_collision::shapes::CollisionShape, Vector3, Quaternion, Real, Real)> {
+                    match owner {
+                        ProxyOwner::Body(i) => {
+                            let b = &self.bodies[i];
+                            Some((
+                                ContactSide::Rigid(i),
+                                &b.shape,
+                                b.position,
+                                b.orientation,
+                                b.friction,
+                                b.restitution,
+                            ))
+                        }
+                        ProxyOwner::Collider(e) => {
+                            let ent = self.collider_entries[e];
+                            let mb = &self.multibodies[ent.mb];
+                            let col = if ent.link < 0 {
+                                mb.base_collider()?
+                            } else {
+                                mb.link_collider(ent.link as usize)?
+                            };
+                            let (pos, ori) = if ent.link < 0 {
+                                (mb.base_pos(), mb.base_world_orientation())
+                            } else {
+                                let l = ent.link as usize;
+                                (mb.link_world_position(l), mb.link_world_orientation(l))
+                            };
+                            Some((
+                                ContactSide::Link { mb: ent.mb, link: ent.link },
+                                &col.shape,
+                                pos,
+                                ori,
+                                col.friction,
+                                col.restitution,
+                            ))
+                        }
+                    }
+                };
+                let Some((side_a, shape_a, pa, qa, fa, ra)) = resolve(owner_a) else {
                     continue;
                 };
-                let Some((mb_b, l_b, cb)) = self.collider_of(owner_b) else {
+                let Some((side_b, shape_b, pb, qb, fb, rb)) = resolve(owner_b) else {
                     continue;
                 };
-                if mb_a == mb_b && !self.multibodies[mb_a].colliders_collide(l_a, l_b) {
+                if let (ContactSide::Link { mb: mba, link: la }, ContactSide::Link { mb: mbb, link: lb }) =
+                    (side_a, side_b)
+                    && mba == mbb
+                    && !self.multibodies[mba].colliders_collide(la, lb)
+                {
                     continue;
                 }
-                let (pa, qa) = if l_a < 0 {
-                    let mb = &self.multibodies[mb_a];
-                    (mb.base_pos(), mb.base_world_orientation())
-                } else {
-                    let mb = &self.multibodies[mb_a];
-                    let l = l_a as usize;
-                    (mb.link_world_position(l), mb.link_world_orientation(l))
+                let Some(manifold) = narrowphase::collide(shape_a, pa, qa, shape_b, pb, qb)
+                else {
+                    continue;
                 };
-                let (pb, qb) = if l_b < 0 {
-                    let mb = &self.multibodies[mb_b];
-                    (mb.base_pos(), mb.base_world_orientation())
-                } else {
-                    let mb = &self.multibodies[mb_b];
-                    let l = l_b as usize;
-                    (mb.link_world_position(l), mb.link_world_orientation(l))
-                };
-                let _manifold = narrowphase::collide(&ca.shape, pa, qa, &cb.shape, pb, qb);
+                // Skip pairs where nothing can move (a sleeping multibody on
+                // static geometry); anything touching an active side is woken
+                // in stage 5b before the rows are assembled.
+                let a_awake = side_active_owner(side_a, &self.bodies, &self.multibodies);
+                let b_awake = side_active_owner(side_b, &self.bodies, &self.multibodies);
+                if !a_awake && !b_awake {
+                    continue;
+                }
+                self.mb_pending_contacts.push(PendingContact {
+                    side_a,
+                    side_b,
+                    friction: fa * fb,
+                    restitution: ra * rb,
+                    manifold,
+                });
                 continue;
             };
             if self.no_collision_pairs.contains(&(i.min(j), i.max(j))) {
@@ -652,6 +689,18 @@ impl PhysicsWorld {
                 self.bodies[i].activate();
             }
         }
+        // The same propagation over the multibody collider contacts: a
+        // sleeping multibody touching an active side (or an awake multibody
+        // touching a sleeping rigid body) wakes its whole body.
+        for p in &self.mb_pending_contacts {
+            let a_active = side_active_owner(p.side_a, &self.bodies, &self.multibodies);
+            let b_active = side_active_owner(p.side_b, &self.bodies, &self.multibodies);
+            if a_active && !b_active {
+                wake_side_owner(p.side_b, &mut self.bodies, &mut self.multibodies);
+            } else if b_active && !a_active {
+                wake_side_owner(p.side_a, &mut self.bodies, &mut self.multibodies);
+            }
+        }
         // A joint links two bodies into one island: a sleeping body woken by
         // motion of its linked partner would otherwise stay frozen while the
         // constraint pulls on it.
@@ -669,14 +718,22 @@ impl PhysicsWorld {
             }
         }
 
-        // 6. Solve constraints (correct velocities).
-        sequential_impulse::solve(
-            &mut self.bodies,
-            &mut constraints,
-            &mut joint_rows,
-            self.iterations,
-            inv_dt,
-        );
+        // 6. Solve constraints (correct velocities). Scenes without
+        // multibody contacts keep the plain rigid solve (bit-identical to
+        // the pre-multibody behavior); otherwise the rigid rows, multibody
+        // contact rows and multibody constraint rows share one PGS loop
+        // (Bullet's `solveMultiBodyGroup` inside `solveSingleIteration`).
+        if self.mb_pending_contacts.is_empty() {
+            sequential_impulse::solve(
+                &mut self.bodies,
+                &mut constraints,
+                &mut joint_rows,
+                self.iterations,
+                inv_dt,
+            );
+        } else {
+            self.solve_mixed(&mut constraints, &mut joint_rows, inv_dt);
+        }
 
         // 6b. Write back the solved impulses so the next step can warm start
         // from them (the cache is rebuilt every step, dropping stale pairs).
@@ -693,11 +750,13 @@ impl PhysicsWorld {
         }
         self.contact_cache = next_cache;
 
-        // 6bm. Multibody internal constraints: row conversion, PGS over the
-        // non-contact pool and writeback into the generalized velocities
-        // (Bullet's `solveInternalConstraints` running the multibody part of
-        // `solveMultiBodyGroup`; contact rows join in a later phase).
-        self.mb_solve_internal_constraints(dt);
+        // 6bm. Multibody internal constraints: in the mixed path they were
+        // solved together with the contact rows above; the pure path runs
+        // them here.
+        if self.mb_pending_contacts.is_empty() {
+            self.mb_solve_internal_constraints(dt);
+        }
+        self.mb_pending_contacts.clear();
 
         // 6c. Deactivation: bodies below the sleeping thresholds for longer
         // than `DEACTIVATION_TIME` seconds go to sleep (Bullet's
@@ -818,24 +877,9 @@ impl PhysicsWorld {
     /// Convert all multibody constraints into rows and solve them with
     /// projected Gauss-Seidel (Bullet's `solveInternalConstraints` +
     /// `btMultiBodyConstraintSolver::solveMultiBodyGroup` for the non-contact
-    /// pool).
+    /// pool) — the pure-multibody path with no collider contacts.
     fn mb_solve_internal_constraints(&mut self, dt: Real) {
-        // Wake bodies linked to an awake body by a constraint (the island
-        // merge in `calculateSimulationIslands`).
-        let mut wake = vec![false; self.multibodies.len()];
-        for c in &self.mb_constraints {
-            let a_awake = self.multibodies[c.body_a()].is_awake();
-            let b_awake = self.multibodies[c.body_b()].is_awake();
-            if a_awake || b_awake {
-                wake[c.body_a()] = true;
-                wake[c.body_b()] = true;
-            }
-        }
-        for (i, &w) in wake.iter().enumerate() {
-            if w {
-                self.multibodies[i].wake_up();
-            }
-        }
+        self.mb_wake_constraint_linked();
 
         // Reset the solver scratch and companion ids (Bullet's
         // `solveGroupCacheFriendlySetup`).
@@ -863,25 +907,163 @@ impl PhysicsWorld {
 
         // PGS iterations over the non-contact rows, alternating direction by
         // iteration parity (Bullet's `solveSingleIteration`).
-        let n = self.mb_rows.len();
         let outer = self.iterations as usize;
         let inner = self.num_non_contact_inner_iterations as usize;
         for iteration in 0..outer {
             for _ in 0..inner {
-                if iteration % 2 == 0 {
-                    for j in 0..n {
-                        resolve_row(&mut self.mb_rows[j], &mut self.mb_data);
-                    }
-                } else {
-                    for j in (0..n).rev() {
-                        resolve_row(&mut self.mb_rows[j], &mut self.mb_data);
-                    }
-                }
+                self.mb_rows_sweep(iteration);
             }
         }
 
-        // Write the accumulated impulses back into the constraints (Bullet's
-        // `writeBackSolverBodyToMultiBody`).
+        self.mb_writeback_rows();
+        // Flush any split-impulse deltas (no-op unless split impulses are
+        // used; kept for fidelity with `solveInternalConstraints`).
+        for mb in &mut self.multibodies {
+            mb.process_delta_vee_2();
+        }
+    }
+
+    /// The merged solve (Bullet's `solveMultiBodyGroup`): rigid contact +
+    /// joint rows, multibody contact rows and multibody constraint rows in
+    /// one PGS loop, with the rigid split-impulse pass after the velocity
+    /// iterations and the multibody writebacks at the end.
+    fn solve_mixed(
+        &mut self,
+        constraints: &mut [ContactConstraint],
+        joint_rows: &mut [ConstraintRow],
+        inv_dt: Real,
+    ) {
+        self.mb_wake_constraint_linked();
+
+        // Shared solver pool + companion ids for the contact and constraint
+        // rows (Bullet's `solveGroupCacheFriendlySetup`).
+        self.mb_data.reset();
+        self.mb_rows.clear();
+        self.mb_contact_rows.clear();
+        for mb in &mut self.multibodies {
+            mb.companion_id = -1;
+        }
+
+        // Convert the collected contacts and the constraints into rows.
+        // Contacts of still-sleeping multibodies (not woken by anything
+        // active) are skipped — their pair produced no impulse.
+        {
+            let PhysicsWorld {
+                bodies,
+                multibodies,
+                mb_pending_contacts,
+                mb_contact_rows,
+                mb_data: data,
+                mb_scratch: scratch,
+                mb_constraints,
+                mb_rows,
+                mb_erp: erp,
+                ..
+            } = self;
+            for p in mb_pending_contacts.iter() {
+                let awake = |s: &ContactSide| match *s {
+                    ContactSide::Rigid(_) => true,
+                    ContactSide::Link { mb, .. } => multibodies[mb].is_awake(),
+                };
+                if !awake(&p.side_a) || !awake(&p.side_b) {
+                    continue;
+                }
+                contact::convert_contact(
+                    p,
+                    bodies,
+                    multibodies,
+                    data,
+                    scratch,
+                    inv_dt,
+                    mb_contact_rows,
+                );
+            }
+            let dt = 1.0 / inv_dt;
+            for (i, c) in mb_constraints.iter_mut().enumerate() {
+                c.create_constraint_rows(i, mb_rows, data, scratch, multibodies, dt, *erp);
+            }
+        }
+
+        // One PGS iteration: rigid sweep, multibody contact sweep (normals,
+        // then bounded frictions), then the multibody constraint rows.
+        sequential_impulse::warm_start(&mut self.bodies, constraints);
+        let outer = self.iterations as usize;
+        let inner = self.num_non_contact_inner_iterations as usize;
+        for iteration in 0..outer {
+            sequential_impulse::velocity_iteration(
+                &mut self.bodies,
+                constraints,
+                joint_rows,
+                inv_dt,
+            );
+            contact::solve_contact_rows(&mut self.mb_contact_rows, &mut self.mb_data, &mut self.bodies);
+            for _ in 0..inner {
+                self.mb_rows_sweep(iteration);
+            }
+        }
+        sequential_impulse::split_impulse_pass(
+            &mut self.bodies,
+            constraints,
+            self.iterations,
+            inv_dt,
+        );
+
+        // Writebacks: the multibody contact impulses first, then the
+        // constraint impulses (Bullet's `writeBackSolverBodyToMultiBody`
+        // order).
+        {
+            let PhysicsWorld {
+                mb_contact_rows,
+                mb_data: data,
+                multibodies,
+                ..
+            } = self;
+            contact::writeback_contact_rows(mb_contact_rows, data, multibodies, 1.0 / inv_dt);
+        }
+        self.mb_writeback_rows();
+        for mb in &mut self.multibodies {
+            mb.process_delta_vee_2();
+        }
+    }
+
+    /// Wake multibodies linked to an awake body by a constraint (the island
+    /// merge in `calculateSimulationIslands`).
+    fn mb_wake_constraint_linked(&mut self) {
+        let mut wake = vec![false; self.multibodies.len()];
+        for c in &self.mb_constraints {
+            let a_awake = self.multibodies[c.body_a()].is_awake();
+            let b_awake = self.multibodies[c.body_b()].is_awake();
+            if a_awake || b_awake {
+                wake[c.body_a()] = true;
+                wake[c.body_b()] = true;
+            }
+        }
+        for (i, &w) in wake.iter().enumerate() {
+            if w {
+                self.multibodies[i].wake_up();
+            }
+        }
+    }
+
+    /// One inner sweep over the multibody constraint rows, alternating
+    /// direction by iteration parity (Bullet's `solveSingleIteration`).
+    fn mb_rows_sweep(&mut self, iteration: usize) {
+        let n = self.mb_rows.len();
+        if iteration.is_multiple_of(2) {
+            for j in 0..n {
+                resolve_row(&mut self.mb_rows[j], &mut self.mb_data);
+            }
+        } else {
+            for j in (0..n).rev() {
+                resolve_row(&mut self.mb_rows[j], &mut self.mb_data);
+            }
+        }
+    }
+
+    /// Write the accumulated constraint impulses back into the constraints
+    /// and the generalized velocities (Bullet's
+    /// `writeBackSolverBodyToMultiBody`).
+    fn mb_writeback_rows(&mut self) {
         for row in &self.mb_rows {
             self.mb_constraints[row.org_constraint]
                 .set_applied_impulse(row.org_dof_index, row.applied_impulse);
@@ -898,11 +1080,6 @@ impl PhysicsWorld {
             mb.apply_delta_vee(&unit_a, imp);
             let mb = &mut self.multibodies[row.multi_body_b];
             mb.apply_delta_vee(&unit_b, imp);
-        }
-        // Flush any split-impulse deltas (no-op unless split impulses are
-        // used; kept for fidelity with `solveInternalConstraints`).
-        for mb in &mut self.multibodies {
-            mb.process_delta_vee_2();
         }
     }
 
@@ -1023,6 +1200,29 @@ fn resolve_row(row: &mut SolverRow, data: &mut SolverData) {
         for i in 0..ndof_b {
             dv[i] += unit[i] * delta_impulse;
         }
+    }
+}
+
+/// Whether a contact side currently participates in the simulation: rigid
+/// bodies by their activation state, multibodies by their awake flag (a
+/// whole articulated body sleeps as one unit).
+fn side_active_owner(side: ContactSide, bodies: &[RigidBody], multibodies: &[MultiBody]) -> bool {
+    match side {
+        ContactSide::Rigid(i) => bodies[i].is_active(),
+        ContactSide::Link { mb, .. } => multibodies[mb].is_awake(),
+    }
+}
+
+/// Wake a contact side: activate the rigid body or wake the whole
+/// multibody.
+fn wake_side_owner(
+    side: ContactSide,
+    bodies: &mut [RigidBody],
+    multibodies: &mut [MultiBody],
+) {
+    match side {
+        ContactSide::Rigid(i) => bodies[i].activate(),
+        ContactSide::Link { mb, .. } => multibodies[mb].wake_up(),
     }
 }
 
@@ -1634,5 +1834,199 @@ mod tests {
         // without a flagged member are unaffected.
         assert!(!mb.colliders_collide(1, 2));
         assert!(mb.colliders_collide(0, 1));
+    }
+
+    /// A fixed-base pendulum whose link sphere falls onto a static plane is
+    /// supported by the multibody contact rows: it settles hanging straight
+    /// down with the sphere resting on the plane (phase C contact response).
+    #[test]
+    fn link_sphere_rests_on_ground() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        // Pivot 1.51 m up: the link center's lowest arc point is y = 0.51,
+        // so the sphere (r = 0.5) starts 0.01 m inside the plane — the
+        // contact rows must support it hanging straight down.
+        mb.base_pos = Vector3::new(0.0, 1.51, 0.0);
+        world.add_multibody(mb);
+        let dt = 1.0 / 60.0;
+        for _ in 0..240 {
+            world.step_simulation(dt);
+        }
+        let body = world.multibody(0);
+        let q = body.joint_pos_multidof(0)[0];
+        let qd = body.joint_vel_multidof(0)[0];
+        assert!(q.abs() < 0.05, "pendulum did not settle hanging down: q = {q}");
+        assert!(qd.abs() < 0.1, "pendulum still swinging: qd = {qd}");
+        // The link center rests with the sphere on the plane: x ≈ 0,
+        // y ≈ 0.5 (within the slop/damping tolerance).
+        let p = body.link_world_position(0);
+        assert_relative_eq!(p.x, 0.0, epsilon = 0.02);
+        assert_relative_eq!(p.y, 0.5, epsilon = 0.05);
+    }
+
+    /// A swinging pendulum link kicks a dynamic rigid box lying in its path:
+    /// the multibody contact rows exchange impulse with the rigid solver
+    /// (box wakes and moves, the pendulum keeps swinging reduced).
+    #[test]
+    fn swinging_link_pushes_rigid_box() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            0.3,
+            0.0,
+        );
+        // Pivot 1 m up; release from the horizontal (+X side).
+        mb.base_pos = Vector3::new(0.0, 1.0, 0.0);
+        mb.set_joint_pos_multidof(0, &[bullet_math::FRAC_PI_2]);
+        world.add_multibody(mb);
+        // A box resting on the plane right of the pivot, in the swing path
+        // (the link center sweeps through y ≈ 0 at x ≈ 1).
+        let box_start = Vector3::new(1.0, 0.5, 0.0);
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                box_start,
+                1.0,
+            )
+            .friction(0.0),
+        );
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+        }
+        // The box was hit and knocked away from its start pose. At the
+        // impact point (≈45° along the arc) the ball's velocity points
+        // (−X, −Y), so the box is shoved toward −X / tipped over.
+        let box_end = world.body(1).position;
+        assert!(
+            (box_end - box_start).length() > 0.1,
+            "box was not pushed: {box_end:?}"
+        );
+        assert!(box_end.x < box_start.x, "box pushed the wrong way: {box_end:?}");
+    }
+
+    /// A multibody contact wakes a sleeping rigid body: the sleeping box is
+    /// struck by the swinging link and moves.
+    #[test]
+    fn link_contact_wakes_sleeping_rigid_body() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        // The victim: a box that settles on the plane and sleeps.
+        let box_idx = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            Vector3::new(1.0, 0.5, 0.0),
+            1.0,
+        ));
+        for _ in 0..180 {
+            // 3 s > the 2 s deactivation window.
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(!world.body(box_idx).is_active(), "box should be asleep");
+        // Swing a link sphere into it.
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            0.3,
+            0.0,
+        );
+        mb.base_pos = Vector3::new(0.0, 1.0, 0.0);
+        mb.set_joint_pos_multidof(0, &[bullet_math::FRAC_PI_2]);
+        world.add_multibody(mb);
+        for _ in 0..90 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(world.body(box_idx).is_active(), "box should have been woken");
+        assert!(
+            (world.body(box_idx).position - Vector3::new(1.0, 0.5, 0.0)).length() > 0.1,
+            "sleeping box was not knocked away"
+        );
+    }
+
+    /// A free-base multibody with a box collider falls onto a static plane
+    /// and is supported by its base contact rows (rest height, zero
+    /// velocity).
+    #[test]
+    fn free_base_with_collider_lands_on_ground() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mut mb = crate::multibody::MultiBody::new(0, 1.0, Vector3::ONE, false, false);
+        mb.set_linear_damping(0.0);
+        mb.finalize_multidof();
+        mb.set_base_collider(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            0.5,
+            0.0,
+        );
+        mb.base_pos = Vector3::new(0.0, 3.0, 0.0);
+        world.add_multibody(mb);
+        let dt = 1.0 / 60.0;
+        for _ in 0..240 {
+            world.step_simulation(dt);
+        }
+        let body = world.multibody(0);
+        // The half-extent box rests on the plane: y ≈ 0.5 within the slop
+        // tolerance, with a small residual velocity (damped settling).
+        assert_relative_eq!(body.base_pos().y, 0.5, epsilon = 0.05);
+        assert!(body.base_vel().length() < 0.2, "base still moving: {:?}", body.base_vel());
     }
 }
