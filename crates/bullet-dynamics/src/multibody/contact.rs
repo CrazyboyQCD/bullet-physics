@@ -49,13 +49,21 @@ pub(crate) enum ContactSide {
 /// `(vb − va)·n`.
 enum SideData {
     /// The rigid side: the signed normal as this side sees it, the angular
-    /// jacobian arm `r × normal`, its inertia-scaled response `invI · arm`
-    /// and the inverse mass.
+    /// jacobian arm `r × normal`, its inertia-scaled response `invI · arm`,
+    /// the inverse mass, and the row projection at row-assembly time.
+    ///
+    /// The iteration reads this side's **impulse delta** (the current
+    /// projection minus the snapshot), not the real velocity: the rhs already
+    /// carries `-rel_vel`, so counting the full velocity again would apply the
+    /// relative velocity twice (Bullet reads its solver body's
+    /// delta-velocity pool for the same reason). The snapshot predates the
+    /// warm-start impulses, which are part of the delta like in Bullet.
     Rigid {
         contact_normal: Vector3,
         ang: Vector3,
         angular_component: Vector3,
         inv_mass: Real,
+        initial_proj: Real,
     },
     /// The multibody side: this row's jacobian / unit-response block in
     /// [`SolverData`] and the body's shared `deltaVelocities` block.
@@ -135,6 +143,8 @@ fn setup_contact_row(
                     ang,
                     angular_component,
                     inv_mass: body.inv_mass(),
+                    initial_proj: contact_normal.dot(body.linear_velocity)
+                        + ang.dot(body.angular_velocity),
                 },
                 rel,
             )
@@ -188,6 +198,8 @@ fn setup_contact_row(
                     ang,
                     angular_component,
                     inv_mass: body.inv_mass(),
+                    initial_proj: contact_normal.dot(body.linear_velocity)
+                        + ang.dot(body.angular_velocity),
                 },
                 rel,
             )
@@ -436,16 +448,22 @@ fn solve_row(row: &mut MbContactRow, data: &mut SolverData, bodies: &mut [RigidB
     let mut delta_impulse = row.rhs - row.applied_impulse * CFM;
 
     // Velocity of each side along the row, given everything applied so far.
-    // The multibody side reads the accumulated pool delta; the rigid side's
-    // real velocity IS its delta (the rigid solver applies impulses
-    // directly, the counterpart of Bullet's solver-body deltas).
+    // Both sides contribute only their **impulse delta** since assembly (the
+    // multibody side's pool starts at zero, the rigid side's real velocity
+    // minus its assembly-time snapshot) — the rhs already contains the
+    // assembly-time relative velocity, and Bullet reads delta pools for the
+    // same reason (`m_deltaLinearVelocity` / `m_deltaVelocities`).
     let delta_a = match (&row.data_a, row.side_a) {
         (SideData::MultiBody { .. }, ContactSide::Link { .. }) => {
             read_mb_side(&row.data_a, data)
         }
-        (SideData::Rigid { contact_normal, ang, .. }, ContactSide::Rigid(i)) => {
+        (
+            SideData::Rigid { contact_normal, ang, initial_proj, .. },
+            ContactSide::Rigid(i),
+        ) => {
             let body = &bodies[i];
             contact_normal.dot(body.linear_velocity) + ang.dot(body.angular_velocity)
+                - initial_proj
         }
         _ => unreachable!("side/data mismatch"),
     };
@@ -453,9 +471,13 @@ fn solve_row(row: &mut MbContactRow, data: &mut SolverData, bodies: &mut [RigidB
         (SideData::MultiBody { .. }, ContactSide::Link { .. }) => {
             read_mb_side(&row.data_b, data)
         }
-        (SideData::Rigid { contact_normal, ang, .. }, ContactSide::Rigid(i)) => {
+        (
+            SideData::Rigid { contact_normal, ang, initial_proj, .. },
+            ContactSide::Rigid(i),
+        ) => {
             let body = &bodies[i];
             contact_normal.dot(body.linear_velocity) + ang.dot(body.angular_velocity)
+                - initial_proj
         }
         _ => unreachable!("side/data mismatch"),
     };

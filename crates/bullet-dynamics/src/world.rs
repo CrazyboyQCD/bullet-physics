@@ -2073,6 +2073,51 @@ mod tests {
         assert!(body.base_vel().length() < 0.2, "base still moving: {:?}", body.base_vel());
     }
 
+    /// A fast rigid sphere hitting a free multibody (equal masses, head-on,
+    /// restitution 0, gravity off) converges to the shared inelastic
+    /// velocity: the mixed-row iteration must count the assembly-time
+    /// relative velocity only once — reading the rigid side's impulse delta,
+    /// not its full velocity. The double-count regression inflated the
+    /// impulse ~2.4x, leaving the ball nearly stopped and the multibody
+    /// overspeeding.
+    #[test]
+    fn rb_mb_contact_impulse_not_doubled() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = crate::multibody::MultiBody::new(0, 1.0, Vector3::ONE, false, false);
+        mb.set_linear_damping(0.0);
+        mb.set_angular_damping(0.0);
+        mb.finalize_multidof();
+        mb.set_base_collider(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        world.add_multibody(mb);
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 3.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -6.0, 0.0))
+            .disable_deactivation(),
+        );
+        let dt = 1.0 / 60.0;
+        for _ in 0..25 {
+            world.step_simulation(dt);
+        }
+        let ball_vy = world.body(ball).linear_velocity.y;
+        let mb_vy = world.multibody(0).base_vel().y;
+        assert!(mb_vy < -1.5, "multibody was not kicked: {mb_vy}");
+        // Equal-mass head-on, restitution 0: both sides leave at ~-3 m/s
+        // (plus a small Baumgarte bounce that separates them slightly).
+        assert!(
+            (ball_vy - mb_vy).abs() < 1.5,
+            "velocities did not converge: ball {ball_vy} vs multibody {mb_vy}"
+        );
+    }
+
     /// Phase D: a resting pair on the plane is one island and sleeps as a
     /// unit, then wakes as a unit when a falling body joins the island
     /// (Bullet's `buildIslands` activation pass).
