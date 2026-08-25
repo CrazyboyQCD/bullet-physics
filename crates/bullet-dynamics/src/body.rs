@@ -166,6 +166,36 @@ impl RigidBody {
         self.angular_velocity = Vector3::ZERO;
     }
 
+    /// Whether this body is an island member: dynamic bodies participate;
+    /// static bodies and `DisableSimulation` bodies do not (they are never
+    /// simulated and must not be forced into `IslandSleeping`).
+    pub(crate) fn participates_in_islands(&self) -> bool {
+        !self.is_static && self.activation_state != ActivationState::DisableSimulation
+    }
+
+    /// Whether this body keeps its island awake (the `buildIslands`
+    /// activation pass: `ACTIVE_TAG` and `DISABLE_DEACTIVATION` count as
+    /// awake; `WANTS_DEACTIVATION`/`ISLAND_SLEEPING` are sleep-ready).
+    pub(crate) fn is_island_awake(&self) -> bool {
+        matches!(
+            self.activation_state,
+            ActivationState::Active | ActivationState::DisableDeactivation
+        )
+    }
+
+    /// Wake a body whose island is not sleeping (Bullet's `buildIslands`:
+    /// `ISLAND_SLEEPING` members of a non-sleeping island become
+    /// `WANTS_DEACTIVATION` with a reset deactivation timer, so the body
+    /// simulates again but immediately re-qualifies for sleeping). Only
+    /// sleeping bodies transition — active members keep their timers.
+    pub(crate) fn island_wake(&mut self) {
+        if self.is_static || self.activation_state != ActivationState::IslandSleeping {
+            return;
+        }
+        self.activation_state = ActivationState::WantsDeactivation;
+        self.deactivation_time = 0.0;
+    }
+
     /// Whether the body has been slow for long enough to sleep
     /// (Bullet's `wantsSleeping()`).
     #[inline]
@@ -176,6 +206,9 @@ impl RigidBody {
     /// Accumulate rest time while both speeds stay below the sleeping
     /// thresholds; after [`DEACTIVATION_TIME`] seconds the body is marked
     /// [`ActivationState::WantsDeactivation`] (Bullet's `updateDeactivation`).
+    /// A body that moves again re-enters the active state — Bullet sets
+    /// `ACTIVE_TAG` right where it resets the timer, so a knocked-away
+    /// `WANTS_DEACTIVATION` body keeps its own island awake.
     pub fn update_deactivation(&mut self, dt: Real) {
         if !self.is_active() || self.activation_state == ActivationState::DisableDeactivation {
             return;
@@ -184,7 +217,12 @@ impl RigidBody {
             < self.linear_sleeping_threshold * self.linear_sleeping_threshold
             && self.angular_velocity.length_squared()
                 < self.angular_sleeping_threshold * self.angular_sleeping_threshold;
-        self.deactivation_time = if slow { self.deactivation_time + dt } else { 0.0 };
+        if slow {
+            self.deactivation_time += dt;
+        } else {
+            self.deactivation_time = 0.0;
+            self.activation_state = ActivationState::Active;
+        }
         if self.deactivation_time > DEACTIVATION_TIME {
             self.deactivation_time = 0.0;
             self.activation_state = ActivationState::WantsDeactivation;

@@ -4,6 +4,7 @@
 pub mod body;
 pub mod character;
 pub mod constraint;
+mod island;
 pub mod multibody;
 pub mod solver;
 pub mod vehicle;

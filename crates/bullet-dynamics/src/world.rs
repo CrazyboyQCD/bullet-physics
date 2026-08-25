@@ -7,6 +7,7 @@ use bullet_collision::narrowphase::{self, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
 use crate::body::RigidBody;
 use crate::constraint::{self, Constraint};
+use crate::island::UnionFind;
 use crate::multibody::body::{MultiBody, MultiBodyScratch};
 use crate::multibody::contact::{self, ContactSide, MbContactRow, PendingContact};
 use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
@@ -557,11 +558,17 @@ impl PhysicsWorld {
         // 4. Broad phase: candidate overlapping pairs.
         let pairs = self.broadphase.compute_pairs();
 
+        // 4b. Simulation islands (phase D, docs/multibody-collision.md §9):
+        // union rigid bodies and multibodies by broad-phase pairs, joints
+        // and multibody constraints, then decide sleep/wake per island —
+        // the island-based replacement of the former one-hop wake-up pass
+        // (which ran as stage 5b).
+        self.step_islands(&pairs);
+
         // 5. Narrow phase: exact contact manifolds -> constraints. Pairs
         // linked by a joint with `disable_collisions` are skipped (Bullet's
         // `btCollisionObject::checkCollideWithOverride`).
         let mut constraints: Vec<ContactConstraint> = Vec::new();
-        let mut contact_pairs: Vec<(usize, usize)> = Vec::new();
         self.mb_pending_contacts.clear();
         for &(pi, pj) in &pairs {
             let (owner_a, owner_b) = (self.proxy_owners[pi], self.proxy_owners[pj]);
@@ -645,6 +652,12 @@ impl PhysicsWorld {
             if self.no_collision_pairs.contains(&(i.min(j), i.max(j))) {
                 continue;
             }
+            // A pair whose owners are both inactive after the island pass
+            // belongs to a sleeping island: skip detection and rows
+            // entirely (Bullet solves no manifolds of a sleeping island).
+            if !self.bodies[i].is_active() && !self.bodies[j].is_active() {
+                continue;
+            }
             let a = &self.bodies[i];
             let b = &self.bodies[j];
             if let Some(mut manifold) = narrowphase::collide(
@@ -655,7 +668,6 @@ impl PhysicsWorld {
                 predicted[j],
                 b.orientation,
             ) {
-                contact_pairs.push((i, j));
                 // Inherit the previous step's accumulated impulses for contact
                 // points that persist (Bullet's persistent manifolds).
                 warm_start_impulses(
@@ -668,54 +680,18 @@ impl PhysicsWorld {
             }
         }
 
-        // 5a. Joint rows: flatten every enabled joint into its solver rows
-        // from the current (pre-integration) poses, like Bullet's
-        // `convertJoints` after `predictUnconstraintMotion`.
+        // 5a. Joint rows: flatten every enabled joint of an awake island
+        // into its solver rows from the current (pre-integration) poses,
+        // like Bullet's `convertJoints` after `predictUnconstraintMotion`.
+        // A joint whose both bodies are inactive (including a joint to a
+        // static anchor whose dynamic side sleeps) belongs to a sleeping
+        // island and produces no rows.
         let mut joint_rows: Vec<ConstraintRow> = Vec::new();
         for c in &mut self.constraints {
-            constraint::prepare_rows(c, &self.bodies, inv_dt, BAUMGARTE, &mut joint_rows);
-        }
-
-        // 5b. Wake up sleeping bodies that touch an active body (Bullet's
-        // island-based activation propagation: activation travels along the
-        // contact graph one step at a time). A contact between two sleeping
-        // bodies does not wake them — a stable stack stays asleep.
-        for &(i, j) in &contact_pairs {
-            let a_active = self.bodies[i].is_active();
-            let b_active = self.bodies[j].is_active();
-            if a_active && !b_active {
-                self.bodies[j].activate();
-            } else if b_active && !a_active {
-                self.bodies[i].activate();
-            }
-        }
-        // The same propagation over the multibody collider contacts: a
-        // sleeping multibody touching an active side (or an awake multibody
-        // touching a sleeping rigid body) wakes its whole body.
-        for p in &self.mb_pending_contacts {
-            let a_active = side_active_owner(p.side_a, &self.bodies, &self.multibodies);
-            let b_active = side_active_owner(p.side_b, &self.bodies, &self.multibodies);
-            if a_active && !b_active {
-                wake_side_owner(p.side_b, &mut self.bodies, &mut self.multibodies);
-            } else if b_active && !a_active {
-                wake_side_owner(p.side_a, &mut self.bodies, &mut self.multibodies);
-            }
-        }
-        // A joint links two bodies into one island: a sleeping body woken by
-        // motion of its linked partner would otherwise stay frozen while the
-        // constraint pulls on it.
-        for c in &self.constraints {
-            if !c.enabled() {
+            if !self.bodies[c.body_a()].is_active() && !self.bodies[c.body_b()].is_active() {
                 continue;
             }
-            let (a, b) = (c.body_a(), c.body_b());
-            let a_active = self.bodies[a].is_active();
-            let b_active = self.bodies[b].is_active();
-            if a_active && !b_active {
-                self.bodies[b].activate();
-            } else if b_active && !a_active {
-                self.bodies[a].activate();
-            }
+            constraint::prepare_rows(c, &self.bodies, inv_dt, BAUMGARTE, &mut joint_rows);
         }
 
         // 6. Solve constraints (correct velocities). Scenes without
@@ -759,13 +735,12 @@ impl PhysicsWorld {
         self.mb_pending_contacts.clear();
 
         // 6c. Deactivation: bodies below the sleeping thresholds for longer
-        // than `DEACTIVATION_TIME` seconds go to sleep (Bullet's
-        // `updateActivationState` between solving and integrating).
+        // than `DEACTIVATION_TIME` seconds qualify for sleeping
+        // (`WantsDeactivation`); the next step's island pass (4b) then
+        // decides whether the whole island sleeps — Bullet's
+        // `updateActivationState` / `buildIslands` split.
         for body in &mut self.bodies {
             body.update_deactivation(dt);
-            if body.wants_deactivation() {
-                body.go_to_sleep();
-            }
         }
 
         // 7. Integrate positions with the corrected velocities. Bodies that
@@ -858,6 +833,95 @@ impl PhysicsWorld {
         }
     }
 
+    /// Build the per-step union-find islands and apply the island sleep/wake
+    /// decision (Bullet's `calculateSimulationIslands` + the activation pass
+    /// of `btSimulationIslandManager::buildIslands`; phase D design
+    /// `docs/multibody-collision.md` §9).
+    ///
+    /// Node space: one node per non-static rigid body, then one per
+    /// multibody (a multibody's collider chain is connected by construction,
+    /// so a single node yields the same partitions as Bullet's per-collider
+    /// chain merge). Merge rules: broad-phase AABB pairs between two dynamic
+    /// owners (conservative, like `findUnions` on the pair cache), enabled
+    /// joints between two dynamic bodies, and multibody constraints
+    /// (collider-less, a recorded deviation). An island with any awake
+    /// member (`Active`/`DisableDeactivation`, or an awake multibody) wakes
+    /// its sleeping members; an island where everyone is sleep-ready goes to
+    /// sleep as a unit.
+    fn step_islands(&mut self, pairs: &[(usize, usize)]) {
+        let num_bodies = self.bodies.len();
+        let total = num_bodies + self.multibodies.len();
+        let mut uf = UnionFind::new(total);
+
+        // Proxy-pair owners -> island nodes (None: not an island member).
+        let node_of = |world: &Self, owner: ProxyOwner| match owner {
+            ProxyOwner::Body(i) => world.bodies[i].participates_in_islands().then_some(i),
+            ProxyOwner::Collider(e) => Some(num_bodies + world.collider_entries[e].mb),
+        };
+        for &(pi, pj) in pairs {
+            if let (Some(a), Some(b)) = (
+                node_of(self, self.proxy_owners[pi]),
+                node_of(self, self.proxy_owners[pj]),
+            ) {
+                uf.unite(a, b);
+            }
+        }
+        for c in &self.constraints {
+            if !c.enabled() {
+                continue;
+            }
+            let (a, b) = (c.body_a(), c.body_b());
+            if self.bodies[a].participates_in_islands()
+                && self.bodies[b].participates_in_islands()
+            {
+                uf.unite(a, b);
+            }
+        }
+        for c in &self.mb_constraints {
+            uf.unite(num_bodies + c.body_a(), num_bodies + c.body_b());
+        }
+
+        // Any awake member keeps its whole island awake (per island root).
+        let mut island_awake = vec![false; total];
+        for (i, b) in self.bodies.iter().enumerate() {
+            if b.participates_in_islands() && b.is_island_awake() {
+                island_awake[uf.find(i)] = true;
+            }
+        }
+        for (i, mb) in self.multibodies.iter().enumerate() {
+            if mb.is_awake() {
+                island_awake[uf.find(num_bodies + i)] = true;
+            }
+        }
+
+        // Resolve every member's island state first (the decisions borrow
+        // the union-find while applying them borrows the world).
+        let body_awake: Vec<bool> = (0..num_bodies)
+            .map(|i| island_awake[uf.find(i)])
+            .collect();
+        let mb_awake: Vec<bool> = (0..self.multibodies.len())
+            .map(|i| island_awake[uf.find(num_bodies + i)])
+            .collect();
+        for (i, &awake) in body_awake.iter().enumerate() {
+            let b = &mut self.bodies[i];
+            if awake {
+                b.island_wake();
+            } else if b.participates_in_islands() {
+                b.go_to_sleep();
+            }
+        }
+        for (i, &awake) in mb_awake.iter().enumerate() {
+            let mb = &mut self.multibodies[i];
+            if awake {
+                if !mb.is_awake() {
+                    mb.wake_up();
+                }
+            } else {
+                mb.go_to_sleep();
+            }
+        }
+    }
+
     /// Refresh link transforms, clear constraint forces, then integrate the
     /// generalized velocities with the articulated-body algorithm (Bullet's
     /// `solveExternalForces`).
@@ -879,8 +943,6 @@ impl PhysicsWorld {
     /// `btMultiBodyConstraintSolver::solveMultiBodyGroup` for the non-contact
     /// pool) — the pure-multibody path with no collider contacts.
     fn mb_solve_internal_constraints(&mut self, dt: Real) {
-        self.mb_wake_constraint_linked();
-
         // Reset the solver scratch and companion ids (Bullet's
         // `solveGroupCacheFriendlySetup`).
         self.mb_data.reset();
@@ -889,7 +951,9 @@ impl PhysicsWorld {
             mb.companion_id = -1;
         }
 
-        // Convert the constraints into rows.
+        // Convert the constraints into rows. Constraints of a sleeping
+        // island (both multibodies asleep after the island pass) produce no
+        // rows.
         {
             let PhysicsWorld {
                 multibodies,
@@ -901,6 +965,9 @@ impl PhysicsWorld {
                 ..
             } = self;
             for (i, c) in constraints.iter_mut().enumerate() {
+                if !multibodies[c.body_a()].is_awake() && !multibodies[c.body_b()].is_awake() {
+                    continue;
+                }
                 c.create_constraint_rows(i, rows, data, scratch, multibodies, dt, *erp);
             }
         }
@@ -933,8 +1000,6 @@ impl PhysicsWorld {
         joint_rows: &mut [ConstraintRow],
         inv_dt: Real,
     ) {
-        self.mb_wake_constraint_linked();
-
         // Shared solver pool + companion ids for the contact and constraint
         // rows (Bullet's `solveGroupCacheFriendlySetup`).
         self.mb_data.reset();
@@ -980,6 +1045,11 @@ impl PhysicsWorld {
             }
             let dt = 1.0 / inv_dt;
             for (i, c) in mb_constraints.iter_mut().enumerate() {
+                // Constraints of a sleeping island (both multibodies asleep
+                // after the island pass) produce no rows.
+                if !multibodies[c.body_a()].is_awake() && !multibodies[c.body_b()].is_awake() {
+                    continue;
+                }
                 c.create_constraint_rows(i, mb_rows, data, scratch, multibodies, dt, *erp);
             }
         }
@@ -1023,25 +1093,6 @@ impl PhysicsWorld {
         self.mb_writeback_rows();
         for mb in &mut self.multibodies {
             mb.process_delta_vee_2();
-        }
-    }
-
-    /// Wake multibodies linked to an awake body by a constraint (the island
-    /// merge in `calculateSimulationIslands`).
-    fn mb_wake_constraint_linked(&mut self) {
-        let mut wake = vec![false; self.multibodies.len()];
-        for c in &self.mb_constraints {
-            let a_awake = self.multibodies[c.body_a()].is_awake();
-            let b_awake = self.multibodies[c.body_b()].is_awake();
-            if a_awake || b_awake {
-                wake[c.body_a()] = true;
-                wake[c.body_b()] = true;
-            }
-        }
-        for (i, &w) in wake.iter().enumerate() {
-            if w {
-                self.multibodies[i].wake_up();
-            }
         }
     }
 
@@ -1210,19 +1261,6 @@ fn side_active_owner(side: ContactSide, bodies: &[RigidBody], multibodies: &[Mul
     match side {
         ContactSide::Rigid(i) => bodies[i].is_active(),
         ContactSide::Link { mb, .. } => multibodies[mb].is_awake(),
-    }
-}
-
-/// Wake a contact side: activate the rigid body or wake the whole
-/// multibody.
-fn wake_side_owner(
-    side: ContactSide,
-    bodies: &mut [RigidBody],
-    multibodies: &mut [MultiBody],
-) {
-    match side {
-        ContactSide::Rigid(i) => bodies[i].activate(),
-        ContactSide::Link { mb, .. } => multibodies[mb].wake_up(),
     }
 }
 
@@ -1458,8 +1496,10 @@ mod tests {
         assert_relative_eq!(world.body(1).position.y, y_at_sleep, epsilon = 1e-6);
     }
 
-    /// A sleeping body in contact with an active body is woken up (Bullet's
-    /// activation propagation along the contact graph).
+    /// A sleeping body whose island gains an active member is woken up
+    /// (Bullet's island activation pass: `ISLAND_SLEEPING` members of a
+    /// non-sleeping island become `WANTS_DEACTIVATION` — simulating again,
+    /// but immediately re-qualifying for sleeping).
     #[test]
     fn contact_wakes_sleeping_body() {
         let mut world = PhysicsWorld::new();
@@ -1488,10 +1528,13 @@ mod tests {
         for _ in 0..60 {
             world.step_simulation(dt);
         }
-        assert_eq!(
-            world.body(1).activation_state(),
-            ActivationState::Active,
+        assert!(
+            world.body(1).is_active(),
             "sleeping body was not woken by the impact"
+        );
+        assert_ne!(
+            world.body(1).activation_state(),
+            ActivationState::IslandSleeping
         );
     }
 
@@ -2028,5 +2071,128 @@ mod tests {
         // tolerance, with a small residual velocity (damped settling).
         assert_relative_eq!(body.base_pos().y, 0.5, epsilon = 0.05);
         assert!(body.base_vel().length() < 0.2, "base still moving: {:?}", body.base_vel());
+    }
+
+    /// Phase D: a resting pair on the plane is one island and sleeps as a
+    /// unit, then wakes as a unit when a falling body joins the island
+    /// (Bullet's `buildIslands` activation pass).
+    #[test]
+    fn island_sleeps_and_wakes_as_unit() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        // Two boxes side by side, touching (one shared face at x = 0).
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            Vector3::new(-0.5, 0.5, 0.0),
+            1.0,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            Vector3::new(0.5, 0.5, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..(4.0 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        // The whole island sleeps together.
+        assert!(!world.body(1).is_active(), "left box should sleep");
+        assert!(!world.body(2).is_active(), "right box should sleep");
+        // Sleeping means frozen: further steps do not move either box.
+        let (pa, pb) = (world.body(1).position, world.body(2).position);
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert!((world.body(1).position - pa).length() < 1e-9);
+        assert!((world.body(2).position - pb).length() < 1e-9);
+        // A fast ball lands on the right box: the impact joins its island
+        // and both boxes wake.
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.25),
+                Vector3::new(-3.0, 0.5, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(8.0, 0.0, 0.0)),
+        );
+        for _ in 0..30 {
+            world.step_simulation(dt);
+        }
+        assert!(world.body(1).is_active(), "left box should wake with its island");
+        assert!(world.body(2).is_active(), "right box should wake with its island");
+    }
+
+    /// Phase D: a `DisableDeactivation` member keeps its whole island awake
+    /// forever (Bullet counts `DISABLE_DEACTIVATION` as an awake contributor).
+    #[test]
+    fn disable_deactivation_keeps_island_awake() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(-0.5, 0.5, 0.0),
+                1.0,
+            )
+            .disable_deactivation(),
+        );
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            Vector3::new(0.5, 0.5, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..(10.0 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        assert!(world.body(1).is_active());
+        assert!(
+            world.body(2).is_active(),
+            "neighbor of a disable-deactivation body must never sleep"
+        );
+    }
+
+    /// Phase D: a joint merges two islands across a distance — a moving
+    /// body keeps its joint partner (far away, no contact) from sleeping
+    /// (Bullet merges enabled constraints between two dynamic bodies).
+    #[test]
+    fn joint_links_islands_across_a_distance() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        // Two bodies 2 m apart joined by a point-to-point joint whose pivots
+        // coincide at the midpoint, so the constraint starts satisfied (no
+        // initial kick).
+        let mid = Vector3::new(5.0, 0.0, 0.0);
+        let a = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            mid - Vector3::X,
+            1.0,
+        ));
+        let b = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            mid + Vector3::X,
+            1.0,
+        ));
+        let joint = crate::constraint::Constraint::point2point(a, b, Vector3::X, -Vector3::X);
+        world.add_constraint(joint);
+        // Body A is driven perpetually; B is far away and still — only the
+        // joint keeps its island awake.
+        let dt = 1.0 / 60.0;
+        for _ in 0..(6.0 / dt) as usize {
+            world.body_mut(a).apply_force(Vector3::new(2.0, 0.0, 0.0));
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(b).is_active(),
+            "joint-linked partner of a moving body must stay awake"
+        );
     }
 }
