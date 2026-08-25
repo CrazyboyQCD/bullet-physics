@@ -43,6 +43,10 @@ Key source files:
   `checkCollideWithOverride` (self-collision filtering, §4.6).
 - `Featherstone/btMultiBodyDynamicsWorld.cpp` — `calculateSimulationIslands`
   (island merging, §4.8), `solveExternalForces`, `integrateMultiBodyTransforms`.
+- `BulletCollision/CollisionDispatch/btSimulationIslandManager.cpp` +
+  `btUnionFind.{h,cpp}` — the union-find, the island sleep/wake pass
+  (`buildIslands`) and the per-island batching (`processIslands`) that phase D
+  ports (detailed design §9).
 - `Featherstone/btMultiBodyInplaceSolverIslandCallback.h` — per-island
   batching into `solveMultiBodyGroup`.
 - `Featherstone/btMultiBodyConstraintSolver.cpp` — `convertMultiBodyContact`,
@@ -177,12 +181,14 @@ wake-up extends to link colliders: any contact linking an awake island
 member wakes the whole multibody.
 
 **D8 — Islands (Phase D).** Port `calculateSimulationIslands` as a union-find
-over: contact manifolds between two non-static colliders, rigid joints,
-adjacent non-static link colliders of one multibody, and multibody
-constraints (tagA/tagB). Per-island row pools replace the global solve; this
-also upgrades the rigid-body side to true island semantics, closing the
-simplified wake-up deviation for both worlds. Solved per island in island
-order (Bullet sorts for determinism); sleeping islands are skipped.
+over: broad-phase AABB pairs between two non-static colliders (conservative,
+like `findUnions` on the pair cache), rigid joints between two dynamic
+bodies, and multibody constraints. Each multibody is one node (its collider
+chain merges trivially). The island sleep/wake pass replaces the one-hop
+wake-up, and rows of sleeping islands are skipped entirely. The solve itself
+stays one global batch (Bullet's `m_minimumSolverBatchSize = 128`
+accumulates small islands into a single group anyway — §9.6). Detailed
+design in §9.
 
 **D9 — Retired equivalences.** Bullet's `getOrInitSolverBody` pool maps to
 our direct body mutation; `setPosUpdated` / interpolation transforms /
@@ -214,9 +220,10 @@ in the first landing; recorded as not-implemented).
 - **Phase C — contact response.** `MultiBodyContactRow` (normal + friction),
   mixed PGS loop, writeback, sleeping interactions. New probe scenes (§7).
   Acceptance: probe parity within the tolerances of §7; new unit tests.
-- **Phase D — islands.** Union-find, per-island solving, island-driven
-  sleeping for both rigid bodies and multibodies. Acceptance: sleeping scene
-  parity unchanged; wake-up propagation tests updated to island semantics.
+- **Phase D — islands.** Union-find, island-driven sleeping and row skipping
+  for both rigid bodies and multibodies (detailed design §9; the solve stays
+  one batch). Acceptance: sleeping scene parity unchanged; wake-up
+  propagation tests updated to island semantics.
 - **Phase E — optional follow-ups.** Articulated warm starting,
   `btMultiBodyJointFeedback` (consumes the constraint-force bookkeeping),
   CCD for link colliders.
@@ -249,3 +256,167 @@ green through every phase (fused-world refactor included).
 - No articulated warm starting for contacts or constraints (Bullet default).
 - Phase A–C keep the one-hop wake-up simplification (until Phase D).
 - Engine-wide slop 0.005 applies to multibody contact rows (Bullet default 0).
+- Phase D additions (§9.8): one union-find node per multibody, single solve
+  batch, sleeping-island pairs skip the narrow phase, two-phase rigid
+  deactivation timing, mb gravity/ABA gating on the `awake` flag.
+
+## 9. Phase D — simulation islands (detailed design)
+
+Port of `btSimulationIslandManager` + `calculateSimulationIslands`:
+union-find islands over rigid bodies and multibodies, an island-level
+sleep/wake decision, and row skipping for sleeping islands — replacing the
+Phase A–C one-hop wake-up propagation. The PGS solve itself stays one
+global batch (§9.6).
+
+### 9.1 Node space
+
+- Every **non-static rigid body** is a node. Static bodies are never island
+  members (Bullet: no island tag) — their contacts merge nothing.
+- Every **multibody** is exactly **one node**. Bullet instead creates one
+  node per link/base collider and merges the adjacent-collider chain; the
+  chain is connected by construction, so the partitions are equivalent and
+  we skip the per-collider bookkeeping.
+- Bodies with `DisableSimulation` are excluded from the node set (they are
+  not simulated and must not be forced into `IslandSleeping`).
+
+Node ids are transient per step: `0..num_dynamic_bodies` for rigid bodies
+(mapped through a per-step `body → node` table since static bodies leave
+holes), then one node per multibody.
+
+### 9.2 Merge rules (per step)
+
+1. **Broad-phase AABB pairs** (`findUnions` on the pair cache): any proxy
+   pair whose two owners are both dynamic (non-static body, or a collider of
+   any multibody) unites their nodes. This is conservative — overlapping
+   AABBs merge islands before actual contact — and exactly what Bullet does;
+   pairs suppressed by `no_collision_pairs` still merge (they are joint
+   partners anyway).
+2. **Rigid joints**: an enabled joint between two non-static bodies unites
+   them (Bullet unites only if both sides are non-static/kinematic; a joint
+   to a static anchor merges nothing).
+3. **Multibody constraints**: always unite the two multibody nodes.
+   Deviation: Bullet requires `tagA/tagB ≥ 0` (each side has ≥1 registered
+   collider) — our collider-less wake keeps the existing tested semantics
+   (`body_sleeps_after_rest_and_wakes_via_constraint`).
+
+### 9.3 Island activation pass (replaces stage 5b)
+
+For each island (union-find root), an **awake contributor** is a rigid body
+in state `Active` or `DisableDeactivation`, or a multibody with `awake =
+true` (Bullet's `buildIslands` pass: anything but `ACTIVE_TAG`/
+`DISABLE_DEACTIVATION` counts as sleep-eligible).
+
+- **Any awake member** → every sleeping member wakes: rigid bodies go
+  `IslandSleeping → WantsDeactivation` with `deactivation_time = 0` (new
+  `RigidBody::island_wake`), multibodies `wake_up()`. The body simulates
+  immediately but re-qualifies for sleeping from a zero timer, so a
+  briefly-poked island can re-sleep without another full 2 s window.
+- **No awake member** → every member sleeps: rigid `go_to_sleep()` (zeroes
+  velocities, like Bullet's end-of-step zeroing), multibody `go_to_sleep()`
+  (velocities cleared at the integrate stage as today).
+
+The pass runs right after `compute_pairs` (new stage 4b), before the narrow
+phase — Bullet's equivalent runs inside `solveConstraints` after collision
+detection, and its union rules likewise consume only broad-phase pairs, so
+the ordering is equivalent while letting stages 5+ filter on the final
+activation states.
+
+### 9.4 Row filtering after the pass
+
+With the decision made, "sleeping island" reduces to per-owner checks:
+
+- **Rigid contact pair**: skip manifold computation and row assembly when
+  both bodies are `!is_active()` (post-pass). Bullet solves no manifolds of
+  sleeping islands; we additionally skip the narrow phase itself (deviation,
+  §9.8).
+- **Multibody pending contact**: skip when both sides are inactive — the
+  existing Phase C check, now exact because the wake decision already
+  happened.
+- **Rigid joint rows**: skip when both bodies are `!is_active()` (covers a
+  joint to a static anchor whose dynamic side sleeps — its island is the
+  single body). Enabled joints of awake islands are flattened as today.
+- **Multibody constraint rows**: skip when both multibodies are `!awake`.
+
+Stage 5b (one-hop wake propagation over contacts/joints/mb contacts and
+`mb_wake_constraint_linked`) is deleted — subsumed by 4b.
+
+### 9.5 Two-phase rigid deactivation timing
+
+Today stage 6c calls `go_to_sleep()` immediately when the 2 s timer expires.
+Phase D splits it like Bullet:
+
+- **End of step N** (6c): `update_deactivation` only — timer expiry sets
+  `WantsDeactivation`; the body stays fully simulated for the rest of that
+  step (`is_active()` is true for `WantsDeactivation`).
+- **Step N+1** (4b): the island pass decides — whole-island rest freezes
+  everyone (`IslandSleeping`, rows and integration skipped from this step),
+  otherwise `WantsDeactivation` members keep simulating.
+
+This matches Bullet's `updateActivationState` / `buildIslands` split and
+removes the current glitch where a body slept at the end of step N, was
+re-woken at N+1's stage 5b and then solved with zeroed stale velocities. The
+one extra gravity tick before the freeze is Bullet-identical
+(`predictUnconstraintMotion` of step N+1 runs before the island pass).
+
+Two verified details (against the real library, `tools/island_probe.cpp`):
+
+- `updateDeactivation` resets a moving body to `ACTIVE_TAG` right where it
+  zeroes the timer (`setActivationState(0)` in Bullet) — without this, a
+  knocked-away `WANTS_DEACTIVATION` body whose island split would be frozen
+  mid-air by the next island pass.
+- The island wake itself (`ISLAND_SLEEPING → WANTS_DEACTIVATION`) fires as
+  soon as the broad-phase AABBs overlap — one to two frames before the
+  actual impact, exactly like Bullet's `findUnions` conservative merge.
+
+### 9.6 The solve stays one batch
+
+Bullet's island callback accumulates islands and only calls the solver when
+the accumulated row count exceeds `m_minimumSolverBatchSize = 128`; scenes
+below that threshold solve **all islands as one group**, exactly like a
+global solve. We therefore keep the single global PGS loop and the current
+row order (pairs in broad-phase order, joints in add order):
+
+- currently-green scenes stay bit-identical — islands only change *which*
+  rows exist, not their order or math;
+- large scenes (>128 rows) would differ from Bullet's batch flushing in row
+  order only; splitting batches is a later optional perf item.
+
+### 9.7 Warm-start and cache implications
+
+The contact cache is rebuilt from solved rows only, so pairs of a sleeping
+island lose their cached impulses and cold-start on wake (Bullet's
+persistent manifolds keep warm-starting through sleep). Observable as a
+one-frame impulse transient on wake; acceptable and recorded.
+
+### 9.8 Phase D deviations
+
+- **One node per multibody** (Bullet: per-collider nodes + chain merge) —
+  equivalent partitions; enables collider-less constraint wake (tested).
+- **Single solve batch** — no per-island batching/sorting; matches Bullet
+  below the 128-row batch threshold.
+- **Sleeping-island pairs skip the narrow phase** — Bullet still runs
+  collision detection for sleeping pairs (only solving is skipped); with the
+  per-step impulse cache this only affects warm-start freshness after wake.
+- **Two-phase rigid deactivation** (§9.5) — matches Bullet's structure; the
+  previous immediate-sleep behavior was the deviation.
+- **mb gravity/ABA gating stays on `awake`** — Bullet gates on collider
+  `ISLAND_SLEEPING` synced one step later in `updateActivationState`; the
+  probe-verified behavior is kept.
+
+### 9.9 Tests and acceptance
+
+- Unit (new): island merging via AABB pair / joint / mb constraint; an
+  island sleeps as a unit (resting stack) and stays positionally stable with
+  rows skipped; a dynamic body falling onto a sleeping island wakes it;
+  `DisableDeactivation` member keeps its island permanently awake.
+- Unit (updated): the wake-propagation tests move to island semantics
+  (contact wake now island-wide, joint wake unchanged in effect).
+- All 185 existing tests + 8 demos green, f32 and f64.
+- Parity: all 6 rigid scenes × f32/f64 re-run (`python tools/check.py
+  --parity`); `sleeping` is the sensitive scene — expected to stay within its
+  recorded tolerances (the impulse-kick path deviations are unchanged). The
+  13 existing multibody probe scenes keep every object awake over their
+  short runs (no sleeping interactions), so they must stay bit-identical.
+  Note: the §7 collider probe scenes planned for phase C were not recorded
+  yet (phase C landed with unit tests only) — a follow-up independent of
+  islands.
