@@ -218,7 +218,7 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
 
 ## 13. Verification strategy
 
-- **Unit tests**: 176 tests (110 collision + 66 dynamics), all run in both
+- **Unit tests**: 197 tests (110 collision + 81 dynamics), all run in both
   precisions; `python tools/check.py` runs them plus the 8 demo assertions.
 - **Parity harness** (`docs/parity-harness.md`): frame-by-frame trajectory
   comparison against the real Bullet static library (C++ and Rust recorders
@@ -226,8 +226,10 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
   ledger `docs/bullet-compare.md` classifies every exceedance as a known
   trade-off or an implementation problem.
 - **Multibody probes**: `tools/multibody_probe.cpp` vs
-  `crates/bullet/examples/multibody_probe.rs`, 13 scenes × f32/f64 against
-  the real Bullet library.
+  `crates/bullet/examples/multibody_probe.rs`, 19 scenes × f32/f64 against
+  the real Bullet library (13 multibody-dynamics scenes + the 6 collider
+  scenes of `docs/multibody-collision.md` §7, compared with
+  `tools/mbdiff.py`; build via `tools/build_multibody_probe.py`).
 
 ## 14. Roadmap
 

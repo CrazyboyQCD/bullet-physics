@@ -417,6 +417,9 @@ one-frame impulse transient on wake; acceptable and recorded.
   recorded tolerances (the impulse-kick path deviations are unchanged). The
   13 existing multibody probe scenes keep every object awake over their
   short runs (no sleeping interactions), so they must stay bit-identical.
-  Note: the §7 collider probe scenes planned for phase C were not recorded
-  yet (phase C landed with unit tests only) — a follow-up independent of
-  islands.
+  The §7 collider probe scenes landed on 2026-08-25 as six additional probe
+  scenes (ledger: `docs/bullet-compare.md` § "Multibody collider probes");
+  the recording surfaced and fixed one real bug — the rigid side of a mixed
+  contact row double-counted the assembly-time relative velocity (impulse
+  ~2.4x) — and classified the remaining first-impact divergences as the
+  known margin/detection-threshold trade-offs.

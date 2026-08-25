@@ -798,3 +798,49 @@ f64 pair of the f32 scene above: identical pattern and classification - one-step
 | ccd | Done (above) | swept-sphere clamp within 0.075 mm; full pass |
 | sleeping | Done (above) | sleep/wake timing matches; ball caught (sphere-box normal bug fixed bb4e52c); slop + impact-kick offsets classified |
 | f64 pair | Done (above) | all 6 scenes paired (f64 sections above); same classification as f32 — deviations are structural, not precision-related |
+
+## Multibody collider probes (2026-08-25)
+
+The §7 collider scenes of `docs/multibody-collision.md` (phase C's missing
+numerical validation) recorded as extended probe scenes rather than the
+scenes.json pipeline: `tools/multibody_probe(.cpp/_f64.exe) <scene>` vs
+`cargo run -p bullet [--features f64] --example multibody_probe -- <scene>`,
+compared with `python tools/mbdiff.py` (tolerance-based — plain diff flips on
+%.6f rounding boundaries). Build via `python tools/build_multibody_probe.py
+[f32|f64|both]`.
+
+Scene setup notes (C++ side): colliders must be added with the official
+demo's filter groups (`DefaultFilter` for dynamic multibodies — the
+`addCollisionObject` default `StaticFilter` never pairs against static
+geometry whose mask excludes Static, silently disabling the collision), and
+`forwardKinematics` must run after posing so freshly attached colliders start
+at the posed configuration.
+
+Results (300 frames each, f32 + f64 — identical pattern in both precisions,
+structural deviations):
+
+| Scene | First divergence | Classification |
+|---|---|---|
+| link_ground | frame 44 = first ground hit | impact transient (D5): one-step phase offset amplified by the swing phase; both sides settle hanging with the sphere on the ground |
+| base_ground | frame 43 = first ground hit | impact transient + slop rest offset (0.5 m vs 0.495 m — engine-wide slop 0.005 trade-off); velocities match to 0.06 m/s on the bounce |
+| mb_pushes_rb | frame 19 = first sweep hit | Bullet solves the manifold while the surfaces are still 6 mm apart (margin/contact-breaking threshold), we require penetration — one frame earlier contact, λ 0.820 vs 0.848 (+3.4%); the pushed box then scatters along diverging paths (0.34 m / 5 s, chaotic-amplification class) |
+| rb_hits_mb | frame 21/20 = first hit | after the fix below, first-frame velocity difference 0.0005 m/s; repeated bounces amplify to 0.14 m path offset (scatter class) |
+| mb_mb | frame 61/60 = first contact | pure detection-threshold offset (0.5 mm on the first frame); head-on equal-mass exchange then amplifies to 0.12 m over 5 s |
+| self_collision | `on` phase frame 0 (initial 0.17 m overlap) | deep-penetration kick transient; the `off` phase stays under pure ABA and agrees to 1.5e-4 over the full 5 s (mild three-link chaos, far tamer than the two-link scene) — the filter toggle is the entire effect, as designed |
+
+### Implementation problem found and fixed
+
+**Rigid-side double-counted relative velocity in mixed contact rows.** The
+multibody contact iteration read the rigid side's *real* velocity (gravity +
+assembly velocity included) while the rhs already carries `-rel_vel` — the
+assembly-time relative velocity entered the impulse twice, inflating the
+rb→mb impulse ~2.4x (first-hit Δv 8.2 m/s vs Bullet's 3.4 m/s). Static-rigid
+partners never read their side and mb↔mb pairs use the zero-based delta pool,
+so the phase C unit tests (resting, pushing, wake-up) stayed green while any
+fast rigid→multibody hit was wrong. Fixed by snapshotting each rigid side's
+row projection at assembly (`SideData::Rigid::initial_proj`) and reading the
+impulse delta (current projection − snapshot) in `solve_row`, matching
+Bullet's delta-velocity pools (`m_deltaLinearVelocity` /
+`m_deltaVelocities`). Regression test: `rb_mb_contact_impulse_not_doubled`
+(equal-mass head-on converges to the shared inelastic velocity).
+
