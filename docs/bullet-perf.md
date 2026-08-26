@@ -66,29 +66,19 @@ Scene: stack_1000 (f32), bodies: 1001, frames: 600, warmup: 30, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.316 | 789.5 | 99.4 |
-| rust | 1.216 | 729.5 | 42.0 |
+| bullet | 1.275 | 765.2 | 99.7 |
+| rust | 1.178 | 706.6 | 40.1 |
 | rust/bullet | 0.92x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
-- integrate_velocities: 2.2 ms (0.3%)
-- update_aabbs: 42.2 ms (5.6%)
-- broadphase: 78.6 ms (10.4%)
-- islands: 21.6 ms (2.9%)
-- narrowphase: 161.4 ms (21.3%)
-- solve: 448.7 ms (59.2%)
-- integrate_positions: 3.4 ms (0.4%)
-
-**2026-08-26 broadphase rewrite.** Before the quantized-edge rewrite of
-`AxisSweep3` this scene ran 23x slower than Bullet with 95.8% of the step
-inside the broad phase (remove + binary re-insert per moved proxy). After
-porting Bullet's incremental scheme (16-bit quantized interleaved edges,
-sort-into-place by adjacent swaps, persistent pair set) the ratio is 0.92x
-and the broad phase is down to 10.4%. The steady state (last300, after the
-stack sleeps) is 42 ms vs Bullet's 99 ms — the quantization also absorbs
-resting jitter that Bullet still pays for. Remaining hot stage: the PGS
-solve (59.2%), where Bullet uses per-island batched solving.
+- integrate_velocities: 2.1 ms (0.3%)
+- update_aabbs: 38.3 ms (5.2%)
+- broadphase: 77.2 ms (10.5%)
+- islands: 20.6 ms (2.8%)
+- narrowphase: 150.7 ms (20.6%)
+- solve: 440.2 ms (60.1%)
+- integrate_positions: 3.5 ms (0.5%)
 
 ## Scene: rain_500
 
@@ -98,26 +88,34 @@ Scene: rain_500 (f32), bodies: 501, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 3.772 | 1131.6 | 1131.6 |
-| rust | 10.461 | 3138.2 | 3138.2 |
-| rust/bullet | 2.77x | | |
+| bullet | 3.589 | 1076.6 | 1076.6 |
+| rust | 10.075 | 3022.5 | 3022.5 |
+| rust/bullet | 2.81x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 2.2 ms (0.1%)
-- update_aabbs: 59.9 ms (1.9%)
-- broadphase: 12.6 ms (0.4%)
-- islands: 4.6 ms (0.1%)
-- narrowphase: 2703.0 ms (86.8%)
-- solve: 329.2 ms (10.6%)
-- integrate_positions: 3.0 ms (0.1%)
+- integrate_velocities: 2.3 ms (0.1%)
+- update_aabbs: 58.8 ms (2.0%)
+- broadphase: 11.9 ms (0.4%)
+- islands: 4.9 ms (0.2%)
+- narrowphase: 2566.8 ms (86.3%)
+- solve: 328.0 ms (11.0%)
+- integrate_positions: 3.2 ms (0.1%)
 
-**2026-08-26 broadphase rewrite.** The ratio dropped from 5.17x to 2.77x
-(broad phase 45.6% -> 0.4%). The remaining gap is now almost entirely the
-narrow phase (86.8%): our per-step manifold rebuild allocates fresh
-`ContactConstraint`s and re-runs GJK/EPA for every convex-vs-mesh pair,
-while Bullet caches persistent manifolds per pair and only refreshes them.
-Next optimization target.
+**2026-08-26 narrow-phase round 1 (triangle hull cache + pre-GJK filter).**
+Instrumented counters over 300 frames: 1378 pair-level `collide()` calls
+and 3406 triangle-level GJK+EPA calls per frame at ~1.3 us each — 1320 ms
+(48% of the pre-change stage) is the GJK/EPA math itself; the rest is
+per-step allocation and row assembly. Porting Bullet's
+`TestTriangleAgainstAabb2` pre-filter and caching the per-triangle hulls
+(killing one heap allocation per candidate triangle per step) only shaved
+~5% off the stage (2703 -> 2567 ms): separating triangles were already
+cheap (our GJK has Bullet's strict separation early-out), so the real cost
+is the *touching* pairs re-running the full GJK+EPA pipeline every step
+plus the per-step rebuild of every `ContactConstraint`. Closing the gap
+needs Bullet's margin-band contacts (positive-distance contacts skip EPA
+entirely; a behavior change requiring its own parity round) and/or a
+persistent-manifold / row-pool redesign of the stage-5 rebuild.
 
 ## Scene: mb_chains
 
@@ -127,23 +125,17 @@ Scene: mb_chains (f32), bodies: 20, frames: 300, warmup: 5, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 0.058 | 17.4 | 17.4 |
-| rust | 0.050 | 15.0 | 15.0 |
-| rust/bullet | 0.86x | | |
+| bullet | 0.058 | 17.5 | 17.5 |
+| rust | 0.057 | 17.1 | 17.1 |
+| rust/bullet | 0.98x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 4.9 ms (32.5%)
-- update_aabbs: 4.2 ms (27.7%)
-- broadphase: 0.0 ms (0.3%)
-- islands: 0.2 ms (1.0%)
+- integrate_velocities: 4.8 ms (28.2%)
+- update_aabbs: 4.2 ms (24.6%)
+- broadphase: 0.1 ms (0.4%)
+- islands: 0.1 ms (0.9%)
 - narrowphase: 0.1 ms (0.5%)
-- solve: 4.0 ms (26.5%)
-- integrate_positions: 1.7 ms (11.5%)
-
-**2026-08-26 broadphase rewrite.** The ratio dropped from 2.70x to 0.86x —
-the tiny sphere colliders churned the old remove/re-insert path; with the
-incremental edge sorts the broad phase costs 0.3% and the articulated
-dynamics path (FK + ABA in `integrate_velocities`, collider AABB refresh
-in `update_aabbs`) is on par with Bullet's Featherstone code.
+- solve: 4.6 ms (26.9%)
+- integrate_positions: 3.2 ms (18.6%)
 
