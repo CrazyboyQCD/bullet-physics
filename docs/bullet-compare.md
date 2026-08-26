@@ -876,3 +876,38 @@ was unaffected — only the reported force was wrong. Fixed by accumulating the
 matching torque flips) in `writeback_contact_rows`; after the fix the resting
 reaction converges to exact statics like Bullet's.
 
+## Multibody mb-vs-rb constraint probes (2026-08-26)
+
+Port scenes for the multibody-vs-rigidbody constraint variants
+(`point2point_to_rigid` / `fixed_to_rigid` / `slider_to_rigid` — the rigid
+body always sits on side B, like Bullet's public constructors). Each scene
+anchors a 1 kg / 0.1 m rigid ball to a fixed-base zero-link multibody at the
+origin (with a 0.1 m base collider on the Bullet side so its island manager
+solves the constraint); 300 frames, f32 + f64:
+
+| Scene | Result | Classification |
+|---|---|---|
+| p2p_rb (ball hangs 1 m below the anchor, released with a 1.5 m/s +X velocity) | free-swing phase within millimetres for the first ~15 frames (f1 x-diff 1.3e-5, f15 2.4e-3), then chaotic phase drift (both engines keep swinging around the anchor, rope length stays ≈ 1 m: Bullet max |p| ≈ 1.068, ours ≈ 1.067) | first-divergence (Bullet's gravity blind spot, below) + chaotic amplification — the same class as two_link / mesh / mb_pushes_rb |
+| fixed_rb (ball welded 2 m up +Z, identity frames) | X/Z position and all velocities bit-identical for the whole run; Y differs only by Bullet's sag | Bullet-side gravity blind spot (below): Bullet leaks one gravity step per frame at writeback and recovers ~20%/frame, sagging 1.3625 cm and stopping; we hold the weld exactly |
+| slider_rb (ball on a +X slider at 1 m/s, started 0.5 m out) | X position (5.500017 m after 5 s) and X velocity bit-identical f32/f64; Z identical; Y differs only by the same 1.3625 cm sag | same gravity blind spot on Bullet's locked rows; the free axis reproduces exactly, which pins the row formulas (jacobians, denominators, RHS) as bit-identical |
+
+### Bullet's gravity blind spot on mb↔rb constraint rows (not ported)
+
+Measured with an instrumented probe (a welded ball given a 3 m/s +Y velocity:
+the row impulse comes out at exactly +3.000000): Bullet's
+`fillMultiBodyConstraint` reads `rb->getLinearVelocity()` for the row's
+relative velocity — which at assembly time **does not include the current
+gravity step**, because Bullet keeps rigid-body gravity as an accumulated
+force and injects it as `m_externalForceImpulse` only at the writeback
+(`setLinearVelocity(snapshot + externalForceImpulse)`). Its rigid-rigid joint
+rows add the same impulse at assembly (`convertJoints`), but the
+multibody-vs-rigidbody path does not. Consequences on Bullet's side: the rows
+cancel the pre-gravity velocity (a 3 m/s initial velocity disappears without
+a trace), then the writeback injects one gravity step (vy = −g·dt) which the
+next frame's rows recover only ~20% of — a geometric vy decay of ×0.8 per
+frame and a finite sag of g·dt²·Σ0.8ⁿ ≈ 1.36 cm. Our rows see the
+gravity-integrated real velocity (our engine integrates gravity into the
+velocities before the solve, the recorded rigid-solver deviation), so the
+locked rows cancel the full gravity step each frame and hold the weld exactly
+— physically the stiffer and correct behavior, kept as a deviation.
+
