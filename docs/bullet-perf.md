@@ -66,19 +66,29 @@ Scene: stack_1000 (f32), bodies: 1001, frames: 600, warmup: 30, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.320 | 792.1 | 100.9 |
-| rust | 30.601 | 18360.6 | 8903.7 |
-| rust/bullet | 23.18x | | |
+| bullet | 1.316 | 789.5 | 99.4 |
+| rust | 1.216 | 729.5 | 42.0 |
+| rust/bullet | 0.92x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
-- integrate_velocities: 2.1 ms (0.0%)
-- update_aabbs: 125.9 ms (0.7%)
-- broadphase: 17944.2 ms (95.8%)
-- islands: 49.2 ms (0.3%)
-- narrowphase: 164.0 ms (0.9%)
-- solve: 445.3 ms (2.4%)
-- integrate_positions: 4.8 ms (0.0%)
+- integrate_velocities: 2.2 ms (0.3%)
+- update_aabbs: 42.2 ms (5.6%)
+- broadphase: 78.6 ms (10.4%)
+- islands: 21.6 ms (2.9%)
+- narrowphase: 161.4 ms (21.3%)
+- solve: 448.7 ms (59.2%)
+- integrate_positions: 3.4 ms (0.4%)
+
+**2026-08-26 broadphase rewrite.** Before the quantized-edge rewrite of
+`AxisSweep3` this scene ran 23x slower than Bullet with 95.8% of the step
+inside the broad phase (remove + binary re-insert per moved proxy). After
+porting Bullet's incremental scheme (16-bit quantized interleaved edges,
+sort-into-place by adjacent swaps, persistent pair set) the ratio is 0.92x
+and the broad phase is down to 10.4%. The steady state (last300, after the
+stack sleeps) is 42 ms vs Bullet's 99 ms — the quantization also absorbs
+resting jitter that Bullet still pays for. Remaining hot stage: the PGS
+solve (59.2%), where Bullet uses per-island batched solving.
 
 ## Scene: rain_500
 
@@ -88,19 +98,26 @@ Scene: rain_500 (f32), bodies: 501, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 3.688 | 1106.4 | 1106.4 |
-| rust | 19.072 | 5721.7 | 5721.7 |
-| rust/bullet | 5.17x | | |
+| bullet | 3.772 | 1131.6 | 1131.6 |
+| rust | 10.461 | 3138.2 | 3138.2 |
+| rust/bullet | 2.77x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 2.2 ms (0.0%)
-- update_aabbs: 99.9 ms (1.7%)
-- broadphase: 2704.1 ms (45.6%)
-- islands: 7.8 ms (0.1%)
-- narrowphase: 2778.4 ms (46.8%)
-- solve: 338.2 ms (5.7%)
-- integrate_positions: 3.4 ms (0.1%)
+- integrate_velocities: 2.2 ms (0.1%)
+- update_aabbs: 59.9 ms (1.9%)
+- broadphase: 12.6 ms (0.4%)
+- islands: 4.6 ms (0.1%)
+- narrowphase: 2703.0 ms (86.8%)
+- solve: 329.2 ms (10.6%)
+- integrate_positions: 3.0 ms (0.1%)
+
+**2026-08-26 broadphase rewrite.** The ratio dropped from 5.17x to 2.77x
+(broad phase 45.6% -> 0.4%). The remaining gap is now almost entirely the
+narrow phase (86.8%): our per-step manifold rebuild allocates fresh
+`ContactConstraint`s and re-runs GJK/EPA for every convex-vs-mesh pair,
+while Bullet caches persistent manifolds per pair and only refreshes them.
+Next optimization target.
 
 ## Scene: mb_chains
 
@@ -111,15 +128,22 @@ Scene: mb_chains (f32), bodies: 20, frames: 300, warmup: 5, repeats median
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
 | bullet | 0.058 | 17.4 | 17.4 |
-| rust | 0.157 | 47.2 | 47.2 |
-| rust/bullet | 2.70x | | |
+| rust | 0.050 | 15.0 | 15.0 |
+| rust/bullet | 0.86x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 4.8 ms (9.1%)
-- update_aabbs: 5.2 ms (9.9%)
-- broadphase: 36.3 ms (69.6%)
-- islands: 0.2 ms (0.3%)
-- narrowphase: 0.1 ms (0.1%)
-- solve: 3.9 ms (7.5%)
-- integrate_positions: 1.7 ms (3.3%)
+- integrate_velocities: 4.9 ms (32.5%)
+- update_aabbs: 4.2 ms (27.7%)
+- broadphase: 0.0 ms (0.3%)
+- islands: 0.2 ms (1.0%)
+- narrowphase: 0.1 ms (0.5%)
+- solve: 4.0 ms (26.5%)
+- integrate_positions: 1.7 ms (11.5%)
+
+**2026-08-26 broadphase rewrite.** The ratio dropped from 2.70x to 0.86x —
+the tiny sphere colliders churned the old remove/re-insert path; with the
+incremental edge sorts the broad phase costs 0.3% and the articulated
+dynamics path (FK + ABA in `integrate_velocities`, collider AABB refresh
+in `update_aabbs`) is on par with Bullet's Featherstone code.
+
