@@ -7,7 +7,11 @@
 //!
 //! A [`MultiBodyConstraint`] couples one link of a
 //! [`crate::multibody::MultiBody`] to a link of another multibody (or to the
-//! base of the same/different multibody via `link = None`). Every step the
+//! base of the same/different multibody via `link = None`), or — for the
+//! `*_to_rigid` constructors — to a rigid body sitting on side B (Bullet's
+//! `btMultiBodyPoint2Point(btMultiBody*, int, btRigidBody*, ...)` family;
+//! `m_rigidBodyA` has no public constructor upstream and is not ported).
+//! Every step the
 //! constraint emits a set of 1D rows ([`SolverRow`]); each row carries the
 //! generalized jacobian of the constrained DOFs on both bodies, the velocity
 //! response of each body to a unit impulse along the row (computed through
@@ -15,16 +19,23 @@
 //! factorization), the effective-mass inverse `jac_diag_ab_inv` and the
 //! Baumgarte/velocity RHS. The solver then runs projected Gauss-Seidel over
 //! the rows and writes the accumulated impulses back into the generalized
-//! velocities.
+//! velocities. A rigid side B applies its impulses directly to the body's
+//! real velocities during the iterations (like the mixed contact rows).
 //!
-//! Deviation from Bullet: only multibody-vs-multibody constraints are
-//! supported (Bullet also allows multibody-vs-rigidbody); the joint feedback
-//! (`btMultiBodyJointFeedback`) reporting is not implemented.
+//! Deviation from Bullet: our rigid bodies take gravity into their real
+//! velocities before the solve, so the row assembly sees it; Bullet's
+//! multibody-vs-rigidbody rows read `rb->getLinearVelocity()` *without* the
+//! current gravity step (unlike its rigid-rigid joint rows, which add
+//! `m_externalForceImpulse`), leaving a per-frame gravity leak that decays
+//! geometrically (~1.4 cm sag on a welded ball, f32 and f64 alike) — not
+//! ported, see `docs/bullet-compare.md` § "Multibody mb-vs-rb constraint
+//! probes".
 
 use bullet_math::{Matrix3, Quaternion, Real, Vector3};
 
 use super::body::{MultiBody, MultiBodyScratch};
 use super::link::JointType;
+use crate::body::RigidBody;
 
 /// Bullet's default `m_splitImpulsePenetrationThreshold`: joint-limit rows
 /// only combine their positional and velocity errors while the violation is
@@ -32,6 +43,26 @@ use super::link::JointType;
 /// (positional error dropped — the multibody solver ignores
 /// `m_rhsPenetration`, like Bullet).
 const SPLIT_PENETRATION_THRESHOLD: Real = -0.04;
+
+/// The rigid side-B payload of a [`SolverRow`] (the per-row fields Bullet
+/// stores on `btMultiBodySolverConstraint` when side B is a `btRigidBody`).
+/// Like the mixed contact rows, the rigid side's projection is snapshotted
+/// at row-assembly time; the PGS iteration then reads the side's **impulse
+/// delta** (current projection minus the snapshot) because the RHS already
+/// carries the assembly-time relative velocity.
+#[derive(Debug, Clone, Copy)]
+pub struct RigidSideB {
+    /// Index into the world's rigid body list.
+    pub body: usize,
+    /// Inertia-scaled angular response `invI · (−torqueAxis1)` (Bullet's
+    /// `m_angularComponentB`).
+    pub angular_component: Vector3,
+    /// Inverse mass.
+    pub inv_mass: Real,
+    /// Row projection (`contactNormal2·v + relpos2CrossNormal·ω`) at
+    /// row-assembly time.
+    pub initial_proj: Real,
+}
 
 /// One solver row of a multibody constraint (Bullet's
 /// `btMultiBodySolverConstraint`): a 1D constraint along a generalized axis
@@ -43,10 +74,10 @@ pub struct SolverRow {
     /// Index into `SolverData::delta_velocities` for body A's accumulated
     /// response block (`-1` until assigned, Bullet's `m_deltaVelAindex`).
     pub delta_vel_a_index: i32,
-    /// Same for body B.
+    /// Same for body B (unused when `rigid_b` is set).
     pub jac_b_index: usize,
     pub delta_vel_b_index: i32,
-    /// Number of DOFs (6 + joints) of each body.
+    /// Number of DOFs (6 + joints) of each body (0 for a rigid side B).
     pub ndof_a: usize,
     pub ndof_b: usize,
     /// Lever-arm 脳 normal / angular normal used for feedback writeback
@@ -69,12 +100,16 @@ pub struct SolverRow {
     /// multibody rows unless `SOLVER_USE_ARTICULATED_WARMSTARTING`, which is
     /// off by default).
     pub applied_impulse: Real,
-    /// Indices of the two multibodies inside the world.
+    /// Indices of the two multibodies inside the world (side B invalid when
+    /// `rigid_b` is set).
     pub multi_body_a: usize,
     pub multi_body_b: usize,
     /// Constrained links (`None` = the base).
     pub link_a: Option<usize>,
     pub link_b: Option<usize>,
+    /// Rigid-body payload of side B when the constraint couples a multibody
+    /// to a rigid body (Bullet's `m_multiBodyB == 0` branch).
+    pub rigid_b: Option<RigidSideB>,
     /// The owning constraint and row, for impulse writeback.
     pub org_constraint: usize,
     pub org_dof_index: usize,
@@ -253,11 +288,18 @@ pub enum MultiBodyConstraintKind {
     SphericalJointMotor(MultiBodySphericalJointMotor),
 }
 
-/// A constraint between two multibodies (or two links of the same body).
+/// A constraint between two multibodies (or two links of the same body),
+/// or between a multibody (side A) and a rigid body (side B, Bullet's
+/// `btMultiBodyPoint2Point(btMultiBody*, int, btRigidBody*, ...)` family).
 pub struct MultiBodyConstraint {
     pub(crate) kind: MultiBodyConstraintKind,
     pub(crate) body_a: usize,
+    /// Side-B multibody index (`usize::MAX` when side B is a rigid body).
     pub(crate) body_b: usize,
+    /// Rigid-body index of side B when the constraint is multibody-vs-
+    /// rigidbody (Bullet's `m_rigidBodyB`; `m_rigidBodyA` has no public
+    /// constructor upstream and is not ported).
+    pub(crate) rigid_body_b: Option<usize>,
     pub(crate) link_a: Option<usize>,
     pub(crate) link_b: Option<usize>,
     pub(crate) num_rows: usize,
@@ -281,6 +323,7 @@ impl MultiBodyConstraint {
         kind: MultiBodyConstraintKind,
         body_a: usize,
         body_b: usize,
+        rigid_b: Option<usize>,
         link_a: Option<usize>,
         link_b: Option<usize>,
         num_rows: usize,
@@ -291,6 +334,7 @@ impl MultiBodyConstraint {
             kind,
             body_a,
             body_b,
+            rigid_body_b: rigid_b,
             link_a,
             link_b,
             num_rows,
@@ -308,7 +352,12 @@ impl MultiBodyConstraint {
 
     fn update_jacobian_sizes(&mut self, bodies: &[MultiBody]) {
         self.jac_size_a = 6 + bodies[self.body_a].num_dofs();
-        self.jac_size_both = self.jac_size_a + 6 + bodies[self.body_b].num_dofs();
+        // A rigid side B has no generalized jacobian block (Bullet's
+        // `updateJacobianSizes` with `m_bodyB == 0`).
+        self.jac_size_both = match self.rigid_body_b {
+            Some(_) => self.jac_size_a,
+            None => self.jac_size_a + 6 + bodies[self.body_b].num_dofs(),
+        };
     }
 
     /// Allocate the data block (impulses + jacobians + positions), Bullet's
@@ -397,6 +446,12 @@ impl MultiBodyConstraint {
         self.body_b
     }
 
+    /// The rigid-body index of side B, when this constraint couples the
+    /// multibody to a rigid body.
+    pub fn rigid_body_b(&self) -> Option<usize> {
+        self.rigid_body_b
+    }
+
     // ------------------------------------------------------------------
     // Constructors
     // ------------------------------------------------------------------
@@ -417,6 +472,7 @@ impl MultiBodyConstraint {
             MultiBodyConstraintKind::Point2Point(MultiBodyPoint2Point { pivot_in_a, pivot_in_b }),
             body_a,
             body_b,
+            None,
             link_a,
             link_b,
             3,
@@ -449,6 +505,7 @@ impl MultiBodyConstraint {
             }),
             body_a,
             body_b,
+            None,
             link_a,
             link_b,
             6,
@@ -482,12 +539,112 @@ impl MultiBodyConstraint {
             }),
             body_a,
             body_b,
+            None,
             link_a,
             link_b,
             5,
             false,
             bodies,
         )
+    }
+
+    /// A point-to-point constraint between a multibody link and a rigid
+    /// body — the rigid body sits on side B (Bullet's
+    /// `btMultiBodyPoint2Point(btMultiBody*, int, btRigidBody*, ...)`
+    /// constructor).
+    pub fn point2point_to_rigid(
+        body_a: usize,
+        link_a: Option<usize>,
+        rigid_b: usize,
+        pivot_in_a: Vector3,
+        pivot_in_b: Vector3,
+        bodies: &[MultiBody],
+    ) -> Self {
+        let c = Self::new(
+            MultiBodyConstraintKind::Point2Point(MultiBodyPoint2Point { pivot_in_a, pivot_in_b }),
+            body_a,
+            usize::MAX,
+            Some(rigid_b),
+            link_a,
+            None,
+            3,
+            false,
+            bodies,
+        );
+        debug_assert_eq!(c.rigid_body_b, Some(rigid_b));
+        c
+    }
+
+    /// A fixed (weld) constraint between a multibody link and a rigid body —
+    /// the rigid body sits on side B (Bullet's
+    /// `btMultiBodyFixedConstraint(btMultiBody*, int, btRigidBody*, ...)`
+    /// constructor).
+    #[allow(clippy::too_many_arguments)]
+    pub fn fixed_to_rigid(
+        body_a: usize,
+        link_a: Option<usize>,
+        rigid_b: usize,
+        pivot_in_a: Vector3,
+        pivot_in_b: Vector3,
+        frame_in_a: Matrix3,
+        frame_in_b: Matrix3,
+        bodies: &[MultiBody],
+    ) -> Self {
+        let c = Self::new(
+            MultiBodyConstraintKind::Fixed(MultiBodyFixedConstraint {
+                pivot_in_a,
+                pivot_in_b,
+                frame_in_a,
+                frame_in_b,
+            }),
+            body_a,
+            usize::MAX,
+            Some(rigid_b),
+            link_a,
+            None,
+            6,
+            false,
+            bodies,
+        );
+        debug_assert_eq!(c.rigid_body_b, Some(rigid_b));
+        c
+    }
+
+    /// A slider constraint between a multibody link and a rigid body — the
+    /// rigid body sits on side B (Bullet's
+    /// `btMultiBodySliderConstraint(btMultiBody*, int, btRigidBody*, ...)`
+    /// constructor).
+    #[allow(clippy::too_many_arguments)]
+    pub fn slider_to_rigid(
+        body_a: usize,
+        link_a: Option<usize>,
+        rigid_b: usize,
+        pivot_in_a: Vector3,
+        pivot_in_b: Vector3,
+        frame_in_a: Matrix3,
+        frame_in_b: Matrix3,
+        joint_axis: Vector3,
+        bodies: &[MultiBody],
+    ) -> Self {
+        let c = Self::new(
+            MultiBodyConstraintKind::Slider(MultiBodySliderConstraint {
+                pivot_in_a,
+                pivot_in_b,
+                frame_in_a,
+                frame_in_b,
+                joint_axis,
+            }),
+            body_a,
+            usize::MAX,
+            Some(rigid_b),
+            link_a,
+            None,
+            5,
+            false,
+            bodies,
+        );
+        debug_assert_eq!(c.rigid_body_b, Some(rigid_b));
+        c
     }
 
     /// A joint motor driving link `link`'s joint DOF `link_dof` toward
@@ -514,6 +671,7 @@ impl MultiBodyConstraint {
             }),
             body,
             body,
+            None,
             Some(link),
             bodies[body].link(link).parent,
             1,
@@ -544,6 +702,7 @@ impl MultiBodyConstraint {
             }),
             body_a,
             body_b,
+            None,
             Some(link_a),
             Some(link_b),
             1,
@@ -573,6 +732,7 @@ impl MultiBodyConstraint {
             }),
             body,
             body,
+            None,
             Some(link),
             bodies[body].link(link).parent,
             2,
@@ -611,6 +771,7 @@ impl MultiBodyConstraint {
             }),
             body,
             body,
+            None,
             Some(link),
             bodies[body].link(link).parent,
             3,
@@ -644,6 +805,7 @@ impl MultiBodyConstraint {
             }),
             body,
             body,
+            None,
             Some(link),
             bodies[body].link(link).parent,
             3,
@@ -915,18 +1077,19 @@ impl MultiBodyConstraint {
         data: &mut SolverData,
         scratch: &mut MultiBodyScratch,
         bodies: &mut [MultiBody],
+        rigid_bodies: &[RigidBody],
         dt: Real,
         erp: Real,
     ) {
         match &self.kind {
             MultiBodyConstraintKind::Point2Point(_) => {
-                self.create_p2p_rows(my_index, rows, data, scratch, bodies, dt, erp)
+                self.create_p2p_rows(my_index, rows, data, scratch, bodies, rigid_bodies, dt, erp)
             }
             MultiBodyConstraintKind::Fixed(_) => {
-                self.create_fixed_rows(my_index, rows, data, scratch, bodies, dt, erp)
+                self.create_fixed_rows(my_index, rows, data, scratch, bodies, rigid_bodies, dt, erp)
             }
             MultiBodyConstraintKind::Slider(_) => {
-                self.create_slider_rows(my_index, rows, data, scratch, bodies, dt, erp)
+                self.create_slider_rows(my_index, rows, data, scratch, bodies, rigid_bodies, dt, erp)
             }
             MultiBodyConstraintKind::JointMotor(_) => {
                 self.create_motor_row(my_index, rows, data, scratch, bodies, dt, erp)
@@ -960,6 +1123,7 @@ impl MultiBodyConstraint {
         data: &mut SolverData,
         scratch: &mut MultiBodyScratch,
         bodies: &mut [MultiBody],
+        rigid_bodies: &[RigidBody],
         jac_org_a: Option<&[Real]>,
         jac_org_b: Option<&[Real]>,
         constraint_normal_ang: Vector3,
@@ -980,7 +1144,10 @@ impl MultiBodyConstraint {
         let multi_body_a = self.body_a;
         let multi_body_b = self.body_b;
         let ndof_a = 6 + bodies[multi_body_a].num_dofs();
-        let ndof_b = 6 + bodies[multi_body_b].num_dofs();
+        let ndof_b = match self.rigid_body_b {
+            Some(_) => 0, // the rigid side has no generalized block
+            None => 6 + bodies[multi_body_b].num_dofs(),
+        };
 
         // --- Body A ---
         let rel_pos1 = match self.link_a {
@@ -1030,50 +1197,79 @@ impl MultiBodyConstraint {
         row.contact_normal1 = constraint_normal_lin;
 
         // --- Body B ---
-        let rel_pos2 = match self.link_b {
-            None => pos_b_world - bodies[multi_body_b].base_pos(),
-            Some(l) => pos_b_world - Vector3::from(bodies[multi_body_b].link(l).cached_world_transform.translation),
-        };
-        row.delta_vel_b_index = bodies[multi_body_b].companion_id;
-        if row.delta_vel_b_index < 0 {
-            row.delta_vel_b_index = data.delta_velocities.len() as i32;
-            bodies[multi_body_b].companion_id = row.delta_vel_b_index;
-            data.delta_velocities.resize(data.delta_velocities.len() + ndof_b, 0.0);
-        }
-        row.jac_b_index = data.jacobians.len();
-        data.jacobians.resize(data.jacobians.len() + ndof_b, 0.0);
-        let jac_b_start = row.jac_b_index;
-        match jac_org_b {
-            Some(j) => {
-                data.jacobians[jac_b_start..jac_b_start + ndof_b].copy_from_slice(&j[..ndof_b]);
+        // Bullet branches on `m_multiBodyB` here: the rigid side stores its
+        // inertia-scaled response and an assembly-time velocity snapshot
+        // instead of a generalized jacobian block.
+        let rigid_b_side = self.rigid_body_b.map(|i| &rigid_bodies[i]);
+        let (rel_pos2, mb_b_block) = match rigid_b_side {
+            Some(rb) => {
+                let rel_pos2 = pos_b_world - rb.position;
+                let torque_axis1 = if ang_constraint {
+                    constraint_normal_ang
+                } else {
+                    rel_pos2.cross(constraint_normal_lin)
+                };
+                row.rigid_b = Some(RigidSideB {
+                    body: self.rigid_body_b.unwrap(),
+                    angular_component: rb.inv_inertia_world() * (-torque_axis1),
+                    inv_mass: rb.inv_mass(),
+                    initial_proj: (-constraint_normal_lin).dot(rb.linear_velocity)
+                        + (-torque_axis1).dot(rb.angular_velocity),
+                });
+                row.rel_pos2_cross_normal = -torque_axis1;
+                row.contact_normal2 = -constraint_normal_lin;
+                (rel_pos2, None)
             }
             None => {
-                let jac = &mut data.jacobians[jac_b_start..jac_b_start + ndof_b];
-                bodies[multi_body_b].fill_constraint_jacobian(
-                    self.link_b.map_or(-1, |l| l as i32),
-                    pos_b_world,
-                    -constraint_normal_ang,
-                    -constraint_normal_lin,
-                    jac,
-                    scratch,
-                );
+                let rel_pos2 = match self.link_b {
+                    None => pos_b_world - bodies[multi_body_b].base_pos(),
+                    Some(l) => pos_b_world
+                        - Vector3::from(bodies[multi_body_b].link(l).cached_world_transform.translation),
+                };
+                row.delta_vel_b_index = bodies[multi_body_b].companion_id;
+                if row.delta_vel_b_index < 0 {
+                    row.delta_vel_b_index = data.delta_velocities.len() as i32;
+                    bodies[multi_body_b].companion_id = row.delta_vel_b_index;
+                    data.delta_velocities.resize(data.delta_velocities.len() + ndof_b, 0.0);
+                }
+                row.jac_b_index = data.jacobians.len();
+                data.jacobians.resize(data.jacobians.len() + ndof_b, 0.0);
+                let jac_b_start = row.jac_b_index;
+                match jac_org_b {
+                    Some(j) => {
+                        data.jacobians[jac_b_start..jac_b_start + ndof_b]
+                            .copy_from_slice(&j[..ndof_b]);
+                    }
+                    None => {
+                        let jac = &mut data.jacobians[jac_b_start..jac_b_start + ndof_b];
+                        bodies[multi_body_b].fill_constraint_jacobian(
+                            self.link_b.map_or(-1, |l| l as i32),
+                            pos_b_world,
+                            -constraint_normal_ang,
+                            -constraint_normal_lin,
+                            jac,
+                            scratch,
+                        );
+                    }
+                }
+                let delta_b_start = data.delta_velocities_unit_impulse.len();
+                data.delta_velocities_unit_impulse
+                    .resize(delta_b_start + ndof_b, 0.0);
+                {
+                    let jac = data.jacobians[jac_b_start..jac_b_start + ndof_b].to_vec();
+                    let delta = &mut data.delta_velocities_unit_impulse[delta_b_start..delta_b_start + ndof_b];
+                    bodies[multi_body_b].calc_acceleration_deltas(&jac, delta, scratch);
+                }
+                let torque_axis1 = if ang_constraint {
+                    constraint_normal_ang
+                } else {
+                    rel_pos2.cross(constraint_normal_lin)
+                };
+                row.rel_pos2_cross_normal = -torque_axis1;
+                row.contact_normal2 = -constraint_normal_lin;
+                (rel_pos2, Some((jac_b_start, delta_b_start)))
             }
-        }
-        let delta_b_start = data.delta_velocities_unit_impulse.len();
-        data.delta_velocities_unit_impulse
-            .resize(delta_b_start + ndof_b, 0.0);
-        {
-            let jac = data.jacobians[jac_b_start..jac_b_start + ndof_b].to_vec();
-            let delta = &mut data.delta_velocities_unit_impulse[delta_b_start..delta_b_start + ndof_b];
-            bodies[multi_body_b].calc_acceleration_deltas(&jac, delta, scratch);
-        }
-        let torque_axis1 = if ang_constraint {
-            constraint_normal_ang
-        } else {
-            rel_pos2.cross(constraint_normal_lin)
         };
-        row.rel_pos2_cross_normal = -torque_axis1;
-        row.contact_normal2 = -constraint_normal_lin;
 
         // --- Effective mass ---
         let mut denom0 = 0.0;
@@ -1085,12 +1281,24 @@ impl MultiBodyConstraint {
             }
         }
         let mut denom1 = 0.0;
-        {
-            let jac = &data.jacobians[jac_b_start..jac_b_start + ndof_b];
-            let delta = &data.delta_velocities_unit_impulse[delta_b_start..delta_b_start + ndof_b];
-            for i in 0..ndof_b {
-                denom1 += jac[i] * delta[i];
+        match (mb_b_block, rigid_b_side) {
+            (Some((jac_b_start, delta_b_start)), _) => {
+                let jac = &data.jacobians[jac_b_start..jac_b_start + ndof_b];
+                let delta = &data.delta_velocities_unit_impulse[delta_b_start..delta_b_start + ndof_b];
+                for i in 0..ndof_b {
+                    denom1 += jac[i] * delta[i];
+                }
             }
+            (_, Some(rb)) => {
+                let angular_component = row.rigid_b.unwrap().angular_component;
+                if ang_constraint {
+                    denom1 = constraint_normal_ang.dot(-angular_component);
+                } else {
+                    let vec = (-angular_component).cross(rel_pos2);
+                    denom1 = rb.inv_mass() + constraint_normal_lin.dot(vec);
+                }
+            }
+            _ => unreachable!("side/data mismatch"),
         }
         let d = denom0 + denom1;
         row.jac_diag_ab_inv = if d > Real::EPSILON { relaxation / d } else { 0.0 };
@@ -1104,11 +1312,20 @@ impl MultiBodyConstraint {
             for i in 0..ndof_a {
                 rel_vel += vel[i] * jac[i];
             }
-            let jac = &data.jacobians[jac_b_start..jac_b_start + ndof_b];
-            let vel = bodies[multi_body_b].velocity_vector();
-            for i in 0..ndof_b {
-                rel_vel += vel[i] * jac[i];
+        }
+        match (mb_b_block, rigid_b_side) {
+            (Some((jac_b_start, _)), _) => {
+                let jac = &data.jacobians[jac_b_start..jac_b_start + ndof_b];
+                let vel = bodies[multi_body_b].velocity_vector();
+                for i in 0..ndof_b {
+                    rel_vel += vel[i] * jac[i];
+                }
             }
+            (_, Some(rb)) => {
+                rel_vel += row.contact_normal2.dot(rb.linear_velocity)
+                    + row.rel_pos2_cross_normal.dot(rb.angular_velocity);
+            }
+            _ => unreachable!("side/data mismatch"),
         }
         let velocity_error = (desired_velocity - rel_vel) * damping;
         // Split impulse is not implemented for multibodies: always use m_erp.
@@ -1144,6 +1361,7 @@ impl MultiBodyConstraint {
             multi_body_b: self.body_b,
             link_a: self.link_a,
             link_b: self.link_b,
+            rigid_b: None,
             org_constraint: my_index,
             org_dof_index: row_index,
         }
@@ -1157,6 +1375,7 @@ impl MultiBodyConstraint {
         data: &mut SolverData,
         scratch: &mut MultiBodyScratch,
         bodies: &mut [MultiBody],
+        rigid_bodies: &[RigidBody],
         dt: Real,
         erp: Real,
     ) {
@@ -1167,7 +1386,10 @@ impl MultiBodyConstraint {
         for i in 0..3 {
             let mut row = self.new_row(my_index, i);
             row.ndof_a = 6 + bodies[self.body_a].num_dofs();
-            row.ndof_b = 6 + bodies[self.body_b].num_dofs();
+            row.ndof_b = match self.rigid_body_b {
+                Some(_) => 0,
+                None => 6 + bodies[self.body_b].num_dofs(),
+            };
             // contactNormalOnB[i] = -1 (Bullet).
             let mut contact_normal_on_b = Vector3::ZERO;
             contact_normal_on_b[i] = -1.0;
@@ -1176,10 +1398,17 @@ impl MultiBodyConstraint {
                 self.link_a.map_or(-1, |l| l as i32),
                 pivot_in_a,
             );
-            let pivot_b_world = bodies[self.body_b].local_pos_to_world(
-                self.link_b.map_or(-1, |l| l as i32),
-                pivot_in_b,
-            );
+            // `rb->getCenterOfMassTransform() * pivotInB` for a rigid side B.
+            let pivot_b_world = match self.rigid_body_b {
+                Some(rb) => {
+                    let body = &rigid_bodies[rb];
+                    body.position + body.orientation * pivot_in_b
+                }
+                None => bodies[self.body_b].local_pos_to_world(
+                    self.link_b.map_or(-1, |l| l as i32),
+                    pivot_in_b,
+                ),
+            };
             let pos_error = (pivot_a_world - pivot_b_world).dot(contact_normal_on_b);
 
             self.fill_row(
@@ -1187,6 +1416,7 @@ impl MultiBodyConstraint {
                 data,
                 scratch,
                 bodies,
+                rigid_bodies,
                 None,
                 None,
                 Vector3::ZERO,
@@ -1216,6 +1446,7 @@ impl MultiBodyConstraint {
         data: &mut SolverData,
         scratch: &mut MultiBodyScratch,
         bodies: &mut [MultiBody],
+        rigid_bodies: &[RigidBody],
         dt: Real,
         erp: Real,
     ) {
@@ -1227,8 +1458,23 @@ impl MultiBodyConstraint {
         };
         let pivot_a_world = bodies[self.body_a].local_pos_to_world(self.link_a.map_or(-1, |l| l as i32), pivot_in_a);
         let frame_a_world = bodies[self.body_a].local_frame_to_world(self.link_a.map_or(-1, |l| l as i32), &frame_in_a);
-        let pivot_b_world = bodies[self.body_b].local_pos_to_world(self.link_b.map_or(-1, |l| l as i32), pivot_in_b);
-        let frame_b_world = bodies[self.body_b].local_frame_to_world(self.link_b.map_or(-1, |l| l as i32), &frame_in_b);
+        // Bullet's rigid-B branch composes the frame transposed:
+        // `frameBworld = m_frameInB.transpose() * rot(rb)` (unlike the
+        // multibody side's `localFrameToWorld` = `R * frame`); with identity
+        // frames both reduce to the body orientation. Ported verbatim.
+        let (pivot_b_world, frame_b_world) = match self.rigid_body_b {
+            Some(rb) => {
+                let body = &rigid_bodies[rb];
+                (
+                    body.position + body.orientation * pivot_in_b,
+                    frame_in_b.transpose() * Matrix3::from_quat(body.orientation),
+                )
+            }
+            None => (
+                bodies[self.body_b].local_pos_to_world(self.link_b.map_or(-1, |l| l as i32), pivot_in_b),
+                bodies[self.body_b].local_frame_to_world(self.link_b.map_or(-1, |l| l as i32), &frame_in_b),
+            ),
+        };
         // The relative rotation between the two world frames (Bullet's
         // `relRot = frameAworld.inverse() * frameBworld`).
         let rel_rot = frame_a_world.inverse() * frame_b_world;
@@ -1237,7 +1483,10 @@ impl MultiBodyConstraint {
         for i in 0..6 {
             let mut row = self.new_row(my_index, i);
             row.ndof_a = 6 + bodies[self.body_a].num_dofs();
-            row.ndof_b = 6 + bodies[self.body_b].num_dofs();
+            row.ndof_b = match self.rigid_body_b {
+                Some(_) => 0,
+                None => 6 + bodies[self.body_b].num_dofs(),
+            };
             let constraint_normal_lin = Vector3::ZERO;
             let constraint_normal_ang = Vector3::ZERO;
             let pos_error;
@@ -1250,6 +1499,7 @@ impl MultiBodyConstraint {
                     data,
                     scratch,
                     bodies,
+                    rigid_bodies,
                     None,
                     None,
                     constraint_normal_ang,
@@ -1275,6 +1525,7 @@ impl MultiBodyConstraint {
                     data,
                     scratch,
                     bodies,
+                    rigid_bodies,
                     None,
                     None,
                     n_ang,
@@ -1305,6 +1556,7 @@ impl MultiBodyConstraint {
         data: &mut SolverData,
         scratch: &mut MultiBodyScratch,
         bodies: &mut [MultiBody],
+        rigid_bodies: &[RigidBody],
         dt: Real,
         erp: Real,
     ) {
@@ -1317,8 +1569,21 @@ impl MultiBodyConstraint {
         let pivot_a_world = bodies[self.body_a].local_pos_to_world(self.link_a.map_or(-1, |l| l as i32), pivot_in_a);
         let frame_a_world = bodies[self.body_a].local_frame_to_world(self.link_a.map_or(-1, |l| l as i32), &frame_in_a);
         let joint_axis = bodies[self.body_a].local_dir_to_world(self.link_a.map_or(-1, |l| l as i32), joint_axis);
-        let pivot_b_world = bodies[self.body_b].local_pos_to_world(self.link_b.map_or(-1, |l| l as i32), pivot_in_b);
-        let frame_b_world = bodies[self.body_b].local_frame_to_world(self.link_b.map_or(-1, |l| l as i32), &frame_in_b);
+        // Bullet's rigid-B branch composes the frame transposed (see
+        // `create_fixed_rows`); ported verbatim.
+        let (pivot_b_world, frame_b_world) = match self.rigid_body_b {
+            Some(rb) => {
+                let body = &rigid_bodies[rb];
+                (
+                    body.position + body.orientation * pivot_in_b,
+                    frame_in_b.transpose() * Matrix3::from_quat(body.orientation),
+                )
+            }
+            None => (
+                bodies[self.body_b].local_pos_to_world(self.link_b.map_or(-1, |l| l as i32), pivot_in_b),
+                bodies[self.body_b].local_frame_to_world(self.link_b.map_or(-1, |l| l as i32), &frame_in_b),
+            ),
+        };
 
         // Two orthonormal axes perpendicular to the joint axis (Bullet).
         let mut constraint_axis = [Vector3::ZERO; 2];
@@ -1338,7 +1603,10 @@ impl MultiBodyConstraint {
         for i in 0..5 {
             let mut row = self.new_row(my_index, i);
             row.ndof_a = 6 + bodies[self.body_a].num_dofs();
-            row.ndof_b = 6 + bodies[self.body_b].num_dofs();
+            row.ndof_b = match self.rigid_body_b {
+                Some(_) => 0,
+                None => 6 + bodies[self.body_b].num_dofs(),
+            };
             let constraint_normal_lin = Vector3::ZERO;
             let constraint_normal_ang = Vector3::ZERO;
             if i < 2 {
@@ -1349,6 +1617,7 @@ impl MultiBodyConstraint {
                     data,
                     scratch,
                     bodies,
+                    rigid_bodies,
                     None,
                     None,
                     constraint_normal_ang,
@@ -1374,6 +1643,7 @@ impl MultiBodyConstraint {
                     data,
                     scratch,
                     bodies,
+                    rigid_bodies,
                     None,
                     None,
                     n_ang,
@@ -1452,6 +1722,7 @@ impl MultiBodyConstraint {
             data,
             scratch,
             bodies,
+            &[],
             Some(&jac_a),
             Some(&jac_b),
             Vector3::ZERO,
@@ -1547,6 +1818,7 @@ impl MultiBodyConstraint {
             data,
             scratch,
             bodies,
+            &[],
             Some(&jac_a),
             Some(&jac_b),
             Vector3::ZERO,
@@ -1640,6 +1912,7 @@ impl MultiBodyConstraint {
                 data,
                 scratch,
                 bodies,
+                &[],
                 Some(&jac_a),
                 Some(&jac_b),
                 Vector3::ZERO,
@@ -1808,6 +2081,7 @@ impl MultiBodyConstraint {
                     data,
                     scratch,
                     bodies,
+                    &[],
                     None,
                     None,
                     constraint_normal_ang,
@@ -1891,6 +2165,7 @@ impl MultiBodyConstraint {
                 data,
                 scratch,
                 bodies,
+                &[],
                 None,
                 None,
                 constraint_normal_ang,

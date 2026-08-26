@@ -878,7 +878,17 @@ impl PhysicsWorld {
             }
         }
         for c in &self.mb_constraints {
-            uf.unite(num_bodies + c.body_a(), num_bodies + c.body_b());
+            // Multibody-vs-rigidbody constraints join the multibody with the
+            // rigid body's island node (Bullet's `getIslandIdB` on
+            // `m_rigidBodyB`); static bodies sit outside the node space.
+            match c.rigid_body_b() {
+                None => uf.unite(num_bodies + c.body_a(), num_bodies + c.body_b()),
+                Some(rb) => {
+                    if self.bodies[rb].participates_in_islands() {
+                        uf.unite(num_bodies + c.body_a(), rb);
+                    }
+                }
+            }
         }
 
         // Any awake member keeps its whole island awake (per island root).
@@ -952,10 +962,10 @@ impl PhysicsWorld {
         }
 
         // Convert the constraints into rows. Constraints of a sleeping
-        // island (both multibodies asleep after the island pass) produce no
-        // rows.
+        // island (both sides asleep after the island pass) produce no rows.
         {
             let PhysicsWorld {
+                bodies,
                 multibodies,
                 mb_constraints: constraints,
                 mb_data: data,
@@ -965,10 +975,14 @@ impl PhysicsWorld {
                 ..
             } = self;
             for (i, c) in constraints.iter_mut().enumerate() {
-                if !multibodies[c.body_a()].is_awake() && !multibodies[c.body_b()].is_awake() {
+                let side_b_awake = match c.rigid_body_b() {
+                    Some(rb) => bodies[rb].is_active(),
+                    None => multibodies[c.body_b()].is_awake(),
+                };
+                if !multibodies[c.body_a()].is_awake() && !side_b_awake {
                     continue;
                 }
-                c.create_constraint_rows(i, rows, data, scratch, multibodies, dt, *erp);
+                c.create_constraint_rows(i, rows, data, scratch, multibodies, bodies, dt, *erp);
             }
         }
 
@@ -1052,12 +1066,16 @@ impl PhysicsWorld {
             }
             let dt = 1.0 / inv_dt;
             for (i, c) in mb_constraints.iter_mut().enumerate() {
-                // Constraints of a sleeping island (both multibodies asleep
-                // after the island pass) produce no rows.
-                if !multibodies[c.body_a()].is_awake() && !multibodies[c.body_b()].is_awake() {
+                // Constraints of a sleeping island (both sides asleep after
+                // the island pass) produce no rows.
+                let side_b_awake = match c.rigid_body_b() {
+                    Some(rb) => bodies[rb].is_active(),
+                    None => multibodies[c.body_b()].is_awake(),
+                };
+                if !multibodies[c.body_a()].is_awake() && !side_b_awake {
                     continue;
                 }
-                c.create_constraint_rows(i, mb_rows, data, scratch, multibodies, dt, *erp);
+                c.create_constraint_rows(i, mb_rows, data, scratch, multibodies, bodies, dt, *erp);
             }
         }
 
@@ -1116,21 +1134,28 @@ impl PhysicsWorld {
     /// One inner sweep over the multibody constraint rows, alternating
     /// direction by iteration parity (Bullet's `solveSingleIteration`).
     fn mb_rows_sweep(&mut self, iteration: usize) {
-        let n = self.mb_rows.len();
+        let PhysicsWorld {
+            mb_rows,
+            mb_data,
+            bodies,
+            ..
+        } = self;
         if iteration.is_multiple_of(2) {
-            for j in 0..n {
-                resolve_row(&mut self.mb_rows[j], &mut self.mb_data);
+            for row in mb_rows.iter_mut() {
+                resolve_row(row, mb_data, bodies);
             }
         } else {
-            for j in (0..n).rev() {
-                resolve_row(&mut self.mb_rows[j], &mut self.mb_data);
+            for row in mb_rows.iter_mut().rev() {
+                resolve_row(row, mb_data, bodies);
             }
         }
     }
 
     /// Write the accumulated constraint impulses back into the constraints
     /// and the generalized velocities (Bullet's
-    /// `writeBackSolverBodyToMultiBody`).
+    /// `writeBackSolverBodyToMultiBody`). Rigid side-B bodies already took
+    /// their impulses during the iterations (they have no deferred
+    /// generalized writeback), so only the multibody sides are written here.
     fn mb_writeback_rows(&mut self, dt: Real) {
         for row in &self.mb_rows {
             self.mb_constraints[row.org_constraint]
@@ -1140,9 +1165,6 @@ impl PhysicsWorld {
             let imp = row.applied_impulse;
             let unit_a = self.mb_data.delta_velocities_unit_impulse
                 [row.jac_a_index..row.jac_a_index + row.ndof_a]
-                .to_vec();
-            let unit_b = self.mb_data.delta_velocities_unit_impulse
-                [row.jac_b_index..row.jac_b_index + row.ndof_b]
                 .to_vec();
             let mb = &mut self.multibodies[row.multi_body_a];
             mb.apply_delta_vee(&unit_a, imp);
@@ -1160,6 +1182,12 @@ impl PhysicsWorld {
                     mb.add_link_constraint_torque(l, torque_a);
                 }
             }
+            if row.rigid_b.is_some() {
+                continue; // the rigid side applied its impulses in-solve
+            }
+            let unit_b = self.mb_data.delta_velocities_unit_impulse
+                [row.jac_b_index..row.jac_b_index + row.ndof_b]
+                .to_vec();
             let mb = &mut self.multibodies[row.multi_body_b];
             mb.apply_delta_vee(&unit_b, imp);
             let force_b = row.contact_normal2 * (imp / dt);
@@ -1243,12 +1271,18 @@ fn warm_start_impulses(points: &mut [bullet_collision::manifold::ContactPoint], 
 /// `resolveSingleConstraintRowGeneric`): compute the impulse needed to meet
 /// `rhs` given the currently accumulated velocity deltas of both bodies,
 /// clamp it to the row window, and add its effect to the accumulated deltas.
-fn resolve_row(row: &mut SolverRow, data: &mut SolverData) {
+/// A rigid side B reads its velocity **delta** since row assembly (the RHS
+/// already carries the assembly-time projection) and applies the impulse
+/// directly to the body's velocities, like the mixed contact rows.
+fn resolve_row(row: &mut SolverRow, data: &mut SolverData, rigid_bodies: &mut [RigidBody]) {
     let ndof_a = row.ndof_a;
     let ndof_b = row.ndof_b;
     let da_index = row.delta_vel_a_index as usize;
     let db_index = row.delta_vel_b_index as usize;
 
+    if row.jac_diag_ab_inv == 0.0 {
+        return; // disabled singular row
+    }
     let mut delta_impulse = row.rhs - row.applied_impulse * row.cfm;
 
     let mut delta_vel_a_dot_n = 0.0;
@@ -1260,11 +1294,19 @@ fn resolve_row(row: &mut SolverRow, data: &mut SolverData) {
         }
     }
     let mut delta_vel_b_dot_n = 0.0;
-    {
-        let jac = &data.jacobians[row.jac_b_index..row.jac_b_index + ndof_b];
-        let dv = &data.delta_velocities[db_index..db_index + ndof_b];
-        for i in 0..ndof_b {
-            delta_vel_b_dot_n += jac[i] * dv[i];
+    match row.rigid_b {
+        Some(rigid) => {
+            let body = &rigid_bodies[rigid.body];
+            delta_vel_b_dot_n = row.contact_normal2.dot(body.linear_velocity)
+                + row.rel_pos2_cross_normal.dot(body.angular_velocity)
+                - rigid.initial_proj;
+        }
+        None => {
+            let jac = &data.jacobians[row.jac_b_index..row.jac_b_index + ndof_b];
+            let dv = &data.delta_velocities[db_index..db_index + ndof_b];
+            for i in 0..ndof_b {
+                delta_vel_b_dot_n += jac[i] * dv[i];
+            }
         }
     }
     delta_impulse -= (delta_vel_a_dot_n + delta_vel_b_dot_n) * row.jac_diag_ab_inv;
@@ -1280,7 +1322,9 @@ fn resolve_row(row: &mut SolverRow, data: &mut SolverData) {
     }
 
     // Accumulate the effect of this impulse into both bodies' delta
-    // velocities (Bullet's `applyDeltaVee`).
+    // velocities (Bullet's `applyDeltaVee`); a rigid side B applies the
+    // impulse to its real velocities (Bullet's `internalApplyImpulse` on the
+    // solver body).
     {
         let unit = &data.delta_velocities_unit_impulse[row.jac_a_index..row.jac_a_index + ndof_a];
         let dv = &mut data.delta_velocities[da_index..da_index + ndof_a];
@@ -1288,11 +1332,19 @@ fn resolve_row(row: &mut SolverRow, data: &mut SolverData) {
             dv[i] += unit[i] * delta_impulse;
         }
     }
-    {
-        let unit = &data.delta_velocities_unit_impulse[row.jac_b_index..row.jac_b_index + ndof_b];
-        let dv = &mut data.delta_velocities[db_index..db_index + ndof_b];
-        for i in 0..ndof_b {
-            dv[i] += unit[i] * delta_impulse;
+    match row.rigid_b {
+        Some(rigid) => {
+            let body = &mut rigid_bodies[rigid.body];
+            body.linear_velocity += row.contact_normal2 * (delta_impulse * rigid.inv_mass);
+            body.angular_velocity += rigid.angular_component * delta_impulse;
+        }
+        None => {
+            let unit =
+                &data.delta_velocities_unit_impulse[row.jac_b_index..row.jac_b_index + ndof_b];
+            let dv = &mut data.delta_velocities[db_index..db_index + ndof_b];
+            for i in 0..ndof_b {
+                dv[i] += unit[i] * delta_impulse;
+            }
         }
     }
 }

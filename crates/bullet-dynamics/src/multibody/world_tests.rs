@@ -2,7 +2,7 @@
 //! ported unchanged from the retired multibody-only `MultiBodyWorld` (the
 //! fused world of phase A must reproduce its behavior exactly).
 
-use bullet_math::{Quaternion, Real, Vector3};
+use bullet_math::{Matrix3, Quaternion, Real, Vector3};
 
 use super::body::MultiBody;
 use super::constraint::MultiBodyConstraint;
@@ -618,4 +618,133 @@ fn joint_feedback_includes_contact_support() {
         "pivot torque did not vanish: {:?}",
         fb.bottom
     );
+}
+
+/// A common fixture for the multibody-vs-rigidbody constraint tests: a
+/// fixed-base zero-link multibody acting as an immovable anchor at the
+/// origin, finalized and registered with the world. Returns the anchor's
+/// multibody index.
+fn rigid_anchor_world() -> (PhysicsWorld, usize) {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    let mut anchor = MultiBody::new(0, 1.0, Vector3::ONE, true, false);
+    anchor.set_linear_damping(0.0);
+    anchor.set_angular_damping(0.0);
+    anchor.finalize_multidof();
+    let ia = world.add_multibody(anchor);
+    (world, ia)
+}
+
+/// A rigid box hanging from a fixed-base multibody anchor through a
+/// point-to-point constraint (the multibody-vs-rigidbody
+/// `btMultiBodyPoint2Point`): given a sideways velocity it swings around
+/// the anchor and the box-to-anchor distance stays at the pivot offset.
+#[test]
+fn p2p_rigid_box_swings_on_multibody_anchor() {
+    let (mut world, ia) = rigid_anchor_world();
+    // The box hangs 1 m below the anchor; the anchor sits at the box's
+    // local (0, 1, 0).
+    let rb = world.add_body(crate::body::RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::sphere(0.1),
+        Vector3::new(0.0, -1.0, 0.0),
+        1.0,
+    ));
+    world.body_mut(rb).linear_velocity = Vector3::new(1.5, 0.0, 0.0);
+    let snapshot = world.multibodies().to_vec();
+    let constraint = MultiBodyConstraint::point2point_to_rigid(
+        ia,
+        None,
+        rb,
+        Vector3::ZERO,
+        Vector3::new(0.0, 1.0, 0.0),
+        &snapshot,
+    );
+    world.add_multibody_constraint(constraint);
+    let dt = 1.0 / 60.0;
+    let mut max_length_error: Real = 0.0;
+    for _ in 0..180 {
+        world.step_simulation(dt);
+        let p = world.body(rb).position;
+        max_length_error = max_length_error.max((p.length() - 1.0).abs());
+    }
+    // The multibody constraint rows are soft (single-step PGS, no warm
+    // start, Baumgarte positional error): a swinging box pumps some energy
+    // into the row and the rope stretches near the turn-around points.
+    // Bullet's rows behave the same way (see the p2p_rb probe); the bound
+    // below only guards against the constraint falling apart.
+    assert!(
+        max_length_error < 0.2,
+        "box-to-anchor distance drifted by {max_length_error} m"
+    );
+    let p = world.body(rb).position;
+    assert!(p.y > -1.6, "box fell through the anchor: {p:?}");
+    assert!(p.z.abs() < 1e-3, "swing left the x-y plane: {p:?}");
+}
+
+/// A rigid box welded to a fixed-base multibody anchor stays put under
+/// gravity (the multibody-vs-rigidbody `btMultiBodyFixedConstraint`).
+#[test]
+fn fixed_rigid_box_welded_to_multibody_holds() {
+    let (mut world, ia) = rigid_anchor_world();
+    let rb = world.add_body(crate::body::RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::sphere(0.1),
+        Vector3::new(0.0, 0.0, 2.0),
+        1.0,
+    ));
+    let snapshot = world.multibodies().to_vec();
+    let constraint = MultiBodyConstraint::fixed_to_rigid(
+        ia,
+        None,
+        rb,
+        Vector3::new(0.0, 0.0, 2.0), // weld point in the anchor frame
+        Vector3::ZERO,               // weld point at the box COM
+        Matrix3::IDENTITY,
+        Matrix3::IDENTITY,
+        &snapshot,
+    );
+    world.add_multibody_constraint(constraint);
+    let dt = 1.0 / 60.0;
+    for _ in 0..240 {
+        world.step_simulation(dt);
+    }
+    let p = world.body(rb).position;
+    assert_close(p.x, 0.0, 0.02);
+    assert_close(p.y, 0.0, 0.02);
+    assert_close(p.z, 2.0, 0.02);
+}
+
+/// A rigid box on a slider to a fixed-base multibody anchor slides freely
+/// along the axis while the locked DOFs resist gravity (the
+/// multibody-vs-rigidbody `btMultiBodySliderConstraint`).
+#[test]
+fn slider_rigid_box_slides_along_axis() {
+    let (mut world, ia) = rigid_anchor_world();
+    let rb = world.add_body(crate::body::RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::sphere(0.1),
+        Vector3::ZERO,
+        1.0,
+    ));
+    world.body_mut(rb).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+    let snapshot = world.multibodies().to_vec();
+    let constraint = MultiBodyConstraint::slider_to_rigid(
+        ia,
+        None,
+        rb,
+        Vector3::ZERO,
+        Vector3::ZERO,
+        Matrix3::IDENTITY,
+        Matrix3::IDENTITY,
+        Vector3::X,
+        &snapshot,
+    );
+    world.add_multibody_constraint(constraint);
+    let dt = 1.0 / 60.0;
+    for _ in 0..120 {
+        world.step_simulation(dt);
+    }
+    let p = world.body(rb).position;
+    // Free along +X (2 m after 2 s at 1 m/s), locked in Y (gravity) and Z.
+    assert_close(p.x, 2.0, 0.05);
+    assert_close(p.y, 0.0, 0.02);
+    assert_close(p.z, 0.0, 0.02);
 }
