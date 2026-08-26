@@ -20,4 +20,4 @@ pub use constraint::{
 };
 pub use multibody::{MultiBody, MultiBodyConstraint};
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
-pub use world::PhysicsWorld;
+pub use world::{PhysicsWorld, StepStage, StepTimings, STEP_STAGES};

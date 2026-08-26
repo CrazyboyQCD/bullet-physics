@@ -29,7 +29,7 @@ pub mod prelude {
     pub use bullet_collision::shapes::CollisionShape;
     pub use bullet_dynamics::{
         KinematicCharacterController, MultiBody, MultiBodyConstraint, PhysicsWorld,
-        RaycastVehicle, RigidBody, VehicleTuning,
+        RaycastVehicle, RigidBody, StepStage, StepTimings, VehicleTuning, STEP_STAGES,
     };
     pub use bullet_math::{Quaternion, Real, Vector3};
 }

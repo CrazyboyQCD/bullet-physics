@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use bullet_collision::broadphase::{AxisSweep3, BroadPhase};
 use bullet_collision::manifold::ContactManifold;
@@ -21,6 +22,106 @@ const WARM_STARTING_FACTOR: Real = 0.85;
 /// Distance below which a fresh contact point is the same physical contact as
 /// a cached one (Bullet's `gContactBreakingThreshold`), keeping its impulse.
 const CONTACT_BREAKING_THRESHOLD: Real = 0.02;
+
+/// One instrumented span of [`PhysicsWorld::step_simulation`], in execution
+/// order (the numbered stage comments inside the step; the sampling points
+/// mirror Bullet's `BT_PROFILE` instrumentation in
+/// `btDiscreteDynamicsWorld::stepSimulation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepStage {
+    /// Gravity + external-force velocity integration (stages 1/1m).
+    IntegrateVelocities,
+    /// Predicted poses + broad-phase AABB refresh (stages 2/3/3m).
+    UpdateAabbs,
+    /// Broad-phase pair query (stage 4).
+    Broadphase,
+    /// Simulation islands + island sleep decisions (stage 4b).
+    Islands,
+    /// Narrow phase + joint row assembly (stages 5/5a).
+    Narrowphase,
+    /// Constraint solving + warm-start cache writeback (stages 6/6b/6bm).
+    Solve,
+    /// Deactivation, CCD clamping, position integration, force clearing
+    /// (stages 6c/7/8/8m).
+    IntegratePositions,
+}
+
+/// Every stage in execution order.
+pub const STEP_STAGES: [StepStage; 7] = [
+    StepStage::IntegrateVelocities,
+    StepStage::UpdateAabbs,
+    StepStage::Broadphase,
+    StepStage::Islands,
+    StepStage::Narrowphase,
+    StepStage::Solve,
+    StepStage::IntegratePositions,
+];
+
+/// Cumulative wall-clock durations per [`StepStage`], accumulated over every
+/// step since the last reset. All zeros until enabled with
+/// [`PhysicsWorld::enable_step_timing`]; while disabled the per-step sampling
+/// cost is one branch per stage, while enabled it is ~8 `Instant::now()`
+/// reads. Timing never touches the numerical path, so it cannot change the
+/// simulation result.
+#[derive(Clone, Debug)]
+pub struct StepTimings {
+    enabled: bool,
+    stages: [Duration; 7],
+}
+
+impl Default for StepTimings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stages: [Duration::from_secs(0); 7],
+        }
+    }
+}
+
+impl StepTimings {
+    /// Cumulative duration of one stage.
+    pub fn stage(&self, stage: StepStage) -> Duration {
+        self.stages[stage as usize]
+    }
+
+    /// Sum over all stages (the instrumented portion of every step).
+    pub fn total(&self) -> Duration {
+        self.stages.iter().copied().sum()
+    }
+
+    fn add(&mut self, stage: StepStage, span: Duration) {
+        self.stages[stage as usize] += span;
+    }
+}
+
+/// Stage-boundary sampler used inside `step_simulation`; a no-op unless
+/// timing was enabled when the step started.
+struct StepClock {
+    enabled: bool,
+    last: Option<Instant>,
+}
+
+impl StepClock {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            last: enabled.then(Instant::now),
+        }
+    }
+
+    /// Close the previous stage (accumulating the elapsed span under
+    /// `stage`) and restart the clock for the next one.
+    #[inline]
+    fn mark(&mut self, timings: &mut StepTimings, stage: StepStage) {
+        if !self.enabled {
+            return;
+        }
+        let now = Instant::now();
+        if let Some(last) = self.last.replace(now) {
+            timings.add(stage, now - last);
+        }
+    }
+}
 
 /// A multibody collider registered in the broad phase: `(multibody, link)`
 /// with `link = -1` for the base, plus its proxy id once assigned.
@@ -100,6 +201,9 @@ pub struct PhysicsWorld {
     mb_pending_contacts: Vec<PendingContact>,
     /// Flattened multibody contact rows for the current step.
     mb_contact_rows: Vec<MbContactRow>,
+    /// Cumulative per-stage step timings; zero until enabled (see
+    /// [`PhysicsWorld::enable_step_timing`]).
+    step_timings: StepTimings,
 }
 
 impl Default for PhysicsWorld {
@@ -130,6 +234,7 @@ impl PhysicsWorld {
             mb_rows: Vec::new(),
             mb_pending_contacts: Vec::new(),
             mb_contact_rows: Vec::new(),
+            step_timings: StepTimings::default(),
         }
     }
 
@@ -144,6 +249,19 @@ impl PhysicsWorld {
     /// Number of solver (PGS) iterations per step.
     pub fn set_iterations(&mut self, iterations: u32) {
         self.iterations = iterations;
+    }
+
+    /// Start accumulating per-stage wall-clock timings in
+    /// `step_simulation` (Bullet's quickprof instrumentation points).
+    /// Off by default; enabling costs ~8 clock reads per step.
+    pub fn enable_step_timing(&mut self) {
+        self.step_timings.enabled = true;
+    }
+
+    /// Cumulative per-stage durations over all steps since timing was
+    /// enabled (zeros while disabled).
+    pub fn step_timings(&self) -> &StepTimings {
+        &self.step_timings
     }
 
     /// Add a body and return its index.
@@ -488,6 +606,7 @@ impl PhysicsWorld {
     /// Advance the simulation by `dt` seconds.
     pub fn step_simulation(&mut self, dt: Real) {
         let inv_dt = 1.0 / dt;
+        let mut clk = StepClock::new(self.step_timings.enabled);
 
         // 1. Integrate velocities from gravity and accumulated forces.
         for body in &mut self.bodies {
@@ -507,6 +626,7 @@ impl PhysicsWorld {
             }
         }
         self.mb_solve_external_forces(dt);
+        clk.mark(&mut self.step_timings, StepStage::IntegrateVelocities);
 
         // 2. Predicted positions (used only for contact detection).
         let predicted: Vec<Vector3> = self
@@ -554,9 +674,11 @@ impl PhysicsWorld {
             };
             self.broadphase.set_aabb(proxy, aabb);
         }
+        clk.mark(&mut self.step_timings, StepStage::UpdateAabbs);
 
         // 4. Broad phase: candidate overlapping pairs.
         let pairs = self.broadphase.compute_pairs();
+        clk.mark(&mut self.step_timings, StepStage::Broadphase);
 
         // 4b. Simulation islands (phase D, docs/multibody-collision.md §9):
         // union rigid bodies and multibodies by broad-phase pairs, joints
@@ -564,6 +686,7 @@ impl PhysicsWorld {
         // the island-based replacement of the former one-hop wake-up pass
         // (which ran as stage 5b).
         self.step_islands(&pairs);
+        clk.mark(&mut self.step_timings, StepStage::Islands);
 
         // 5. Narrow phase: exact contact manifolds -> constraints. Pairs
         // linked by a joint with `disable_collisions` are skipped (Bullet's
@@ -693,6 +816,7 @@ impl PhysicsWorld {
             }
             constraint::prepare_rows(c, &self.bodies, inv_dt, BAUMGARTE, &mut joint_rows);
         }
+        clk.mark(&mut self.step_timings, StepStage::Narrowphase);
 
         // 6. Solve constraints (correct velocities). Scenes without
         // multibody contacts keep the plain rigid solve (bit-identical to
@@ -733,6 +857,7 @@ impl PhysicsWorld {
             self.mb_solve_internal_constraints(dt);
         }
         self.mb_pending_contacts.clear();
+        clk.mark(&mut self.step_timings, StepStage::Solve);
 
         // 6c. Deactivation: bodies below the sleeping thresholds for longer
         // than `DEACTIVATION_TIME` seconds qualify for sleeping
@@ -831,6 +956,7 @@ impl PhysicsWorld {
             }
             mb.check_motion_and_sleep(dt);
         }
+        clk.mark(&mut self.step_timings, StepStage::IntegratePositions);
     }
 
     /// Build the per-step union-find islands and apply the island sleep/wake

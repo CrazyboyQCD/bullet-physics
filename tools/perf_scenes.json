@@ -1,0 +1,105 @@
+{
+  "comment": "Single source of truth for performance scenes (Rust vs Bullet wall-clock comparison; docs/bullet-perf.md). tools/generate_perf_scenes.py expands the parameterized generators into static body tables: tools/bullet_perf_scenes.h (C++ runner, tools/bullet_perf.cpp) and crates/bullet/src/perf_scenes_table.rs (Rust runner, crates/bullet/examples/perf_scenes.rs); do not edit the generated files. Unlike tools/scenes.json (parity), bodies come from deterministic generators (never listed by hand): 'box_grid' stacks nx*ny*nz boxes, 'mixed_rain' drops a deterministic box/sphere/capsule lattice, and 'chains' builds a grid of fixed-base multibody pendulums. dt is [num, den]; warmup frames run before timing; iterations is the PGS count. broadphase_aabb is the sweep-extent hint for btAxisSweep3 (our AxisSweep3 is unbounded; the hint only scopes the C++ side).",
+  "scenes": {
+    "stack_1000": {
+      "comment": "Solver stress: a 10x10x10 box stack settling on a box ground. 600 frames cover the active settle (~2s) plus the sleeping steady state; last300_ms reports the steady-state window.",
+      "dt": [1, 60],
+      "frames": 600,
+      "warmup": 30,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-40, -2, -40], [40, 30, 40]],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "box",
+            "half_extents": [30, 0.5, 30]
+          },
+          "position": [0, -0.5, 0],
+          "mass": 0
+        }
+      ],
+      "generators": [
+        {
+          "type": "box_grid",
+          "nx": 10,
+          "ny": 10,
+          "nz": 10,
+          "spacing": 1.02,
+          "half_extents": [0.5, 0.5, 0.5],
+          "base": [-4.59, 0.51, -4.59],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        }
+      ]
+    },
+    "rain_500": {
+      "comment": "Narrow phase + broad phase stress: 500 mixed convex bodies (box/sphere/capsule lattice, 10x10 grid x 5 layers) raining onto a wavy 20x20 height mesh (deterministic amp*sin(ax*x)*cos(az*z) heights).",
+      "dt": [1, 60],
+      "frames": 300,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-20, -2, -20], [20, 20, 20]],
+      "bodies": [
+        {
+          "name": "terrain",
+          "shape": {
+            "type": "mesh",
+            "grid": [20, 20],
+            "origin": [-9.5, -9.5],
+            "cell": [1.0, 1.0],
+            "heights_expr": {
+              "amp": 0.2,
+              "ax": 0.7,
+              "az": 0.6
+            }
+          },
+          "position": [0, 0, 0],
+          "mass": 0
+        }
+      ],
+      "generators": [
+        {
+          "type": "mixed_rain",
+          "nx": 10,
+          "nz": 10,
+          "layers": 5,
+          "spacing": [1.4, 2.0, 1.4],
+          "base": [-6.3, 4.0, -6.3],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "box_half": 0.35,
+          "sphere_radius": 0.35,
+          "capsule_radius": 0.3,
+          "capsule_half_height": 0.5
+        }
+      ]
+    },
+    "mb_chains": {
+      "comment": "Featherstone ABA + multibody constraint stress: a 5x4 grid (20) of fixed-base 3-link revolute pendulums released from 60 degrees. Link colliders are 0.1 spheres in the DefaultFilter group (required for the C++ island solver); the chains never touch the ground, so this isolates the articulated dynamics path.",
+      "dt": [1, 60],
+      "frames": 300,
+      "warmup": 5,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-20, -2, -20], [20, 12, 20]],
+      "bodies": [],
+      "chains": {
+        "count": 20,
+        "cols": 5,
+        "links": 3,
+        "spacing": 3.0,
+        "base_height": 4.0,
+        "base_mass": 1.0,
+        "link_mass": 1.0,
+        "link_length": 1.0,
+        "initial_angle_deg": 60.0,
+        "collider_radius": 0.1
+      }
+    }
+  }
+}

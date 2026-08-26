@@ -12,6 +12,11 @@
 # Parity scene tables are generated from tools/scenes.json (single source of truth)
 /tools/bullet_scenes.h
 /crates/bullet/src/parity_scenes.rs
+
+# Perf scene tables are generated from tools/perf_scenes.json (single source of truth)
+/tools/bullet_perf_scenes.h
+/crates/bullet/src/perf_scenes_table.rs
+
 /tools/_vcvars_env.bat
 
 # Local agent handoff notes, not part of the published repo

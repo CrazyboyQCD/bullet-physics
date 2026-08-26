@@ -34,6 +34,11 @@ EXES = {"f32": os.path.join(TOOLS, "bullet_record.exe"),
 OBJS = {"f32": os.path.join(TOOLS, "bullet_record.obj"),
         "f64": os.path.join(TOOLS, "bullet_record_f64.obj")}
 
+# Perf runner (tools/bullet_perf.cpp vs tools/bullet_perf_scenes.h); f64-only
+# by design — performance targets the default f32 build (docs/bullet-perf.md).
+PERF_SRC = os.path.join(TOOLS, "bullet_perf.cpp")
+PERF_EXE = os.path.join(TOOLS, "bullet_perf.exe")
+
 
 def lib_dir(precision):
     return os.path.join(BUILD_DIRS[precision], "lib", "Release")
@@ -69,6 +74,38 @@ def msvc_env():
             k, _, v = line.partition("=")
             env[k.strip()] = v
     return env
+
+
+def build_perf():
+    """Compile bullet_perf.cpp -> bullet_perf.exe against the f32 Bullet libs
+    (the perf harness measures the default precision only). Returns exit code.
+    Also callable from tools/perf.py."""
+    if not os.path.exists(VCVARS):
+        print(f"error: vcvars64.bat not found at {VCVARS}", file=sys.stderr)
+        return 1
+    for lib in libs("f32"):
+        if not os.path.exists(lib):
+            print(f"error: {lib} missing; run tools/parity.py first (it builds "
+                  f"the Bullet libs), or build them via CMake", file=sys.stderr)
+            return 1
+
+    env = msvc_env()
+    if env is None:
+        return 1
+    full_env = dict(os.environ)
+    full_env.update(env)
+
+    obj = os.path.join(TOOLS, "bullet_perf.obj")
+    cmd = ["cl", "/nologo", "/O2", "/EHsc", "/std:c++17",
+           f"/Fo{obj}", f"/I{os.path.join(ROOT, 'refs', 'bullet3', 'src')}",
+           PERF_SRC, f"/Fe:{PERF_EXE}", "/link", *libs("f32")]
+    print("+", " ".join(cmd))
+    r = subprocess.run(cmd, env=full_env)
+    if os.path.exists(obj):
+        os.remove(obj)
+    if r.returncode != 0:
+        print("error: cl failed", file=sys.stderr)
+    return r.returncode
 
 
 def build(precision="f32"):
@@ -112,4 +149,6 @@ def build(precision="f32"):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "perf":
+        sys.exit(build_perf())
     sys.exit(build())
