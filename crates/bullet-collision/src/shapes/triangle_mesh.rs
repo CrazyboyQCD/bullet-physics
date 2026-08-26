@@ -1,6 +1,7 @@
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
 
 use super::bvh::Bvh;
+use super::CollisionShape;
 
 /// A static triangle mesh collision shape, equivalent to Bullet's
 /// `btBvhTriangleMeshShape` (a `btTriangleMesh` plus a built BVH).
@@ -13,16 +14,35 @@ pub struct TriangleMesh {
     pub vertices: Vec<Vector3>,
     pub indices: Vec<[u32; 3]>,
     bvh: Bvh,
+    /// Per-triangle three-vertex convex hulls, built once (the narrow phase
+    /// used to rebuild one allocation per candidate triangle per step;
+    /// Bullet constructs its `btTriangleShape` on the stack for the same
+    /// zero-per-step cost).
+    tri_hulls: Vec<CollisionShape>,
+    /// Per-triangle local AABBs, built once (the exact pre-GJK filter in the
+    /// narrow phase; Bullet's `TestTriangleAgainstAabb2`).
+    tri_aabbs: Vec<Aabb>,
 }
 
 impl TriangleMesh {
     /// Build a mesh from vertices and triangle indices (not validated).
     pub fn new(vertices: Vec<Vector3>, indices: Vec<[u32; 3]>) -> Self {
         let bvh = Bvh::build(&vertices, &indices);
+        let mut tri_hulls = Vec::with_capacity(indices.len());
+        let mut tri_aabbs = Vec::with_capacity(indices.len());
+        for t in &indices {
+            let a = vertices[t[0] as usize];
+            let b = vertices[t[1] as usize];
+            let c = vertices[t[2] as usize];
+            tri_hulls.push(CollisionShape::convex_hull(vec![a, b, c]));
+            tri_aabbs.push(Aabb::new(a.min(b.min(c)), a.max(b.max(c))));
+        }
         Self {
             vertices,
             indices,
             bvh,
+            tri_hulls,
+            tri_aabbs,
         }
     }
 
@@ -35,6 +55,18 @@ impl TriangleMesh {
             self.vertices[t[1] as usize],
             self.vertices[t[2] as usize],
         )
+    }
+
+    /// The prebuilt three-vertex hull of triangle `index` (local frame).
+    #[inline]
+    pub(crate) fn triangle_hull(&self, index: usize) -> &CollisionShape {
+        &self.tri_hulls[index]
+    }
+
+    /// The local AABB of triangle `index`.
+    #[inline]
+    pub(crate) fn triangle_aabb(&self, index: usize) -> &Aabb {
+        &self.tri_aabbs[index]
     }
 
     /// Triangle indices whose AABB overlaps `aabb` (local space).

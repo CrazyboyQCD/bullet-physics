@@ -44,14 +44,22 @@ pub fn convex_mesh(
     }
 
     let mut manifold = ContactManifold::new();
-    for t in mesh.triangles_in_aabb(&Aabb::new(local_min, local_max)) {
-        let (a, b, c) = mesh.triangle(t as usize);
-        let tri = CollisionShape::convex_hull(vec![a, b, c]);
+    let query = Aabb::new(local_min, local_max);
+    for t in mesh.triangles_in_aabb(&query) {
+        // Exact triangle-AABB filter before GJK (Bullet's
+        // `TestTriangleAgainstAabb2`): the BVH query is conservative (shared
+        // node AABBs return neighbor triangles too), and a triangle whose
+        // AABB misses the query AABB cannot touch the convex — GJK would
+        // only confirm the separation.
+        if !mesh.triangle_aabb(t as usize).overlaps(&query) {
+            continue;
+        }
+        let tri = mesh.triangle_hull(t as usize);
         if let Some(m) = convex_convex(
             convex,
             position_convex,
             orientation_convex,
-            &tri,
+            tri,
             position_mesh,
             orientation_mesh,
         ) {

@@ -91,7 +91,8 @@ fn pair_key(a: usize, b: usize) -> (usize, usize) {
 }
 
 #[inline]
-fn frame_relevant(v: f64) -> bool {
+fn frame_relevant(v: impl Into<f64>) -> bool {
+    let v = v.into();
     v.is_finite() && v.abs() < FRAME_COMPONENT_LIMIT
 }
 
@@ -134,10 +135,10 @@ impl AxisSweep3 {
             return true;
         }
         for k in 0..3 {
-            if frame_relevant(aabb.min[k] as f64) && aabb.min[k] < self.frame_min[k] {
+            if frame_relevant(aabb.min[k]) && aabb.min[k] < self.frame_min[k] {
                 return true;
             }
-            if frame_relevant(aabb.max[k] as f64) && aabb.max[k] > self.frame_max[k] {
+            if frame_relevant(aabb.max[k]) && aabb.max[k] > self.frame_max[k] {
                 return true;
             }
         }
@@ -154,10 +155,10 @@ impl AxisSweep3 {
         let mut hi = Vector3::splat(Real::NEG_INFINITY);
         let absorb = |aabb: &Aabb, lo: &mut Vector3, hi: &mut Vector3| {
             for k in 0..3 {
-                if frame_relevant(aabb.min[k] as f64) {
+                if frame_relevant(aabb.min[k]) {
                     lo[k] = lo[k].min(aabb.min[k]);
                 }
-                if frame_relevant(aabb.max[k] as f64) {
+                if frame_relevant(aabb.max[k]) {
                     hi[k] = hi[k].max(aabb.max[k]);
                 }
             }
@@ -173,7 +174,7 @@ impl AxisSweep3 {
             // motion stays inside the frame for a while.
             let extent = (hi[k] - lo[k]).max(0.0);
             let margin = (extent * 0.5).max(0.5);
-            if !frame_relevant(lo[k] as f64) {
+            if !frame_relevant(lo[k]) {
                 lo[k] = -0.5;
                 hi[k] = 0.5;
             } else {
