@@ -66,19 +66,19 @@ Scene: stack_1000 (f32), bodies: 1001, frames: 600, warmup: 30, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.329 | 797.4 | 100.3 |
-| rust | 1.354 | 812.5 | 92.4 |
-| rust/bullet | 1.02x | | |
+| bullet | 1.149 | 689.1 | 97.5 |
+| rust | 1.428 | 857.0 | 91.5 |
+| rust/bullet | 1.24x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
-- integrate_velocities: 3.0 ms (0.4%)
-- update_aabbs: 35.5 ms (4.3%)
-- broadphase: 157.2 ms (19.2%)
-- islands: 37.1 ms (4.5%)
-- narrowphase: 191.1 ms (23.3%)
-- solve: 393.1 ms (47.9%)
-- integrate_positions: 3.3 ms (0.4%)
+- integrate_velocities: 2.6 ms (0.3%)
+- update_aabbs: 26.5 ms (3.1%)
+- broadphase: 154.7 ms (17.9%)
+- islands: 33.8 ms (3.9%)
+- narrowphase: 243.4 ms (28.2%)
+- solve: 398.4 ms (46.2%)
+- integrate_positions: 3.1 ms (0.4%)
 
 ## Scene: rain_500
 
@@ -88,58 +88,61 @@ Scene: rain_500 (f32), bodies: 501, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 3.717 | 1115.0 | 1115.0 |
-| rust | 7.770 | 2331.0 | 2331.0 |
-| rust/bullet | 2.09x | | |
+| bullet | 3.473 | 1041.8 | 1041.8 |
+| rust | 7.895 | 2368.4 | 2368.4 |
+| rust/bullet | 2.27x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 2.4 ms (0.1%)
-- update_aabbs: 67.4 ms (2.9%)
-- broadphase: 11.8 ms (0.5%)
-- islands: 4.1 ms (0.2%)
-- narrowphase: 1967.1 ms (83.4%)
-- solve: 302.0 ms (12.8%)
-- integrate_positions: 3.5 ms (0.1%)
+- integrate_velocities: 2.3 ms (0.1%)
+- update_aabbs: 54.8 ms (2.4%)
+- broadphase: 11.2 ms (0.5%)
+- islands: 3.7 ms (0.2%)
+- narrowphase: 1906.3 ms (83.5%)
+- solve: 301.0 ms (13.2%)
+- integrate_positions: 2.7 ms (0.1%)
 
-**2026-08-26 persistent-manifold round 2 (per-pair manifold cache + row pool).**
-Contacts are now cached per broad-phase pair (points anchored in both
-local frames, `refreshContactPoints`-equivalent re-projection, impulse
-inheritance, GJK seeded with the cached normal on re-detection) and the
-solver rows/predicted poses are pooled across steps. Slow pairs with
-shallow (sub-slop) or margin-band contacts skip the narrow phase
-entirely; fast pairs carrying deep points re-detect (stale anchored
-depths feed the Baumgarte bias an energy pump — found on the stack,
-see the guard notes in `world.rs`/deviations §1). rain_500 improves
-2.81x → 2.09x (narrowphase 2567 → 1967 ms): the rolling/sliding
-majority of pairs is refresh-served, while deep-impacting and
-fast-settling pairs keep paying full detection. The remaining gap is
-still the per-triangle GJK+EPA on re-detecting pairs plus the mesh
-BVH query — closing it towards 1x needs the margin-band *detection*
-(Bullet reports contacts at positive separation inside
-`gContactBreakingThreshold`, skipping EPA for band contacts), a
-behavior round of its own. Also this round: box_box face contacts now
-report the witness on B uniformly (they used to sit on the incident
-face, whichever box that was — harmless for the solver, wrong for
-anchor-based persistence).
+**2026-08-26 persistent-manifold round 2 (per-pair manifold cache + row
+pool).** Contacts cached per broad-phase pair (anchors in both local
+frames, `refreshContactPoints`-equivalent re-projection, impulse
+inheritance, GJK seeded with the cached normal on re-detection); solver
+rows/predicted poses pooled across steps. rain_500 went 2.81x → 2.09x
+(narrowphase 2567 → 1967 ms) — the rolling/sliding majority of pairs
+became refresh-served. Also that round: box_box face contacts report
+the witness on B uniformly. A `cargo flamegraph` attribution showed
+`epa::penetration` at ~40–65% of the whole step (`Vec<Face>` churn:
+retain ~22%, expand re-sort ~21%), everything else under a few percent
+— pointing at margin-band detection as the next lever.
 
-**2026-08-26 flamegraph attribution** (`cargo flamegraph` over the same
-scene, release + debuginfo, ETW/dtrace sampling): `epa::penetration`
-subtrees take ~40–65% of the whole step (two rects under the
-convex-vs-mesh per-triangle path and the direct convex-convex path);
-inside EPA the cost is `Vec<Face>` churn — `retain` (visible-face
-filter) ~22%, the `expand` re-sort ~21%, `face_distance` ~6–10%,
-`edge_distance` ~2–3%. Everything else is noise: `gjk_intersect`
-doesn't even register (the strict separation early-out keeps GJK
-cheap), the BVH `triangles_in_aabb` is 1.4%, solver `apply_impulse`
-3.6%, and the whole persistent-manifold machinery (capture + refresh
-+ needs_redetect) is under 1.5% — the cache is essentially free.
-Next lever is therefore algorithmic, not micro: margin-band detection
-(a distance-walking GJK reports contacts at positive separation
-inside `gContactBreakingThreshold` without ever calling EPA,
-Bullet's `m_maximumDistanceSquared` route), which directly deletes
-the EPA block for band contacts; a secondary EPA micro-pass could
-trim the `Vec<Face>` allocations if needed after that.
+**2026-08-26 margin-band round (contact detection + EPA pooling).**
+Contacts now form while surfaces are still separated (the Bullet
+`m_maximumDistanceSquared` route): the GJK distance walk reports band
+contacts with negative penetration inside the per-pair breaking
+threshold, broad-phase AABBs are padded by the global 0.02 contact
+threshold (Bullet's `updateSingleAabb`), and the solver adds Bullet's
+separation-rate softening for separated points. Two walk mechanics keep
+far pairs cheap: Bullet's early rejection
+(`delta^2 > |v|^2 * maxDist^2` proves separation beyond the band on the
+first or second support query) and the overlap path feeds EPA directly
+from the walk's enclosing tetrahedron (no second GJK run). EPA's
+scratch buffers (vertex/face vectors and the per-expand boundary set)
+are pooled per thread — the `Vec<Face>` churn the flamegraph called
+out. Measured on rain_500: narrowphase 1967 → 1906 ms with the band
+semantics active (intermediate states measured 3012 ms without the
+early rejection and 2298 ms without the EPA pooling), ratio 2.09x →
+2.27x against a Bullet side that itself ran ~6% faster this session
+(1042 vs 1115 ms total). The band's residual cost is physics, not
+waste: damped band oscillation around the surface keeps
+shallow-penetration frames (and their EPA calls) in the settle phase
+that a penetration-only detector resolves in one bounce — Bullet pays
+the same dynamics. Parity held: box/mesh/stacking scenes are unchanged
+to the digit, the plane-path impact transient grew (one earlier contact
+frame at ~9 m/s, classified), and all 24 multibody probes keep their
+first-divergence frames. stack_1000 reads 1.24x this session (vs 1.02x
+previously) — mostly Bullet-side variance (its total dropped 797 → 689
+ms; the sleeping steady state still favors Rust, last300 0.94x), with
+a real +52 ms narrowphase cost from the inflated-AABB neighbor pairs
+during the settle phase.
 
 ## Scene: mb_chains
 
@@ -149,17 +152,16 @@ Scene: mb_chains (f32), bodies: 20, frames: 300, warmup: 5, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 0.058 | 17.4 | 17.4 |
-| rust | 0.049 | 14.7 | 14.7 |
-| rust/bullet | 0.85x | | |
+| bullet | 0.058 | 17.3 | 17.3 |
+| rust | 0.049 | 14.6 | 14.6 |
+| rust/bullet | 0.84x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 4.8 ms (32.4%)
-- update_aabbs: 3.8 ms (26.2%)
-- broadphase: 0.0 ms (0.3%)
-- islands: 0.2 ms (1.0%)
-- narrowphase: 0.1 ms (0.6%)
-- solve: 4.0 ms (27.3%)
-- integrate_positions: 1.8 ms (12.2%)
-
+- integrate_velocities: 4.8 ms (32.6%)
+- update_aabbs: 4.0 ms (27.1%)
+- broadphase: 0.1 ms (0.4%)
+- islands: 0.2 ms (1.1%)
+- narrowphase: 0.1 ms (0.9%)
+- solve: 3.8 ms (26.2%)
+- integrate_positions: 1.7 ms (11.9%)
