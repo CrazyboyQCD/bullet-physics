@@ -66,19 +66,19 @@ Scene: stack_1000 (f32), bodies: 1001, frames: 600, warmup: 30, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.275 | 765.2 | 99.7 |
-| rust | 1.178 | 706.6 | 40.1 |
-| rust/bullet | 0.92x | | |
+| bullet | 1.329 | 797.4 | 100.3 |
+| rust | 1.354 | 812.5 | 92.4 |
+| rust/bullet | 1.02x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
-- integrate_velocities: 2.1 ms (0.3%)
-- update_aabbs: 38.3 ms (5.2%)
-- broadphase: 77.2 ms (10.5%)
-- islands: 20.6 ms (2.8%)
-- narrowphase: 150.7 ms (20.6%)
-- solve: 440.2 ms (60.1%)
-- integrate_positions: 3.5 ms (0.5%)
+- integrate_velocities: 3.0 ms (0.4%)
+- update_aabbs: 35.5 ms (4.3%)
+- broadphase: 157.2 ms (19.2%)
+- islands: 37.1 ms (4.5%)
+- narrowphase: 191.1 ms (23.3%)
+- solve: 393.1 ms (47.9%)
+- integrate_positions: 3.3 ms (0.4%)
 
 ## Scene: rain_500
 
@@ -88,34 +88,58 @@ Scene: rain_500 (f32), bodies: 501, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 3.589 | 1076.6 | 1076.6 |
-| rust | 10.075 | 3022.5 | 3022.5 |
-| rust/bullet | 2.81x | | |
+| bullet | 3.717 | 1115.0 | 1115.0 |
+| rust | 7.770 | 2331.0 | 2331.0 |
+| rust/bullet | 2.09x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 2.3 ms (0.1%)
-- update_aabbs: 58.8 ms (2.0%)
-- broadphase: 11.9 ms (0.4%)
-- islands: 4.9 ms (0.2%)
-- narrowphase: 2566.8 ms (86.3%)
-- solve: 328.0 ms (11.0%)
-- integrate_positions: 3.2 ms (0.1%)
+- integrate_velocities: 2.4 ms (0.1%)
+- update_aabbs: 67.4 ms (2.9%)
+- broadphase: 11.8 ms (0.5%)
+- islands: 4.1 ms (0.2%)
+- narrowphase: 1967.1 ms (83.4%)
+- solve: 302.0 ms (12.8%)
+- integrate_positions: 3.5 ms (0.1%)
 
-**2026-08-26 narrow-phase round 1 (triangle hull cache + pre-GJK filter).**
-Instrumented counters over 300 frames: 1378 pair-level `collide()` calls
-and 3406 triangle-level GJK+EPA calls per frame at ~1.3 us each — 1320 ms
-(48% of the pre-change stage) is the GJK/EPA math itself; the rest is
-per-step allocation and row assembly. Porting Bullet's
-`TestTriangleAgainstAabb2` pre-filter and caching the per-triangle hulls
-(killing one heap allocation per candidate triangle per step) only shaved
-~5% off the stage (2703 -> 2567 ms): separating triangles were already
-cheap (our GJK has Bullet's strict separation early-out), so the real cost
-is the *touching* pairs re-running the full GJK+EPA pipeline every step
-plus the per-step rebuild of every `ContactConstraint`. Closing the gap
-needs Bullet's margin-band contacts (positive-distance contacts skip EPA
-entirely; a behavior change requiring its own parity round) and/or a
-persistent-manifold / row-pool redesign of the stage-5 rebuild.
+**2026-08-26 persistent-manifold round 2 (per-pair manifold cache + row pool).**
+Contacts are now cached per broad-phase pair (points anchored in both
+local frames, `refreshContactPoints`-equivalent re-projection, impulse
+inheritance, GJK seeded with the cached normal on re-detection) and the
+solver rows/predicted poses are pooled across steps. Slow pairs with
+shallow (sub-slop) or margin-band contacts skip the narrow phase
+entirely; fast pairs carrying deep points re-detect (stale anchored
+depths feed the Baumgarte bias an energy pump — found on the stack,
+see the guard notes in `world.rs`/deviations §1). rain_500 improves
+2.81x → 2.09x (narrowphase 2567 → 1967 ms): the rolling/sliding
+majority of pairs is refresh-served, while deep-impacting and
+fast-settling pairs keep paying full detection. The remaining gap is
+still the per-triangle GJK+EPA on re-detecting pairs plus the mesh
+BVH query — closing it towards 1x needs the margin-band *detection*
+(Bullet reports contacts at positive separation inside
+`gContactBreakingThreshold`, skipping EPA for band contacts), a
+behavior round of its own. Also this round: box_box face contacts now
+report the witness on B uniformly (they used to sit on the incident
+face, whichever box that was — harmless for the solver, wrong for
+anchor-based persistence).
+
+**2026-08-26 flamegraph attribution** (`cargo flamegraph` over the same
+scene, release + debuginfo, ETW/dtrace sampling): `epa::penetration`
+subtrees take ~40–65% of the whole step (two rects under the
+convex-vs-mesh per-triangle path and the direct convex-convex path);
+inside EPA the cost is `Vec<Face>` churn — `retain` (visible-face
+filter) ~22%, the `expand` re-sort ~21%, `face_distance` ~6–10%,
+`edge_distance` ~2–3%. Everything else is noise: `gjk_intersect`
+doesn't even register (the strict separation early-out keeps GJK
+cheap), the BVH `triangles_in_aabb` is 1.4%, solver `apply_impulse`
+3.6%, and the whole persistent-manifold machinery (capture + refresh
++ needs_redetect) is under 1.5% — the cache is essentially free.
+Next lever is therefore algorithmic, not micro: margin-band detection
+(a distance-walking GJK reports contacts at positive separation
+inside `gContactBreakingThreshold` without ever calling EPA,
+Bullet's `m_maximumDistanceSquared` route), which directly deletes
+the EPA block for band contacts; a secondary EPA micro-pass could
+trim the `Vec<Face>` allocations if needed after that.
 
 ## Scene: mb_chains
 
@@ -125,17 +149,17 @@ Scene: mb_chains (f32), bodies: 20, frames: 300, warmup: 5, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 0.058 | 17.5 | 17.5 |
-| rust | 0.057 | 17.1 | 17.1 |
-| rust/bullet | 0.98x | | |
+| bullet | 0.058 | 17.4 | 17.4 |
+| rust | 0.049 | 14.7 | 14.7 |
+| rust/bullet | 0.85x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 4.8 ms (28.2%)
-- update_aabbs: 4.2 ms (24.6%)
-- broadphase: 0.1 ms (0.4%)
-- islands: 0.1 ms (0.9%)
-- narrowphase: 0.1 ms (0.5%)
-- solve: 4.6 ms (26.9%)
-- integrate_positions: 3.2 ms (18.6%)
+- integrate_velocities: 4.8 ms (32.4%)
+- update_aabbs: 3.8 ms (26.2%)
+- broadphase: 0.0 ms (0.3%)
+- islands: 0.2 ms (1.0%)
+- narrowphase: 0.1 ms (0.6%)
+- solve: 4.0 ms (27.3%)
+- integrate_positions: 1.8 ms (12.2%)
 

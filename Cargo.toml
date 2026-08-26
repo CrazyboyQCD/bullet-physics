@@ -17,3 +17,9 @@ repository = "https://github.com/CrazyboyQCD/bullet_physics"
 [workspace.dependencies]
 glam = "0.33"
 approx = "0.5"
+
+# Release builds keep debug symbols so profilers (cargo-flamegraph / samply /
+# ETW) can attribute samples to functions; the MSVC linker emits them into
+# the PDB alongside the optimized code, so the runtime cost is zero.
+[profile.release]
+debug = true
