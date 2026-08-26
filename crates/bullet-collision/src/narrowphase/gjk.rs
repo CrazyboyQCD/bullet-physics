@@ -74,12 +74,40 @@ pub fn gjk_intersect(
     position_b: Vector3,
     orientation_b: Quaternion,
 ) -> Option<Simplex> {
+    gjk_intersect_seeded(
+        shape_a,
+        position_a,
+        orientation_a,
+        shape_b,
+        position_b,
+        orientation_b,
+        None,
+    )
+}
+
+/// GJK with an optional warm-start seed direction (a cached separating
+/// normal from a previous step of the same pair, e.g. from a persistent
+/// manifold). Any non-degenerate seed is mathematically valid: the simplex
+/// loop converges to the same enclosing simplex regardless of where it
+/// starts, a good seed only saves iterations.
+pub fn gjk_intersect_seeded(
+    shape_a: &CollisionShape,
+    position_a: Vector3,
+    orientation_a: Quaternion,
+    shape_b: &CollisionShape,
+    position_b: Vector3,
+    orientation_b: Quaternion,
+    seed: Option<Vector3>,
+) -> Option<Simplex> {
     let center_dir = position_b - position_a;
-    let initial_dir = if center_dir.length_squared() > 1e-12 {
+    let fallback = if center_dir.length_squared() > 1e-12 {
         center_dir
     } else {
         Vector3::X
     };
+    let initial_dir = seed
+        .filter(|s| s.length_squared() > 1e-12)
+        .unwrap_or(fallback);
 
     let mut simplex = Simplex::new(support_minkowski(
         shape_a,

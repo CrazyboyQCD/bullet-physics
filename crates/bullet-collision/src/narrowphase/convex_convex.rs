@@ -11,7 +11,9 @@ use bullet_math::{Quaternion, Vector3};
 
 /// Contact between two convex shapes, using the generic GJK + EPA pipeline.
 /// Returns `None` when the shapes are separated (or the overlap is numerical
-/// noise below the EPA threshold).
+/// noise below the EPA threshold). `seed` optionally warm-starts GJK with a
+/// cached separating normal (see [`gjk::gjk_intersect_seeded`]); pass `None`
+/// for an unseeded run.
 pub fn convex_convex(
     shape_a: &CollisionShape,
     position_a: Vector3,
@@ -19,14 +21,16 @@ pub fn convex_convex(
     shape_b: &CollisionShape,
     position_b: Vector3,
     orientation_b: Quaternion,
+    seed: Option<Vector3>,
 ) -> Option<ContactManifold> {
-    let simplex = gjk::gjk_intersect(
+    let simplex = gjk::gjk_intersect_seeded(
         shape_a,
         position_a,
         orientation_a,
         shape_b,
         position_b,
         orientation_b,
+        seed,
     )?;
     // GJK only reports success once the origin is enclosed, which needs a full
     // tetrahedron (four vertices).
@@ -82,11 +86,10 @@ mod tests {
         b: &CollisionShape,
         pb: Vector3,
     ) -> Option<(Vector3, Real)> {
-        convex_convex(a, pa, Quaternion::IDENTITY, b, pb, Quaternion::IDENTITY)
-            .map(|m| {
-                let p = m.points[0];
-                (p.normal, p.penetration)
-            })
+        convex_convex(a, pa, Quaternion::IDENTITY, b, pb, Quaternion::IDENTITY, None).map(|m| {
+            let p = m.points[0];
+            (p.normal, p.penetration)
+        })
     }
 
     #[test]

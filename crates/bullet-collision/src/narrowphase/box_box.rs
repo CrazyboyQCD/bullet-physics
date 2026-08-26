@@ -453,7 +453,16 @@ fn box_box_sat(
     for (point, dep) in penetrating {
         // `point` is expressed relative to the reference-box center; move it
         // back to world space. The contact normal points from box A to box B.
-        let pos = point + pa_ref;
+        let mut pos = point + pa_ref;
+        // The clipped points lie on the incident face, which is box B's only
+        // when A is the reference (code <= 3); when B is the reference they
+        // lie on A's face. Shift them onto B's witness surface
+        // (`pos + normal * depth`) so the manifold convention — `position`
+        // is the witness on shape B — holds for persistent-manifold
+        // anchoring regardless of which box is the reference.
+        if code > 3 {
+            pos += normal_sat * dep;
+        }
         contacts.push(ContactPoint::new(pos, normal_sat, dep));
     }
     Some(ContactManifold::from_points(contacts))

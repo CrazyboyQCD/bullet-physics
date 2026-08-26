@@ -40,13 +40,16 @@ pub struct ContactConstraint {
     normal_mass: Real,
     tangent1_mass: Real,
     tangent2_mass: Real,
-    pub(crate) position: Vector3,
     penetration: Real,
     restitution: Real,
     friction: Real,
     pub(crate) normal_impulse: Real,
     pub(crate) tangent1_impulse: Real,
     pub(crate) tangent2_impulse: Real,
+    /// Index of this row's contact point inside the owning pair's persistent
+    /// manifold (`u32::MAX` for an ephemeral point with no cache slot), used
+    /// by the post-solve writeback to store the accumulated impulse.
+    pub(crate) point_index: u32,
     /// Split-impulse (deep-penetration) state: whether this contact's
     /// positional correction is handled by the split pass instead of the
     /// Baumgarte bias, the target pseudo-impulse (`m_rhsPenetration`) and the
@@ -159,7 +162,20 @@ impl ConstraintRow {
 
 impl ContactConstraint {
     /// Build a constraint from a contact point and the two bodies.
-    pub fn prepare(body_a: usize, body_b: usize, cp: &ContactPoint, a: &RigidBody, b: &RigidBody) -> Self {
+    ///
+    /// The tangent basis is derived from the point's *current* normal every
+    /// step: cached friction impulses are deliberately not persisted across
+    /// steps, because the basis rotates with the point set and stale
+    /// tangential impulses made resting bodies oscillate (the persistent-
+    /// manifold cache only stores the normal impulse — see `world.rs`).
+    pub fn prepare(
+        body_a: usize,
+        body_b: usize,
+        cp: &ContactPoint,
+        a: &RigidBody,
+        b: &RigidBody,
+        point_index: u32,
+    ) -> Self {
         let normal = cp.normal;
         let (tangent1, tangent2) = tangent_basis(normal);
         let r_a = cp.position - a.position;
@@ -197,7 +213,6 @@ impl ContactConstraint {
             normal_mass,
             tangent1_mass,
             tangent2_mass,
-            position: cp.position,
             penetration: cp.penetration,
             restitution,
             friction,
@@ -207,6 +222,7 @@ impl ContactConstraint {
             normal_impulse: cp.normal_impulse,
             tangent1_impulse: cp.tangent_impulse[0],
             tangent2_impulse: cp.tangent_impulse[1],
+            point_index,
             // Deep penetration switches position correction from the Baumgarte
             // bias to the split-impulse pass (Bullet's `m_splitImpulse`
             // branch in `setupContactConstraint`); the split impulse itself
@@ -478,7 +494,7 @@ mod tests {
             Vector3::Y,                           // normal A -> B (box -> plane)
             penetration,
         );
-        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &cube);
+        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &cube, u32::MAX);
         (vec![ground, cube], vec![c])
     }
 

@@ -16,7 +16,8 @@ use crate::shapes::{CollisionShape, TriangleMesh};
 /// Contact between a convex shape and a static triangle mesh.
 ///
 /// Returns `None` when no candidate triangle touches (or the overlaps are
-/// numerical noise below the EPA threshold).
+/// numerical noise below the EPA threshold). `seed` optionally warm-starts
+/// every triangle-level GJK run with a cached separating normal.
 pub fn convex_mesh(
     convex: &CollisionShape,
     position_convex: Vector3,
@@ -24,6 +25,7 @@ pub fn convex_mesh(
     mesh: &TriangleMesh,
     position_mesh: Vector3,
     orientation_mesh: Quaternion,
+    seed: Option<Vector3>,
 ) -> Option<ContactManifold> {
     // Sweep the convex's world AABB corners into the mesh's local frame.
     let convex_world = convex.world_aabb(position_convex, orientation_convex);
@@ -62,6 +64,7 @@ pub fn convex_mesh(
             tri,
             position_mesh,
             orientation_mesh,
+            seed,
         ) {
             manifold.points.extend(m.points);
         }
@@ -107,6 +110,7 @@ mod tests {
             &mesh,
             Vector3::ZERO,
             Quaternion::IDENTITY,
+            None,
         )
         .unwrap();
         let p = m.points[0];
@@ -125,6 +129,7 @@ mod tests {
             &mesh,
             Vector3::ZERO,
             Quaternion::IDENTITY,
+            None,
         )
         .is_none());
     }
@@ -144,6 +149,7 @@ mod tests {
             hf.as_mesh(),
             Vector3::ZERO,
             Quaternion::IDENTITY,
+            None,
         )
         .unwrap();
         let p = m.points[0];
@@ -167,6 +173,7 @@ mod tests {
             hf.as_mesh(),
             Vector3::ZERO,
             Quaternion::IDENTITY,
+            None,
         )
         .unwrap();
         assert!(m.points.len() <= 4);

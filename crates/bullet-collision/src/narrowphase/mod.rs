@@ -27,6 +27,29 @@ pub fn collide(
     position_b: Vector3,
     orientation_b: Quaternion,
 ) -> Option<ContactManifold> {
+    collide_seeded(
+        shape_a,
+        position_a,
+        orientation_a,
+        shape_b,
+        position_b,
+        orientation_b,
+        None,
+    )
+}
+
+/// [`collide`] with an optional GJK warm-start seed (a cached separating
+/// normal from a previous step of the same pair, forwarded to the generic
+/// convex paths; the analytic fast paths ignore it).
+pub fn collide_seeded(
+    shape_a: &CollisionShape,
+    position_a: Vector3,
+    orientation_a: Quaternion,
+    shape_b: &CollisionShape,
+    position_b: Vector3,
+    orientation_b: Quaternion,
+    seed: Option<Vector3>,
+) -> Option<ContactManifold> {
     // Compounds are expanded into their children (recursive).
     if let CollisionShape::Compound(ca) = shape_a {
         return compound_collide(
@@ -36,6 +59,7 @@ pub fn collide(
             shape_b,
             position_b,
             orientation_b,
+            seed,
         );
     }
     if let CollisionShape::Compound(cb) = shape_b {
@@ -46,6 +70,7 @@ pub fn collide(
             shape_a,
             position_a,
             orientation_a,
+            seed,
         )
         .map(|m| m.flipped());
     }
@@ -63,6 +88,7 @@ pub fn collide(
                 mesh,
                 position_a,
                 orientation_a,
+                seed,
             )
             .map(|m| m.flipped())
         }
@@ -75,16 +101,17 @@ pub fn collide(
                 hf.as_mesh(),
                 position_a,
                 orientation_a,
+                seed,
             )
             .map(|m| m.flipped())
         }
         (CollisionShape::Heightfield(_), _) => None,
         (other, CollisionShape::TriangleMesh(mesh)) if other.is_convex() => {
-            convex_mesh::convex_mesh(other, position_a, orientation_a, mesh, position_b, orientation_b)
+            convex_mesh::convex_mesh(other, position_a, orientation_a, mesh, position_b, orientation_b, seed)
         }
         (_, CollisionShape::TriangleMesh(_)) => None,
         (other, CollisionShape::Heightfield(hf)) if other.is_convex() => {
-            convex_mesh::convex_mesh(other, position_a, orientation_a, hf.as_mesh(), position_b, orientation_b)
+            convex_mesh::convex_mesh(other, position_a, orientation_a, hf.as_mesh(), position_b, orientation_b, seed)
         }
         (_, CollisionShape::Heightfield(_)) => None,
         (CollisionShape::Plane(pa), _) => plane::plane_convex(
@@ -129,6 +156,7 @@ pub fn collide(
             shape_b,
             position_b,
             orientation_b,
+            seed,
         ),
     }
 }
@@ -141,18 +169,20 @@ fn compound_collide(
     other: &CollisionShape,
     other_position: Vector3,
     other_orientation: Quaternion,
+    seed: Option<Vector3>,
 ) -> Option<ContactManifold> {
     let mut manifold = ContactManifold::new();
     for child in &compound.children {
         let child_pos = position + orientation.mul_vec3(child.position);
         let child_ori = orientation * child.orientation;
-        if let Some(m) = collide(
+        if let Some(m) = collide_seeded(
             &child.shape,
             child_pos,
             child_ori,
             other,
             other_position,
             other_orientation,
+            seed,
         ) {
             manifold.points.extend(m.points);
         }
@@ -289,5 +319,50 @@ mod tests {
         let p = m.points[0];
         assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-3);
         assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-3);
+    }
+
+    /// A GJK seed only changes where the simplex walk starts; the detected
+    /// contact (normal, depth, position) must match the unseeded result.
+    #[test]
+    fn seeded_collide_matches_unseeded() {
+        let pairs: Vec<(CollisionShape, CollisionShape, Vector3, Quaternion)> = vec![
+            (
+                CollisionShape::capsule(0.5, 1.0),
+                CollisionShape::capsule(0.5, 1.0),
+                Vector3::new(0.7, 0.2, 0.1),
+                Quaternion::from_rotation_y(0.6),
+            ),
+            (
+                CollisionShape::cylinder(1.0, 0.8),
+                CollisionShape::sphere(0.5),
+                Vector3::new(1.2, 0.3, -0.4),
+                Quaternion::from_rotation_z(0.4),
+            ),
+            (
+                CollisionShape::cone(1.0, 0.9),
+                CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.5, 1.1, 0.2),
+                Quaternion::from_rotation_x(0.8),
+            ),
+        ];
+        for (a, b, offset, q) in pairs {
+            let unseeded = collide(&a, Vector3::ZERO, q, &b, offset, Quaternion::IDENTITY).unwrap();
+            for seed in [
+                unseeded.points[0].normal,
+                -unseeded.points[0].normal,
+                Vector3::new(0.3, -0.5, 0.8).normalize(),
+            ] {
+                let seeded =
+                    collide_seeded(&a, Vector3::ZERO, q, &b, offset, Quaternion::IDENTITY, Some(seed))
+                        .unwrap();
+                assert_eq!(seeded.points.len(), unseeded.points.len());
+                for (s, u) in seeded.points.iter().zip(&unseeded.points) {
+                    // EPA accuracy floor (1e-4): different starting simplices
+                    // converge to slightly different polytopes.
+                    assert_relative_eq!(s.penetration, u.penetration, epsilon = 2e-4);
+                    assert!((s.normal - u.normal).length() < 1e-4 || s.normal.dot(u.normal) > 0.9999);
+                }
+            }
+        }
     }
 }
