@@ -25,6 +25,7 @@
 #include <BulletDynamics/Featherstone/btMultiBodySphericalJointLimit.h>
 #include <BulletDynamics/Featherstone/btMultiBodySphericalJointMotor.h>
 #include <BulletDynamics/Featherstone/btMultiBodyJointFeedback.h>
+#include <BulletDynamics/Featherstone/btMultiBodySliderConstraint.h>
 
 static const btScalar DT = btScalar(1) / btScalar(60);
 static const int DEFAULT_FRAMES = 300;
@@ -695,11 +696,110 @@ static void scene_joint_feedback_contact(int frames)
 	}
 }
 
+// A fixed-base zero-link multibody acting as an immovable anchor at the
+// origin, plus a dynamic rigid sphere (mass 1, radius 0.1, analytic sphere
+// inertia — matching the Rust port's new_dynamic) at `pos`.
+static btRigidBody* addRigidBall(btMultiBodyDynamicsWorld* world, const btVector3& pos)
+{
+	btSphereShape* shape = new btSphereShape(btScalar(0.1));
+	btVector3 inertia(0, 0, 0);
+	shape->calculateLocalInertia(1, inertia);
+	btDefaultMotionState* ms = new btDefaultMotionState(
+		btTransform(btQuaternion(0, 0, 0, 1), pos));
+	btRigidBody::btRigidBodyConstructionInfo ci(1, ms, shape, inertia);
+	btRigidBody* ball = new btRigidBody(ci);
+	ball->setActivationState(DISABLE_DEACTIVATION);
+	world->addRigidBody(ball);
+	return ball;
+}
+
+// Scene 20 (mb-vs-rb p2p): the anchor holds a rigid ball through
+// btMultiBodyPoint2Point with the rigid body on side B; the ball hangs 1 m
+// below the anchor (pivot at its local (0,1,0)) and swings from a +X
+// velocity. Records the ball position and velocity.
+static void scene_p2p_rb(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	btMultiBody* anchor = new btMultiBody(0, 1, btVector3(1, 1, 1), true, false);
+	anchor->setLinearDamping(0);
+	anchor->setAngularDamping(0);
+	anchor->finalizeMultiDof();
+	world->addMultiBody(anchor);
+	addColliders(world, anchor);
+	btRigidBody* ball = addRigidBall(world, btVector3(0, -1, 0));
+	ball->setLinearVelocity(btVector3(1.5, 0, 0));
+	btMultiBodyPoint2Point* c = new btMultiBodyPoint2Point(anchor, -1, ball,
+		btVector3(0, 0, 0), btVector3(0, 1, 0));
+	world->addMultiBodyConstraint(c);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3& p = ball->getWorldTransform().getOrigin();
+		const btVector3& v = ball->getLinearVelocity();
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f\n", f, p[0], p[1], p[2], v[0], v[1], v[2]);
+	}
+}
+
+// Scene 21 (mb-vs-rb fixed): the anchor welds a rigid ball 2 m up the +Z
+// axis through btMultiBodyFixedConstraint (identity frames); gravity must
+// not move it. Records the ball position and velocity.
+static void scene_fixed_rb(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	btMultiBody* anchor = new btMultiBody(0, 1, btVector3(1, 1, 1), true, false);
+	anchor->setLinearDamping(0);
+	anchor->setAngularDamping(0);
+	anchor->finalizeMultiDof();
+	world->addMultiBody(anchor);
+	addColliders(world, anchor);
+	btRigidBody* ball = addRigidBall(world, btVector3(0, 0, 2));
+	btMultiBodyFixedConstraint* c = new btMultiBodyFixedConstraint(anchor, -1, ball,
+		btVector3(0, 0, 2), btVector3(0, 0, 0),
+		btMatrix3x3::getIdentity(), btMatrix3x3::getIdentity());
+	world->addMultiBodyConstraint(c);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3& p = ball->getWorldTransform().getOrigin();
+		const btVector3& v = ball->getLinearVelocity();
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f\n", f, p[0], p[1], p[2], v[0], v[1], v[2]);
+	}
+}
+
+// Scene 22 (mb-vs-rb slider): the anchor slides a rigid ball along +X
+// through btMultiBodySliderConstraint (identity frames, joint axis +X);
+// the ball starts 0.5 m out (clear of the anchor collider) with a +X
+// velocity and must neither fall nor leave the axis. Records the ball
+// position and velocity.
+static void scene_slider_rb(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	btMultiBody* anchor = new btMultiBody(0, 1, btVector3(1, 1, 1), true, false);
+	anchor->setLinearDamping(0);
+	anchor->setAngularDamping(0);
+	anchor->finalizeMultiDof();
+	world->addMultiBody(anchor);
+	addColliders(world, anchor);
+	btRigidBody* ball = addRigidBall(world, btVector3(0.5, 0, 0));
+	ball->setLinearVelocity(btVector3(1, 0, 0));
+	btMultiBodySliderConstraint* c = new btMultiBodySliderConstraint(anchor, -1, ball,
+		btVector3(0.5, 0, 0), btVector3(0, 0, 0),
+		btMatrix3x3::getIdentity(), btMatrix3x3::getIdentity(), btVector3(1, 0, 0));
+	world->addMultiBodyConstraint(c);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3& p = ball->getWorldTransform().getOrigin();
+		const btVector3& v = ball->getLinearVelocity();
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f\n", f, p[0], p[1], p[2], v[0], v[1], v[2]);
+	}
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s <free_base|pendulum|two_link|p2p|motor|fixed|prismatic|spherical|planar|gear|joint_limit|spherical_limit|spherical_motor|link_ground|base_ground|mb_pushes_rb|rb_hits_mb|mb_mb|self_collision|joint_feedback|joint_feedback_contact> [frames]\n", argv[0]);
+		fprintf(stderr, "usage: %s <free_base|pendulum|two_link|p2p|motor|fixed|prismatic|spherical|planar|gear|joint_limit|spherical_limit|spherical_motor|link_ground|base_ground|mb_pushes_rb|rb_hits_mb|mb_mb|self_collision|joint_feedback|joint_feedback_contact|p2p_rb|fixed_rb|slider_rb> [frames]\n", argv[0]);
 		return 1;
 	}
 	const char* scene = argv[1];
@@ -746,6 +846,12 @@ int main(int argc, char** argv)
 		scene_joint_feedback(frames);
 	else if (!strcmp(scene, "joint_feedback_contact"))
 		scene_joint_feedback_contact(frames);
+	else if (!strcmp(scene, "p2p_rb"))
+		scene_p2p_rb(frames);
+	else if (!strcmp(scene, "fixed_rb"))
+		scene_fixed_rb(frames);
+	else if (!strcmp(scene, "slider_rb"))
+		scene_slider_rb(frames);
 	else
 	{
 		fprintf(stderr, "unknown scene %s\n", scene);

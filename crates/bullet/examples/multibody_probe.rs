@@ -7,11 +7,12 @@
 //! with scene in {free_base, pendulum, two_link, p2p, motor, fixed,
 //! prismatic, spherical, planar, gear, joint_limit, spherical_limit,
 //! spherical_motor, link_ground, base_ground, mb_pushes_rb, rb_hits_mb,
-//! mb_mb, self_collision, joint_feedback, joint_feedback_contact}.
+//! mb_mb, self_collision, joint_feedback, joint_feedback_contact, p2p_rb,
+//! fixed_rb, slider_rb}.
 
 use bullet::dynamics::multibody::constraint::MultiBodyConstraint;
 use bullet::dynamics::{MultiBody, PhysicsWorld, RigidBody};
-use bullet::math::{Quaternion, Real, Vector3};
+use bullet::math::{Matrix3, Quaternion, Real, Vector3};
 use bullet::shapes::CollisionShape;
 
 fn main() {
@@ -41,6 +42,9 @@ fn main() {
         "self_collision" => scene_self_collision(dt, frames),
         "joint_feedback" => scene_joint_feedback(dt, frames),
         "joint_feedback_contact" => scene_joint_feedback_contact(dt, frames),
+        "p2p_rb" => scene_p2p_rb(dt, frames),
+        "fixed_rb" => scene_fixed_rb(dt, frames),
+        "slider_rb" => scene_slider_rb(dt, frames),
         other => {
             eprintln!("unknown scene {other}");
             std::process::exit(1);
@@ -781,5 +785,106 @@ fn scene_joint_feedback_contact(dt: Real, frames: usize) {
             fb.bottom.y,
             fb.bottom.z
         );
+    }
+}
+
+/// A fixed-base zero-link multibody acting as an immovable anchor at the
+/// origin (with a 0.1 m base collider, like the C++ probe), plus a dynamic
+/// rigid sphere at `pos` (mass 1, radius 0.1, analytic sphere inertia).
+fn anchor_and_ball(world: &mut PhysicsWorld, pos: Vector3) -> (usize, usize) {
+    let mut anchor = MultiBody::new(0, 1.0, Vector3::ONE, true, false);
+    anchor.set_linear_damping(0.0);
+    anchor.set_angular_damping(0.0);
+    anchor.finalize_multidof();
+    anchor.set_base_collider(CollisionShape::sphere(0.1), 0.5, 0.0);
+    let ia = world.add_multibody(anchor);
+    let rb = world.add_body(
+        RigidBody::new_dynamic(CollisionShape::sphere(0.1), pos, 1.0).disable_deactivation(),
+    );
+    (ia, rb)
+}
+
+/// Scene 20 (mb-vs-rb p2p): the anchor holds a rigid ball through a
+/// point-to-point constraint with the rigid body on side B; the ball hangs
+/// 1 m below the anchor (pivot at its local (0,1,0)) and swings from a +X
+/// velocity. Records the ball position and velocity.
+fn scene_p2p_rb(dt: Real, frames: usize) {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    let (ia, rb) = anchor_and_ball(&mut world, Vector3::new(0.0, -1.0, 0.0));
+    world.body_mut(rb).linear_velocity = Vector3::new(1.5, 0.0, 0.0);
+    let snapshot = world.multibodies().to_vec();
+    let c = MultiBodyConstraint::point2point_to_rigid(
+        ia,
+        None,
+        rb,
+        Vector3::ZERO,
+        Vector3::new(0.0, 1.0, 0.0),
+        &snapshot,
+    );
+    world.add_multibody_constraint(c);
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let p = world.body(rb).position;
+        let v = world.body(rb).linear_velocity;
+        println!("{f} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}", p.x, p.y, p.z, v.x, v.y, v.z);
+    }
+}
+
+/// Scene 21 (mb-vs-rb fixed): the anchor welds a rigid ball 2 m up the +Z
+/// axis through a fixed constraint (identity frames); gravity must not
+/// move it. Records the ball position and velocity.
+fn scene_fixed_rb(dt: Real, frames: usize) {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    let (ia, rb) = anchor_and_ball(&mut world, Vector3::new(0.0, 0.0, 2.0));
+    let snapshot = world.multibodies().to_vec();
+    let c = MultiBodyConstraint::fixed_to_rigid(
+        ia,
+        None,
+        rb,
+        Vector3::new(0.0, 0.0, 2.0),
+        Vector3::ZERO,
+        Matrix3::IDENTITY,
+        Matrix3::IDENTITY,
+        &snapshot,
+    );
+    world.add_multibody_constraint(c);
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let p = world.body(rb).position;
+        let v = world.body(rb).linear_velocity;
+        println!("{f} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}", p.x, p.y, p.z, v.x, v.y, v.z);
+    }
+}
+
+/// Scene 22 (mb-vs-rb slider): the anchor slides a rigid ball along +X
+/// through a slider constraint (identity frames, joint axis +X); the ball
+/// starts 0.5 m out (clear of the anchor collider) with a +X velocity and
+/// must neither fall nor leave the axis. Records the ball position and
+/// velocity.
+fn scene_slider_rb(dt: Real, frames: usize) {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    let (ia, rb) = anchor_and_ball(&mut world, Vector3::new(0.5, 0.0, 0.0));
+    world.body_mut(rb).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+    let snapshot = world.multibodies().to_vec();
+    let c = MultiBodyConstraint::slider_to_rigid(
+        ia,
+        None,
+        rb,
+        Vector3::new(0.5, 0.0, 0.0),
+        Vector3::ZERO,
+        Matrix3::IDENTITY,
+        Matrix3::IDENTITY,
+        Vector3::X,
+        &snapshot,
+    );
+    world.add_multibody_constraint(c);
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let p = world.body(rb).position;
+        let v = world.body(rb).linear_velocity;
+        println!("{f} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}", p.x, p.y, p.z, v.x, v.y, v.z);
     }
 }
