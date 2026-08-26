@@ -982,7 +982,14 @@ impl PhysicsWorld {
             }
         }
 
-        self.mb_writeback_rows();
+        self.mb_writeback_rows(dt);
+        // Joint feedback constraint pass (see `solve_mixed`); no-op unless a
+        // link carries a feedback slot.
+        for mb in &mut self.multibodies {
+            if mb.is_awake() && mb.needs_joint_feedback() {
+                mb.compute_accelerations_aba(dt, &mut self.mb_scratch, true);
+            }
+        }
         // Flush any split-impulse deltas (no-op unless split impulses are
         // used; kept for fidelity with `solveInternalConstraints`).
         for mb in &mut self.multibodies {
@@ -1090,7 +1097,17 @@ impl PhysicsWorld {
             } = self;
             contact::writeback_contact_rows(mb_contact_rows, data, multibodies, 1.0 / inv_dt);
         }
-        self.mb_writeback_rows();
+        self.mb_writeback_rows(1.0 / inv_dt);
+        // Joint feedback: when any link carries a feedback slot, rerun the
+        // articulated-body algorithm on the accumulated constraint forces so
+        // the feedback reports the solver contribution too (Bullet's
+        // `solveInternalConstraints` constraint pass). The pass only reads
+        // accelerations — velocities were already integrated above.
+        for mb in &mut self.multibodies {
+            if mb.is_awake() && mb.needs_joint_feedback() {
+                mb.compute_accelerations_aba(1.0 / inv_dt, &mut self.mb_scratch, true);
+            }
+        }
         for mb in &mut self.multibodies {
             mb.process_delta_vee_2();
         }
@@ -1114,7 +1131,7 @@ impl PhysicsWorld {
     /// Write the accumulated constraint impulses back into the constraints
     /// and the generalized velocities (Bullet's
     /// `writeBackSolverBodyToMultiBody`).
-    fn mb_writeback_rows(&mut self) {
+    fn mb_writeback_rows(&mut self, dt: Real) {
         for row in &self.mb_rows {
             self.mb_constraints[row.org_constraint]
                 .set_applied_impulse(row.org_dof_index, row.applied_impulse);
@@ -1129,8 +1146,34 @@ impl PhysicsWorld {
                 .to_vec();
             let mb = &mut self.multibodies[row.multi_body_a];
             mb.apply_delta_vee(&unit_a, imp);
+            // Accumulate the row impulse as a constraint force for the joint
+            // feedback (Bullet's `writeBackSolverBodyToMultiBody`).
+            let force_a = row.contact_normal1 * (imp / dt);
+            let torque_a = row.rel_pos1_cross_normal * (imp / dt);
+            match row.link_a {
+                None => {
+                    mb.add_base_constraint_force(force_a);
+                    mb.add_base_constraint_torque(torque_a);
+                }
+                Some(l) => {
+                    mb.add_link_constraint_force(l, force_a);
+                    mb.add_link_constraint_torque(l, torque_a);
+                }
+            }
             let mb = &mut self.multibodies[row.multi_body_b];
             mb.apply_delta_vee(&unit_b, imp);
+            let force_b = row.contact_normal2 * (imp / dt);
+            let torque_b = row.rel_pos2_cross_normal * (imp / dt);
+            match row.link_b {
+                None => {
+                    mb.add_base_constraint_force(force_b);
+                    mb.add_base_constraint_torque(torque_b);
+                }
+                Some(l) => {
+                    mb.add_link_constraint_force(l, force_b);
+                    mb.add_link_constraint_torque(l, torque_b);
+                }
+            }
         }
     }
 

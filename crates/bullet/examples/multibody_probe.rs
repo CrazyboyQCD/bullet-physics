@@ -7,7 +7,7 @@
 //! with scene in {free_base, pendulum, two_link, p2p, motor, fixed,
 //! prismatic, spherical, planar, gear, joint_limit, spherical_limit,
 //! spherical_motor, link_ground, base_ground, mb_pushes_rb, rb_hits_mb,
-//! mb_mb, self_collision}.
+//! mb_mb, self_collision, joint_feedback, joint_feedback_contact}.
 
 use bullet::dynamics::multibody::constraint::MultiBodyConstraint;
 use bullet::dynamics::{MultiBody, PhysicsWorld, RigidBody};
@@ -39,6 +39,8 @@ fn main() {
         "rb_hits_mb" => scene_rb_hits_mb(dt, frames),
         "mb_mb" => scene_mb_mb(dt, frames),
         "self_collision" => scene_self_collision(dt, frames),
+        "joint_feedback" => scene_joint_feedback(dt, frames),
+        "joint_feedback_contact" => scene_joint_feedback_contact(dt, frames),
         other => {
             eprintln!("unknown scene {other}");
             std::process::exit(1);
@@ -693,5 +695,91 @@ fn scene_self_collision(dt: Real, frames: usize) {
                 body.joint_pos_multidof(2)[0]
             );
         }
+    }
+}
+
+/// Phase E joint feedback: a fixed-base single-link revolute pendulum
+/// released from the horizontal with a joint feedback slot on the link;
+/// records the joint state and the reaction force/torque in the link frame
+/// (the defaults). No contacts — the constraint pass adds ~zero.
+fn scene_joint_feedback(dt: Real, frames: usize) {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    let mut mb = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+    mb.setup_revolute(
+        0,
+        1.0,
+        Vector3::ONE,
+        None,
+        Quaternion::IDENTITY,
+        Vector3::Z,
+        Vector3::ZERO,
+        Vector3::new(1.0, 0.0, 0.0),
+    );
+    mb.finalize_multidof();
+    mb.enable_link_joint_feedback(0);
+    world.add_multibody(mb);
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let body = world.multibody(0);
+        let fb = body.link_joint_feedback(0).expect("feedback enabled");
+        println!(
+            "{f} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
+            body.joint_pos_multidof(0)[0],
+            body.joint_vel_multidof(0)[0],
+            fb.top.x,
+            fb.top.y,
+            fb.top.z,
+            fb.bottom.x,
+            fb.bottom.y,
+            fb.bottom.z
+        );
+    }
+}
+
+/// Phase E joint feedback + contact: a link-ground-style pendulum with a
+/// feedback slot; records the joint state and reaction force/torque through
+/// the ground impact and settle (the constraint pass accumulation of the
+/// contact support). The pivot sits 1.05 m up so the sphere (r = 0.3, COM
+/// 1 m below the pivot) first touches the ground at a ~41 degree lean — a
+/// well-conditioned contact (the 1.25 m pivot settles at a ~16 degree lean
+/// where the normal-friction coupling is near-singular and the solver
+/// impulses inflate in both engines).
+fn scene_joint_feedback_contact(dt: Real, frames: usize) {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    add_ground_box(&mut world);
+    let mut mb = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+    mb.setup_revolute(
+        0,
+        1.0,
+        Vector3::ONE,
+        None,
+        Quaternion::IDENTITY,
+        Vector3::Z,
+        Vector3::ZERO,
+        Vector3::new(0.0, -1.0, 0.0),
+    );
+    mb.finalize_multidof();
+    mb.set_joint_pos_multidof(0, &[bullet::math::FRAC_PI_2]);
+    mb.base_pos = Vector3::new(0.0, 1.05, 0.0);
+    mb.set_link_collider(0, CollisionShape::sphere(0.3), 0.0, 0.0);
+    mb.enable_link_joint_feedback(0);
+    world.add_multibody(mb);
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let body = world.multibody(0);
+        let fb = body.link_joint_feedback(0).expect("feedback enabled");
+        println!(
+            "{f} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
+            body.joint_pos_multidof(0)[0],
+            body.joint_vel_multidof(0)[0],
+            fb.top.x,
+            fb.top.y,
+            fb.top.z,
+            fb.bottom.x,
+            fb.bottom.y,
+            fb.bottom.z
+        );
     }
 }

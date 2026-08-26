@@ -844,3 +844,35 @@ Bullet's delta-velocity pools (`m_deltaLinearVelocity` /
 `m_deltaVelocities`). Regression test: `rb_mb_contact_impulse_not_doubled`
 (equal-mass head-on converges to the shared inelastic velocity).
 
+## Multibody joint-feedback probes (2026-08-26, phase E)
+
+`btMultiBodyJointFeedback` port scenes, same tooling as the collider probes
+(`joint_feedback` / `joint_feedback_contact`, f32 + f64):
+
+| Scene | Result | Classification |
+|---|---|---|
+| joint_feedback (fixed-base pendulum released from the horizontal, feedback on the link, no contacts) | free-swing phase (first ~35 frames) **bit-identical f32**; over the full 300 frames the max column deviation is 1.2e-5 (f64: 294/300 frames bit-identical, max 1e-6) | printing-precision class — the external-force pass (`=` write), the constraint pass (`+=` on solver forces) and both solver-info frame options reproduce Bullet's `Î·â + ẑ` reaction exactly |
+| joint_feedback_contact (same pendulum swinging into the ground, frictionless sphere, pivot 1.05 m so the first touch is a ~41° lean) | free swing identical; first divergence at the impact frame (36) — spike magnitudes within 4% ((−166, −386) vs (−172, −399)), same sign, then both sides decay and converge to **zero joint reaction at rest** (exact statics, f32 and f64) | impact-transient + slop class: Bullet's margin contact fires one frame earlier with a slightly different impulse; our resting λ carries the engine-wide slop-0.005 separation drive (documented rigid deviation) which shows up as a slightly different transient decay, not a steady-state offset |
+
+Scene geometry note: the original link_ground pivot (1.25 m, ~16° settle lean)
+makes the sphere-on-plane contact **near-singular** — the normal and friction
+rows couple through the single joint DOF with an almost-degenerate 2×2 system
+and the solver impulses inflate in *both* engines (measured: Bullet's resting
+λ ≈ 8x, ours ≈ 25x the equilibrium value). The feedback probe therefore uses
+the 41° pivot and friction 0, where both engines converge to the physical
+statics.
+
+### Implementation problem found and fixed
+
+**Mirrored feedback force in the contact writeback.** The per-link/base
+constraint-force accumulation copied Bullet's
+`writeBackSolverBodyToMultiBody` formula (`force = m_contactNormal2 · λ/dt`)
+verbatim, but Bullet's manifold normal points B→A while ours points A→B — the
+accumulated wrench was sign-flipped, so the constraint-pass reaction opposed
+Bullet's (impact spikes +700 vs −824; the frictionless rest settled at
+(6.4, 14.8) N instead of ~0). The impulse application itself (the delta pool)
+was unaffected — only the reported force was wrong. Fixed by accumulating the
+*physical* contact force per side (A along `−normal`, B along `+normal`,
+matching torque flips) in `writeback_contact_rows`; after the fix the resting
+reaction converges to exact statics like Bullet's.
+

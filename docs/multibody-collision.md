@@ -224,9 +224,20 @@ in the first landing; recorded as not-implemented).
   for both rigid bodies and multibodies (detailed design §9; the solve stays
   one batch). Acceptance: sleeping scene parity unchanged; wake-up
   propagation tests updated to island semantics.
-- **Phase E — optional follow-ups.** Articulated warm starting,
+- **Phase E — optional follow-ups.** ~~Articulated warm starting,
   `btMultiBodyJointFeedback` (consumes the constraint-force bookkeeping),
-  CCD for link colliders.
+  CCD for link colliders~~ Done 2026-08-26 for the joint feedback: per-link
+  feedback slots (`enable_link_joint_feedback`), the `Î·â + ẑ` reaction write
+  in the articulated-body algorithm's second upward loop (external pass `=`,
+  post-solve constraint pass `+=` on the accumulated solver forces — contact
+  rows and non-contact rows alike), and the world-space / joint-frame solver
+  options per body. Validated with two probe scenes (`joint_feedback`,
+  `joint_feedback_contact`, f32/f64 — see `docs/bullet-compare.md`); the
+  contact writeback's feedback-force signs follow our A→B normal convention
+  (Bullet's manifold normal is B→A — copying its formula verbatim mirrors the
+  reported wrench; found and fixed via the probe). Articulated warm starting
+  stays unported (off by default in Bullet) and link CCD is not implemented
+  (upstream has none either) — see `docs/bullet-deviations.md` §3.
 
 ## 7. Validation plan
 

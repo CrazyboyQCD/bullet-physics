@@ -24,6 +24,7 @@
 #include <BulletDynamics/Featherstone/btMultiBodyJointLimitConstraint.h>
 #include <BulletDynamics/Featherstone/btMultiBodySphericalJointLimit.h>
 #include <BulletDynamics/Featherstone/btMultiBodySphericalJointMotor.h>
+#include <BulletDynamics/Featherstone/btMultiBodyJointFeedback.h>
 
 static const btScalar DT = btScalar(1) / btScalar(60);
 static const int DEFAULT_FRAMES = 300;
@@ -408,11 +409,11 @@ static void addGroundBox(btMultiBodyDynamicsWorld* world)
 // DefaultFilter group like the official demos — the addCollisionObject
 // default (StaticFilter) never pairs against static geometry (whose mask
 // excludes Static), silently disabling the collision.
-static void attachSphere(btMultiBodyDynamicsWorld* world, btMultiBody* body, int link, btScalar radius)
+static void attachSphere(btMultiBodyDynamicsWorld* world, btMultiBody* body, int link, btScalar radius, btScalar friction = btScalar(0.5))
 {
 	btMultiBodyLinkCollider* col = new btMultiBodyLinkCollider(body, link);
 	col->setCollisionShape(new btSphereShape(radius));
-	col->setFriction(btScalar(0.5));
+	col->setFriction(friction);
 	col->setWorldTransform(link < 0 ? body->getBaseWorldTransform()
 									: body->getLink(link).m_cachedWorldTransform);
 	bool is_dynamic = link >= 0 || !body->hasFixedBase();
@@ -631,11 +632,74 @@ static void scene_self_collision(int frames)
 	}
 }
 
+// Scene 20 (phase E joint feedback): a fixed-base single-link revolute
+// pendulum released from the horizontal with a joint feedback slot on the
+// link; records the joint state and the reaction force/torque in the link
+// frame (the solver-info defaults). Exercises the external-force pass
+// write (`=`) — no contacts, so the constraint pass adds ~zero.
+static void scene_joint_feedback(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	btMultiBody* body = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	body->setupRevolute(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+						btVector3(0, 0, 1), btVector3(0, 0, 0), btVector3(1, 0, 0));
+	body->finalizeMultiDof();
+	world->addMultiBody(body);
+	addColliders(world, body);
+	static btMultiBodyJointFeedback feedback;
+	body->getLink(0).m_jointFeedback = &feedback;
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btSpatialForceVector& r = feedback.m_reactionForces;
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n", f,
+			   body->getJointPos(0), body->getJointVel(0),
+			   r.m_topVec[0], r.m_topVec[1], r.m_topVec[2],
+			   r.m_bottomVec[0], r.m_bottomVec[1], r.m_bottomVec[2]);
+	}
+}
+
+// Scene 21 (phase E joint feedback + contact): a link-ground-style pendulum
+// with a feedback slot; records the joint state and reaction force/torque
+// through the ground impact and settle. Exercises the constraint pass
+// accumulation (`+=`) of the contact support on top of the external-force
+// write. The pivot sits 1.05 m up so the sphere (r = 0.3, COM 1 m below the
+// pivot) first touches the ground at a ~41 degree lean — a well-conditioned
+// contact (the default 1.25 m pivot settles at a ~16 degree lean where the
+// normal-friction coupling is near-singular and the solver impulses inflate
+// in both engines).
+static void scene_joint_feedback_contact(int frames)
+{
+	btMultiBodyDynamicsWorld* world = makeWorld();
+	addGroundBox(world);
+	btMultiBody* body = new btMultiBody(1, 1, btVector3(1, 1, 1), true, false);
+	body->setupRevolute(0, 1, btVector3(1, 1, 1), -1, btQuaternion(0, 0, 0, 1),
+						btVector3(0, 0, 1), btVector3(0, 0, 0), btVector3(0, -1, 0));
+	body->finalizeMultiDof();
+	btScalar q = SIMD_HALF_PI;
+	body->setJointPosMultiDof(0, &q);
+	body->setBasePos(btVector3(0, btScalar(1.05), 0));
+	refreshFk(body);
+	world->addMultiBody(body);
+	attachSphere(world, body, 0, btScalar(0.3), btScalar(0));
+	static btMultiBodyJointFeedback feedback;
+	body->getLink(0).m_jointFeedback = &feedback;
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btSpatialForceVector& r = feedback.m_reactionForces;
+		printf("%d %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n", f,
+			   body->getJointPos(0), body->getJointVel(0),
+			   r.m_topVec[0], r.m_topVec[1], r.m_topVec[2],
+			   r.m_bottomVec[0], r.m_bottomVec[1], r.m_bottomVec[2]);
+	}
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s <free_base|pendulum|two_link|p2p|motor|fixed|prismatic|spherical|planar|gear|joint_limit|spherical_limit|spherical_motor|link_ground|base_ground|mb_pushes_rb|rb_hits_mb|mb_mb|self_collision> [frames]\n", argv[0]);
+		fprintf(stderr, "usage: %s <free_base|pendulum|two_link|p2p|motor|fixed|prismatic|spherical|planar|gear|joint_limit|spherical_limit|spherical_motor|link_ground|base_ground|mb_pushes_rb|rb_hits_mb|mb_mb|self_collision|joint_feedback|joint_feedback_contact> [frames]\n", argv[0]);
 		return 1;
 	}
 	const char* scene = argv[1];
@@ -678,6 +742,10 @@ int main(int argc, char** argv)
 		scene_mb_mb(frames);
 	else if (!strcmp(scene, "self_collision"))
 		scene_self_collision(frames);
+	else if (!strcmp(scene, "joint_feedback"))
+		scene_joint_feedback(frames);
+	else if (!strcmp(scene, "joint_feedback_contact"))
+		scene_joint_feedback_contact(frames);
 	else
 	{
 		fprintf(stderr, "unknown scene %s\n", scene);

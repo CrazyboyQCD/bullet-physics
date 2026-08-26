@@ -7,7 +7,9 @@
 //! origin is the link's center of mass (COM), which keeps the spatial inertia
 //! block-diagonal.
 
-use bullet_math::{Quaternion, Real, SpatialMotionVector, Transform, Vector3};
+use bullet_math::{
+    Quaternion, Real, SpatialForceVector, SpatialMotionVector, Transform, Vector3,
+};
 
 /// Link flags (Bullet's `btMultiBodyLinkFlags`). Parent-collision flags are
 /// honored by the collision layer; this crate's multibody subsystem does not
@@ -93,6 +95,13 @@ pub struct MultiBodyLink {
     /// ancestors including the base (Bullet's
     /// `BT_MULTIBODYLINKFLAGS_DISABLE_ALL_PARENT_COLLISION`).
     pub disable_all_parent_collision: bool,
+    /// Joint reaction-force feedback (Bullet's `m_jointFeedback`, default
+    /// null). Written by the articulated-body algorithm: the external-force
+    /// pass stores (`=`) its reaction, the post-solve constraint pass adds
+    /// (`+=`) the constraint contribution. `top` = linear force,
+    /// `bottom` = angular torque, in the link frame unless the body's
+    /// world-space / joint-frame flags redirect it.
+    pub joint_feedback: Option<SpatialForceVector>,
 }
 
 impl Default for MultiBodyLink {
@@ -123,6 +132,7 @@ impl Default for MultiBodyLink {
             cached_world_transform: Transform::IDENTITY,
             disable_parent_collision: false,
             disable_all_parent_collision: false,
+            joint_feedback: None,
         }
     }
 }

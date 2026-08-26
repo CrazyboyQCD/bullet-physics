@@ -584,8 +584,12 @@ pub(crate) fn solve_contact_rows(
 /// `writeBackSolverBodyToMultiBody`): each multibody side applies its
 /// unit-impulse response scaled by the accumulated impulse (with the
 /// `±maxCoordinateVelocity` clamp of `apply_delta_vee`), and the impulse is
-/// accumulated into the per-link/base constraint forces for later joint
-/// feedback (nothing consumes them yet, like our other constraint forces).
+/// accumulated into the per-link/base constraint forces consumed by the
+/// joint feedback constraint pass. Unlike Bullet (whose manifold normal
+/// points B→A), our `row.normal` points A→B, so the physical contact force
+/// pushes side A along `−normal` and side B along `+normal` (the stored
+/// `rel_pos_a` / `rel_pos_b` are pre-crossed with `normal`, hence the
+/// matching sign flips on the torques).
 pub(crate) fn writeback_contact_rows(
     rows: &[MbContactRow],
     data: &SolverData,
@@ -596,8 +600,8 @@ pub(crate) fn writeback_contact_rows(
         if row.applied_impulse == 0.0 {
             continue;
         }
-        let (n_a, t_a) = (row.normal, row.rel_pos_a);
-        let (n_b, t_b) = (-row.normal, row.rel_pos_b);
+        let (n_a, t_a) = (-row.normal, -row.rel_pos_a);
+        let (n_b, t_b) = (row.normal, -row.rel_pos_b);
         apply_side_writeback(&row.data_a, row.side_a, data, multibodies, row.applied_impulse, n_a, t_a, dt);
         apply_side_writeback(&row.data_b, row.side_b, data, multibodies, row.applied_impulse, n_b, t_b, dt);
     }

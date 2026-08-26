@@ -481,3 +481,141 @@ fn spherical_joint_motor_returns_to_identity() {
         "spherical motor did not return the joint to identity: {min_swing}"
     );
 }
+
+/// A fixed-base pendulum released from the horizontal reports the
+/// instantaneous joint reaction through its feedback slot (Bullet's
+/// `btMultiBodyJointFeedback`): `Î·â + ẑ` in the link frame. With
+/// m = 1, L = 1, I = 1: q̈ = −m·g·L/(I + m·L²) = −g/2, so the reaction
+/// force is m·g + m·q̈·(ẑ×d) = g/2 along +Y and the torque about the link
+/// COM is I·q̈ = −g/2 along the joint axis.
+#[test]
+fn joint_feedback_released_pendulum_reaction() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    let mut mb = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+    mb.setup_revolute(
+        0,
+        1.0,
+        Vector3::ONE,
+        None,
+        Quaternion::IDENTITY,
+        Vector3::Z,
+        Vector3::ZERO,
+        Vector3::new(1.0, 0.0, 0.0),
+    );
+    mb.finalize_multidof();
+    mb.enable_link_joint_feedback(0);
+    // Released from rest with the COM horizontal (+X, gravity −Y); the
+    // link frame coincides with the world frame at q = 0.
+    world.add_multibody(mb);
+    world.step_simulation(1.0 / 60.0);
+    let fb = world
+        .multibody(0)
+        .link_joint_feedback(0)
+        .expect("feedback enabled");
+    // Reaction force: m·g·ŷ + m·q̈·(ẑ×d) with q̈ = −g/2 → g/2 = 4.905.
+    assert_close(fb.top.y, 4.905, 5.0e-2);
+    assert!(fb.top.x.abs() < 1e-3 && fb.top.z.abs() < 1e-3, "force = {:?}", fb.top);
+    // Torque about the link COM: I·q̈ = −4.905 along the joint axis Z.
+    assert_close(fb.bottom.z, -4.905, 5.0e-2);
+    assert!(
+        fb.bottom.x.abs() < 1e-3 && fb.bottom.y.abs() < 1e-3,
+        "torque = {:?}",
+        fb.bottom
+    );
+}
+
+/// The world-space flag reports the reaction rotated into the world frame:
+/// with the base rotated 90° about Y, the released horizontal pendulum's
+/// link-frame torque (along Z, −g/2) appears along X in the world, while
+/// the reaction force stays along Y.
+#[test]
+fn joint_feedback_world_space_rotation() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    let mut mb = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+    mb.setup_revolute(
+        0,
+        1.0,
+        Vector3::ONE,
+        None,
+        Quaternion::IDENTITY,
+        Vector3::Z,
+        Vector3::ZERO,
+        Vector3::new(1.0, 0.0, 0.0),
+    );
+    mb.finalize_multidof();
+    // Base rotated 90° about Y: the COM still starts horizontal (along −Z in
+    // the world), and the link-frame Z axis points along world X.
+    mb.base_quat = Quaternion::from_axis_angle(Vector3::Y, bullet_math::FRAC_PI_2);
+    mb.set_joint_pos_multidof(0, &[0.0]);
+    mb.enable_link_joint_feedback(0);
+    mb.set_joint_feedback_in_world_space(true);
+    world.add_multibody(mb);
+    world.step_simulation(1.0 / 60.0);
+    let fb = world
+        .multibody(0)
+        .link_joint_feedback(0)
+        .expect("feedback enabled");
+    // The reaction force is (0, g/2, 0) in both frames (Y invariant under
+    // the base rotation).
+    assert_close(fb.top.y, 4.905, 5.0e-2);
+    // Link-frame torque (0, 0, −g/2) rotated into the world: along ±X, not Z.
+    assert_close(fb.bottom.x.abs(), 4.905, 5.0e-2);
+    assert!(fb.bottom.z.abs() < 1e-3, "world-space torque = {:?}", fb.bottom);
+}
+
+/// A link sphere resting on the ground reports the contact support through
+/// its joint feedback (the constraint pass contribution): the total force
+/// balances gravity (≈ m·g) and the torque about the pivot vanishes, both
+/// because the constraint forces are accumulated and the articulated-body
+/// algorithm is rerun on them after the solve.
+#[test]
+fn joint_feedback_includes_contact_support() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    world.add_body(crate::body::RigidBody::new_static(
+        bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+        Vector3::ZERO,
+    ));
+    let mut mb = MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+    mb.setup_revolute(
+        0,
+        1.0,
+        Vector3::ONE,
+        None,
+        Quaternion::IDENTITY,
+        Vector3::Z,
+        Vector3::ZERO,
+        Vector3::new(0.0, -1.0, 0.0),
+    );
+    mb.finalize_multidof();
+    mb.set_link_collider(
+        0,
+        bullet_collision::shapes::CollisionShape::sphere(0.5),
+        0.5,
+        0.0,
+    );
+    // Pivot 1.51 m up so the sphere starts slightly inside the plane (same
+    // setup as `link_sphere_rests_on_ground`).
+    mb.base_pos = Vector3::new(0.0, 1.51, 0.0);
+    mb.enable_link_joint_feedback(0);
+    world.add_multibody(mb);
+    let dt = 1.0 / 60.0;
+    for _ in 0..240 {
+        world.step_simulation(dt);
+    }
+    let fb = world
+        .multibody(0)
+        .link_joint_feedback(0)
+        .expect("feedback enabled");
+    // Settled hanging straight down: the joint carries the weight.
+    assert_close(fb.top.y, 9.81, 0.5);
+    // The force acts through the pivot arm (0,−1,0): the moment about the
+    // link COM is r × (0,mg,0) = 0.
+    assert!(
+        fb.bottom.length() < 0.3,
+        "pivot torque did not vanish: {:?}",
+        fb.bottom
+    );
+}

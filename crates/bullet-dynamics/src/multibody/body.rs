@@ -151,6 +151,16 @@ pub struct MultiBody {
     max_applied_impulse: Real,
     max_coordinate_velocity: Real,
     has_self_collision: bool,
+    /// Report joint reaction forces in the world frame instead of the link
+    /// frame (Bullet's `m_jointFeedbackInWorldSpace`, default false).
+    joint_feedback_in_world_space: bool,
+    /// Report the torque about the joint frame instead of the link COM frame
+    /// (Bullet's `m_jointFeedbackInJointFrame`, default false).
+    joint_feedback_in_joint_frame: bool,
+    /// Set by the last articulated-body pass when any link carries a joint
+    /// feedback slot; the world runs the constraint pass when set (Bullet's
+    /// `m_internalNeedsJointFeedback`).
+    needs_joint_feedback: bool,
     /// Collider on the base (Bullet's base `btMultiBodyLinkCollider`).
     base_collider: Option<LinkCollider>,
     /// Colliders on the links, parallel to `links` (Bullet's per-link
@@ -201,6 +211,9 @@ impl MultiBody {
             max_applied_impulse: 1000.0,
             max_coordinate_velocity: 100.0,
             has_self_collision: true,
+            joint_feedback_in_world_space: false,
+            joint_feedback_in_joint_frame: false,
+            needs_joint_feedback: false,
             base_collider: None,
             link_colliders: vec![None; n_links],
             pos_updated: false,
@@ -856,6 +869,8 @@ impl MultiBody {
         let k1_ang = self.angular_damping;
         let k2_ang = self.angular_damping;
 
+        self.needs_joint_feedback = false;
+
         scratch.ensure(num_links, self.dof_count);
 
         // `output` holds the qdd results; `Y` the joint-space bias terms.
@@ -1115,6 +1130,39 @@ impl MultiBody {
             scratch.spat_acc[i + 1] += scratch.coriolis[i];
             for dof in 0..dof_count {
                 scratch.spat_acc[i + 1] += self.links[i].axes[dof] * output[6 + dof_offset + dof];
+            }
+
+            // Joint reaction forces (Bullet's `m_jointFeedback` writeback in
+            // the second upward loop): the spatial force transmitted through
+            // the inboard joint, `Îᵢ · âᵢ + ẑᵢ`, at the link COM. The
+            // external-force pass stores (`=`), the constraint pass adds
+            // (`+=`), so after a step the feedback holds both contributions.
+            if self.links[i].joint_feedback.is_some() {
+                self.needs_joint_feedback = true;
+                let reaction = scratch.spat_inertia[i + 1].apply(&scratch.spat_acc[i + 1])
+                    + scratch.zero_acc[i + 1];
+                let mut force = reaction.top;
+                let mut torque = reaction.bottom;
+                if self.joint_feedback_in_joint_frame {
+                    // Shift the torque's reference point to the joint frame:
+                    // the force is unchanged, the moment arm is d_vector
+                    // (joint → COM, link frame).
+                    torque -= force.cross(self.links[i].d_vector);
+                }
+                if self.joint_feedback_in_world_space {
+                    // Link frame → world frame (the transpose of the cached
+                    // world→link rotation).
+                    let to_world = scratch.rot_from_world[i + 1].transpose();
+                    force = to_world * force;
+                    torque = to_world * torque;
+                }
+                let fb = self.links[i].joint_feedback.as_mut().unwrap();
+                if is_constraint_pass {
+                    fb.top += force;
+                    fb.bottom += torque;
+                } else {
+                    *fb = SpatialForceVector::new(force, torque);
+                }
             }
         }
 
@@ -1664,6 +1712,43 @@ impl MultiBody {
 
     pub fn has_self_collision(&self) -> bool {
         self.has_self_collision
+    }
+
+    /// Enable (from zero) the joint reaction-force feedback of link `i`
+    /// (assigning a `btMultiBodyJointFeedback` to the link in Bullet). Read
+    /// it back with [`MultiBody::link_joint_feedback`] after `step_simulation`.
+    pub fn enable_link_joint_feedback(&mut self, i: usize) {
+        self.links[i].joint_feedback = Some(SpatialForceVector::zero());
+    }
+
+    /// Disable the joint reaction-force feedback of link `i`.
+    pub fn disable_link_joint_feedback(&mut self, i: usize) {
+        self.links[i].joint_feedback = None;
+    }
+
+    /// The latest joint reaction forces of link `i`, if feedback is enabled.
+    /// `top` = linear force, `bottom` = angular torque.
+    pub fn link_joint_feedback(&self, i: usize) -> Option<SpatialForceVector> {
+        self.links[i].joint_feedback
+    }
+
+    /// Whether any link's feedback was written by the last articulated-body
+    /// pass (Bullet's `internalNeedsJointFeedback`); the world then runs the
+    /// post-solve constraint pass.
+    pub fn needs_joint_feedback(&self) -> bool {
+        self.needs_joint_feedback
+    }
+
+    /// Report joint reaction forces in the world frame (Bullet's solver-info
+    /// flag `m_jointFeedbackInWorldSpace`).
+    pub fn set_joint_feedback_in_world_space(&mut self, world_space: bool) {
+        self.joint_feedback_in_world_space = world_space;
+    }
+
+    /// Report the torque about the joint frame (Bullet's solver-info flag
+    /// `m_jointFeedbackInJointFrame`).
+    pub fn set_joint_feedback_in_joint_frame(&mut self, joint_frame: bool) {
+        self.joint_feedback_in_joint_frame = joint_frame;
     }
 
     /// Attach a collider to the base (Bullet's base

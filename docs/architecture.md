@@ -186,6 +186,13 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
   joint limit, spherical joint limit, spherical joint motor — the
   `fillMultiBodyConstraint` recipe (unit-impulse response, `jacDiagABInv`,
   split-penetration RHS suppression like Bullet's defaults).
+- Joint reaction feedback (`btMultiBodyJointFeedback`, phase E): an optional
+  per-link slot (`enable_link_joint_feedback`) written by the articulated-
+  body algorithm's second upward loop — `Î·â + ẑ` at the link COM, stored
+  (`=`) by the external-force pass and augmented (`+=`) by a post-solve
+  constraint pass that reruns the algorithm on the accumulated solver forces
+  (contact + constraint rows), with optional world-space / joint-frame
+  reporting. `top` = linear force, `bottom` = angular torque.
 - `PhysicsWorld` steps the multibodies inline (the `btMultiBodyDynamicsWorld`
   fusion, phase A of `docs/multibody-collision.md`): gravity → ABA velocity
   integration → row conversion + PGS (10×1 iterations, alternating
