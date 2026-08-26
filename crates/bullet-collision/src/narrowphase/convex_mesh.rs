@@ -18,6 +18,9 @@ use crate::shapes::{CollisionShape, TriangleMesh};
 /// Returns `None` when no candidate triangle touches (or the overlaps are
 /// numerical noise below the EPA threshold). `seed` optionally warm-starts
 /// every triangle-level GJK run with a cached separating normal.
+/// `threshold` is the convex-vs-mesh pair contact band (Bullet runs each
+/// candidate triangle through the pair manifold's breaking threshold).
+#[allow(clippy::too_many_arguments)]
 pub fn convex_mesh(
     convex: &CollisionShape,
     position_convex: Vector3,
@@ -26,6 +29,7 @@ pub fn convex_mesh(
     position_mesh: Vector3,
     orientation_mesh: Quaternion,
     seed: Option<Vector3>,
+    threshold: Real,
 ) -> Option<ContactManifold> {
     // Sweep the convex's world AABB corners into the mesh's local frame.
     let convex_world = convex.world_aabb(position_convex, orientation_convex);
@@ -65,6 +69,7 @@ pub fn convex_mesh(
             position_mesh,
             orientation_mesh,
             seed,
+            threshold,
         ) {
             manifold.points.extend(m.points);
         }
@@ -84,6 +89,11 @@ pub fn convex_mesh(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    /// The convex-vs-mesh pair threshold uses the convex's (smaller) disc.
+    fn t(convex: &CollisionShape) -> Real {
+        convex.contact_breaking_threshold()
+    }
 
     fn flat_ground() -> TriangleMesh {
         TriangleMesh::new(
@@ -111,6 +121,7 @@ mod tests {
             Vector3::ZERO,
             Quaternion::IDENTITY,
             None,
+            t(&sphere),
         )
         .unwrap();
         let p = m.points[0];
@@ -130,6 +141,7 @@ mod tests {
             Vector3::ZERO,
             Quaternion::IDENTITY,
             None,
+            t(&sphere),
         )
         .is_none());
     }
@@ -150,6 +162,7 @@ mod tests {
             Vector3::ZERO,
             Quaternion::IDENTITY,
             None,
+            t(&box_shape),
         )
         .unwrap();
         let p = m.points[0];
@@ -174,6 +187,7 @@ mod tests {
             Vector3::ZERO,
             Quaternion::IDENTITY,
             None,
+            t(&box_shape),
         )
         .unwrap();
         assert!(m.points.len() <= 4);

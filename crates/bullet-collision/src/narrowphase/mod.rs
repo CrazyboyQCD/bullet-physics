@@ -1,7 +1,7 @@
 //! Narrow-phase collision: exact shape-pair tests and contact generation.
 
 use crate::manifold::ContactManifold;
-use bullet_math::{Quaternion, Vector3};
+use bullet_math::{Quaternion, Real, Vector3};
 use crate::shapes::{CollisionShape, Compound};
 
 mod box_box;
@@ -38,6 +38,16 @@ pub fn collide(
     )
 }
 
+/// The contact band of a shape pair: contacts are generated while the
+/// surfaces stay separated by less than this (Bullet's dispatcher takes the
+/// minimum of the two shapes' breaking thresholds).
+#[inline]
+fn pair_threshold(shape_a: &CollisionShape, shape_b: &CollisionShape) -> Real {
+    shape_a
+        .contact_breaking_threshold()
+        .min(shape_b.contact_breaking_threshold())
+}
+
 /// [`collide`] with an optional GJK warm-start seed (a cached separating
 /// normal from a previous step of the same pair, forwarded to the generic
 /// convex paths; the analytic fast paths ignore it).
@@ -50,7 +60,10 @@ pub fn collide_seeded(
     orientation_b: Quaternion,
     seed: Option<Vector3>,
 ) -> Option<ContactManifold> {
-    // Compounds are expanded into their children (recursive).
+    let threshold = pair_threshold(shape_a, shape_b);
+    // Compounds are expanded into their children (recursive; each child pair
+    // computes its own threshold like Bullet's per-child collision
+    // algorithms).
     if let CollisionShape::Compound(ca) = shape_a {
         return compound_collide(
             ca,
@@ -89,6 +102,7 @@ pub fn collide_seeded(
                 position_a,
                 orientation_a,
                 seed,
+                threshold,
             )
             .map(|m| m.flipped())
         }
@@ -102,16 +116,35 @@ pub fn collide_seeded(
                 position_a,
                 orientation_a,
                 seed,
+                threshold,
             )
             .map(|m| m.flipped())
         }
         (CollisionShape::Heightfield(_), _) => None,
         (other, CollisionShape::TriangleMesh(mesh)) if other.is_convex() => {
-            convex_mesh::convex_mesh(other, position_a, orientation_a, mesh, position_b, orientation_b, seed)
+            convex_mesh::convex_mesh(
+                other,
+                position_a,
+                orientation_a,
+                mesh,
+                position_b,
+                orientation_b,
+                seed,
+                threshold,
+            )
         }
         (_, CollisionShape::TriangleMesh(_)) => None,
         (other, CollisionShape::Heightfield(hf)) if other.is_convex() => {
-            convex_mesh::convex_mesh(other, position_a, orientation_a, hf.as_mesh(), position_b, orientation_b, seed)
+            convex_mesh::convex_mesh(
+                other,
+                position_a,
+                orientation_a,
+                hf.as_mesh(),
+                position_b,
+                orientation_b,
+                seed,
+                threshold,
+            )
         }
         (_, CollisionShape::Heightfield(_)) => None,
         (CollisionShape::Plane(pa), _) => plane::plane_convex(
@@ -121,6 +154,7 @@ pub fn collide_seeded(
             shape_b,
             position_b,
             orientation_b,
+            threshold,
         ),
         (_, CollisionShape::Plane(pb)) => plane::plane_convex(
             pb,
@@ -129,6 +163,7 @@ pub fn collide_seeded(
             shape_a,
             position_a,
             orientation_a,
+            threshold,
         )
         .map(|m| m.flipped()),
         // Dedicated fast paths.
@@ -138,12 +173,14 @@ pub fn collide_seeded(
         (CollisionShape::Sphere(sa), CollisionShape::BoxShape(bb)) => {
             // sphere_box reports the normal from the box to the sphere; flip it
             // so it points from shape_a (sphere) to shape_b (box).
-            sphere::sphere_box(sa, position_a, bb, position_b, orientation_b).map(|m| m.flipped())
+            sphere::sphere_box(sa, position_a, bb, position_b, orientation_b, threshold).map(|m| {
+                m.flipped()
+            })
         }
         (CollisionShape::BoxShape(ba), CollisionShape::Sphere(sb)) => {
             // sphere_box already reports the normal from the box (shape_a) to
             // the sphere (shape_b); no flip.
-            sphere::sphere_box(sb, position_b, ba, position_a, orientation_a)
+            sphere::sphere_box(sb, position_b, ba, position_a, orientation_a, threshold)
         }
         (CollisionShape::BoxShape(ba), CollisionShape::BoxShape(bb)) => {
             box_box::box_box(ba, position_a, orientation_a, bb, position_b, orientation_b)
@@ -157,6 +194,7 @@ pub fn collide_seeded(
             position_b,
             orientation_b,
             seed,
+            threshold,
         ),
     }
 }

@@ -1,19 +1,22 @@
 //! Generic convex-convex contact generation via GJK + EPA.
 //!
-//! The GJK simplex that encloses the origin of the Minkowski difference seeds
-//! an EPA pass that yields the penetration normal and depth; the contact point
-//! is the midpoint of the two support witnesses along the normal.
+//! A GJK distance walk runs first: separated pairs inside the contact band
+//! report a margin-band contact directly (Bullet's positive-distance
+//! manifold points — EPA never runs for them), while overlapping pairs seed
+//! EPA from the enclosing simplex for the penetration normal and depth. The
+//! contact point is the witness on B in both cases.
 
 use crate::manifold::{ContactManifold, ContactPoint};
 use crate::narrowphase::{epa, gjk};
 use crate::shapes::CollisionShape;
-use bullet_math::{Quaternion, Vector3};
+use bullet_math::{Quaternion, Real, Vector3};
 
 /// Contact between two convex shapes, using the generic GJK + EPA pipeline.
-/// Returns `None` when the shapes are separated (or the overlap is numerical
-/// noise below the EPA threshold). `seed` optionally warm-starts GJK with a
-/// cached separating normal (see [`gjk::gjk_intersect_seeded`]); pass `None`
-/// for an unseeded run.
+/// Returns `None` when the shapes are separated beyond `threshold` (or the
+/// overlap is numerical noise below the EPA threshold). `seed` optionally
+/// warm-starts GJK with a cached separating normal (see
+/// [`gjk::gjk_intersect_seeded`]); pass `None` for an unseeded run.
+#[allow(clippy::too_many_arguments)]
 pub fn convex_convex(
     shape_a: &CollisionShape,
     position_a: Vector3,
@@ -22,8 +25,9 @@ pub fn convex_convex(
     position_b: Vector3,
     orientation_b: Quaternion,
     seed: Option<Vector3>,
+    threshold: Real,
 ) -> Option<ContactManifold> {
-    let simplex = gjk::gjk_intersect_seeded(
+    let simplex = match gjk::gjk_contact(
         shape_a,
         position_a,
         orientation_a,
@@ -31,12 +35,22 @@ pub fn convex_convex(
         position_b,
         orientation_b,
         seed,
-    )?;
-    // GJK only reports success once the origin is enclosed, which needs a full
-    // tetrahedron (four vertices).
-    if simplex.points().len() < 4 {
-        return None;
-    }
+        threshold,
+    ) {
+        gjk::GjkOutcome::Separated => return None,
+        gjk::GjkOutcome::Band { distance, normal, point_on_b } => {
+            // Margin-band contact: `penetration` is negative (the shapes are
+            // separated by `distance`); the solver treats it as a
+            // velocity-only contact, exactly like Bullet's positive-distance
+            // manifold points.
+            return Some(ContactManifold::from_points(vec![ContactPoint::new(
+                point_on_b,
+                normal,
+                -distance,
+            )]));
+        }
+        gjk::GjkOutcome::Overlap(simplex) => simplex,
+    };
     let mut seed = [Vector3::ZERO; 4];
     seed.copy_from_slice(&simplex.points()[..4]);
 
@@ -86,7 +100,20 @@ mod tests {
         b: &CollisionShape,
         pb: Vector3,
     ) -> Option<(Vector3, Real)> {
-        convex_convex(a, pa, Quaternion::IDENTITY, b, pb, Quaternion::IDENTITY, None).map(|m| {
+        let threshold = a
+            .contact_breaking_threshold()
+            .min(b.contact_breaking_threshold());
+        convex_convex(
+            a,
+            pa,
+            Quaternion::IDENTITY,
+            b,
+            pb,
+            Quaternion::IDENTITY,
+            None,
+            threshold,
+        )
+        .map(|m| {
             let p = m.points[0];
             (p.normal, p.penetration)
         })

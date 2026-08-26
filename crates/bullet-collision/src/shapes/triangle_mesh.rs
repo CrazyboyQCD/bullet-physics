@@ -22,6 +22,9 @@ pub struct TriangleMesh {
     /// Per-triangle local AABBs, built once (the exact pre-GJK filter in the
     /// narrow phase; Bullet's `TestTriangleAgainstAabb2`).
     tri_aabbs: Vec<Aabb>,
+    /// Cached local AABB over all vertices (hot: the contact-breaking
+    /// threshold of every convex-vs-mesh pair reads it).
+    local_bounds: Aabb,
 }
 
 impl TriangleMesh {
@@ -30,12 +33,18 @@ impl TriangleMesh {
         let bvh = Bvh::build(&vertices, &indices);
         let mut tri_hulls = Vec::with_capacity(indices.len());
         let mut tri_aabbs = Vec::with_capacity(indices.len());
-        for t in &indices {
+        let mut local_bounds = Aabb::new(Vector3::ZERO, Vector3::ZERO);
+        for (i, t) in indices.iter().enumerate() {
             let a = vertices[t[0] as usize];
             let b = vertices[t[1] as usize];
             let c = vertices[t[2] as usize];
             tri_hulls.push(CollisionShape::convex_hull(vec![a, b, c]));
             tri_aabbs.push(Aabb::new(a.min(b.min(c)), a.max(b.max(c))));
+            if i == 0 {
+                local_bounds = tri_aabbs[0];
+            } else {
+                local_bounds = local_bounds.merged(&tri_aabbs[i]);
+            }
         }
         Self {
             vertices,
@@ -43,6 +52,7 @@ impl TriangleMesh {
             bvh,
             tri_hulls,
             tri_aabbs,
+            local_bounds,
         }
     }
 
@@ -85,14 +95,7 @@ impl TriangleMesh {
 
     #[inline]
     pub fn local_aabb(&self) -> Aabb {
-        let mut aabb: Option<Aabb> = None;
-        for p in &self.vertices {
-            aabb = Some(match aabb {
-                None => Aabb::new(*p, *p),
-                Some(a) => a.merged(&Aabb::new(*p, *p)),
-            });
-        }
-        aabb.unwrap_or_else(|| Aabb::new(Vector3::ZERO, Vector3::ZERO))
+        self.local_bounds
     }
 
     #[inline]

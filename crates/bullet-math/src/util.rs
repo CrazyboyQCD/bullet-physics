@@ -37,6 +37,15 @@ impl Aabb {
         }
     }
 
+    /// The box grown by `margin` on every side. Used to inflate broad-phase
+    /// AABBs by the contact-breaking threshold (Bullet's
+    /// `btCollisionWorld::updateSingleAabb` contact-threshold padding).
+    #[inline]
+    pub fn expanded(&self, margin: Real) -> Aabb {
+        let pad = Vector3::splat(margin);
+        Aabb::new(self.min - pad, self.max + pad)
+    }
+
     /// Transform the AABB by a rigid pose (rotation + translation), sweeping
     /// its eight corners. Exact for a box shape; conservative for any shape
     /// contained in the box. Equivalent to Bullet's `btTransformAabb`.

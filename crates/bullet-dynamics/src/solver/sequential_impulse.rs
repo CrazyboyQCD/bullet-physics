@@ -396,6 +396,15 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
     if !c.split_active {
         bias += BAUMGARTE * inv_dt * (c.penetration - SLOP).max(0.0);
     }
+    // Separated (margin-band) contacts: Bullet's solver subtracts the
+    // separation rate from the velocity error (`velocityError -= penetration
+    // * invTimeStep` where `penetration = distance + linearSlop`; Bullet's
+    // default slop is 0, so only genuinely separated points soften). Our
+    // engine-wide slop stays a dead zone between separation and the
+    // Baumgarte threshold.
+    if c.penetration < 0.0 {
+        bias += c.penetration * inv_dt;
+    }
 
     // Normal impulse, clamped to be non-negative.
     let lambda = c.normal_mass * (bias - vn);

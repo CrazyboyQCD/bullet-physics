@@ -1,8 +1,10 @@
 use crate::manifold::{ContactManifold, ContactPoint};
-use bullet_math::{Quaternion, Vector3};
+use bullet_math::{Quaternion, Real, Vector3};
 use crate::shapes::{BoxShape, Sphere};
 
-/// Sphere-sphere contact.
+/// Sphere-sphere contact. Like Bullet's `btSphereSphereCollisionAlgorithm`
+/// (whose discrete-path distance threshold is zero), only actual overlap
+/// generates a contact — no margin band here.
 pub fn sphere_sphere(
     sa: &Sphere,
     pa: Vector3,
@@ -28,12 +30,16 @@ pub fn sphere_sphere(
 }
 
 /// Sphere-box contact. `normal` points from the box to the sphere.
+/// Contacts are generated while the two stay separated by less than
+/// `threshold` (Bullet's `getSphereDistance` contact distance); the
+/// separation shows up as a negative penetration.
 pub fn sphere_box(
     s: &Sphere,
     ps: Vector3,
     b: &BoxShape,
     pb: Vector3,
     ob: Quaternion,
+    threshold: Real,
 ) -> Option<ContactManifold> {
     // Sphere center in box-local space.
     let local = ob.inverse().mul_vec3(ps - pb);
@@ -42,7 +48,8 @@ pub fn sphere_box(
     let delta = local - clamped;
     let dist_sq = delta.length_squared();
 
-    if dist_sq >= s.radius * s.radius {
+    let contact_dist = s.radius + threshold;
+    if dist_sq >= contact_dist * contact_dist {
         return None;
     }
 
@@ -77,6 +84,10 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
+    /// Pair threshold of sphere(r=0.5) and box(1,1,1): the sphere's
+    /// `0.5 * sqrt(3) * 0.02` is the smaller one.
+    const T: Real = 0.017320508;
+
     #[test]
     fn spheres_overlap() {
         let a = Sphere::new(1.0);
@@ -97,9 +108,33 @@ mod tests {
     fn sphere_box_contact() {
         let s = Sphere::new(0.5);
         let b = BoxShape::new(Vector3::splat(1.0));
-        let m = sphere_box(&s, Vector3::new(1.4, 0.0, 0.0), &b, Vector3::ZERO, Quaternion::IDENTITY)
-            .unwrap();
+        let m =
+            sphere_box(&s, Vector3::new(1.4, 0.0, 0.0), &b, Vector3::ZERO, Quaternion::IDENTITY, T)
+                .unwrap();
         assert_relative_eq!(m.points[0].penetration, 0.1);
         assert_relative_eq!(m.points[0].normal.x, 1.0);
+    }
+
+    /// Separated but inside the contact band: negative penetration, like
+    /// Bullet's positive-distance sphere-box contacts.
+    #[test]
+    fn sphere_box_band_contact() {
+        let s = Sphere::new(0.5);
+        let b = BoxShape::new(Vector3::splat(1.0));
+        let m =
+            sphere_box(&s, Vector3::new(1.51, 0.0, 0.0), &b, Vector3::ZERO, Quaternion::IDENTITY, T)
+                .unwrap();
+        assert_relative_eq!(m.points[0].penetration, -0.01, epsilon = 1e-6);
+        assert_relative_eq!(m.points[0].normal.x, 1.0);
+        // Beyond the band: no contact.
+        assert!(sphere_box(
+            &s,
+            Vector3::new(1.6, 0.0, 0.0),
+            &b,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            T
+        )
+        .is_none());
     }
 }

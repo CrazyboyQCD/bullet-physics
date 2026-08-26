@@ -234,6 +234,23 @@ impl CollisionShape {
         }
     }
 
+    /// The contact band of this shape: contacts are generated while two
+    /// shapes stay separated by less than the *pair* threshold, taken as the minimum of
+    /// the two shapes' values (Bullet's dispatcher with
+    /// `CD_USE_RELATIVE_CONTACT_BREAKING_THRESHOLD`, on by default).
+    ///
+    /// Per shape this is `getAngularMotionDisc() * gContactBreakingThreshold`:
+    /// the local-AABB bounding-sphere radius plus the sphere-center offset,
+    /// scaled by 0.02. Unlike Bullet our AABBs carry no margin, so the disc is
+    /// measured on the true extents (a few percent below Bullet's for the
+    /// default 0.04 margins — well inside the band itself). Planes and huge
+    /// meshes yield a large value and never limit a pair.
+    pub fn contact_breaking_threshold(&self) -> Real {
+        let aabb = self.local_aabb();
+        let disc = (aabb.max - aabb.min).length() * 0.5 + aabb.center().length();
+        disc * crate::manifold::CONTACT_BREAKING_THRESHOLD
+    }
+
     /// Diagonal local inertia tensor for the given mass.
     #[inline]
     pub fn local_inertia(&self, mass: Real) -> Vector3 {

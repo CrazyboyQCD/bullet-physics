@@ -340,15 +340,19 @@ fn setup_contact_row(
             0.0
         };
         velocity_error = restitution - rel_vel;
-        // Bullet's `distance = getDistance() + slop` with its
-        // negative-on-penetration sign convention; our `penetration` is
-        // positive on penetration, so separating distance = slop − pen.
-        // Engine-wide slop (deviation: Bullet's default linearSlop is 0).
-        let distance = SLOP - cp.penetration;
-        if distance > 0.0 {
-            velocity_error -= distance * inv_dt;
+        // Bullet's `distance = getDistance() + linearSlop` with its default
+        // slop of 0: only genuinely separated points soften
+        // (`velocityError -= distance / dt`), and any penetration beyond
+        // our engine-wide slop drives the positional term. The slop zone
+        // in between stays a dead zone (documented deviation) — matching
+        // the rigid contact rows in `sequential_impulse.rs`.
+        if cp.penetration < 0.0 {
+            velocity_error += cp.penetration * inv_dt;
         } else {
-            positional_error = -distance * MB_CONTACT_ERP * inv_dt;
+            let distance = SLOP - cp.penetration;
+            if distance < 0.0 {
+                positional_error = -distance * MB_CONTACT_ERP * inv_dt;
+            }
         }
     }
     let rhs = (positional_error + velocity_error) * jac_diag_ab_inv;

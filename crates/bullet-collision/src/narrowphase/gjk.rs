@@ -4,7 +4,7 @@
 //! to four points. When the origin is enclosed, the returned simplex seeds an
 //! EPA pass to compute penetration depth.
 
-use bullet_math::{Quaternion, Vector3};
+use bullet_math::{Quaternion, Real, Vector3};
 use crate::shapes::CollisionShape;
 
 const MAX_ITERATIONS: u32 = 64;
@@ -83,6 +83,392 @@ pub fn gjk_intersect(
         orientation_b,
         None,
     )
+}
+
+/// Outcome of the GJK contact walk ([`gjk_contact`]): the walk either proves
+/// separation (with the exact surface distance and the closest-point
+/// witnesses when it falls inside the contact band) or reports overlap with
+/// a simplex seeding EPA.
+#[derive(Debug, Clone)]
+pub enum GjkOutcome {
+    /// Separated beyond the contact threshold: no contact.
+    Separated,
+    /// Separated by `distance` but inside the contact band (Bullet's
+    /// positive-distance manifold point): `normal` points from A to B and
+    /// `point_on_b` is the closest-point witness on B, matching the
+    /// witness-on-B convention of the overlap path.
+    Band {
+        distance: Real,
+        normal: Vector3,
+        point_on_b: Vector3,
+    },
+    /// Overlapping: an origin-enclosing simplex (four points) that seeds the
+    /// EPA penetration pass.
+    Overlap(Simplex),
+}
+
+/// One support vertex of the Minkowski difference together with the shape-B
+/// witness it came from (Bullet's `btSupportVector` stores both shapes'
+/// witnesses; the A-side witness is redundant — it reconstructs as
+/// `p_b + normal * penetration`, exactly what the manifold capture does).
+#[derive(Clone, Copy)]
+struct SupportVertex {
+    w: Vector3,
+    p_b: Vector3,
+}
+
+/// Length-squared below which the walk is considered to have reached the
+/// origin (touching or overlapping): the exact distance is numerically
+/// unreliable there, so the pair falls back to the intersection walk + EPA
+/// (Bullet's `REL_ERROR2` degeneracy gate).
+const TOUCH_TOLERANCE2: Real = 1e-12;
+
+/// GJK as a *distance* walk: the closest point `v` of the Minkowski
+/// difference to the origin is refined with support queries along `-v`, and
+/// the supporting-plane certificate `v . w >= |v|^2` (with `w` the support
+/// along `-v`, i.e. the minimizer of `v . x`) proves separation with
+/// distance `|v|` exactly. Within the contact `threshold` the separation is
+/// reported as a margin-band contact instead of `Separated` — this is
+/// Bullet's `m_maximumDistanceSquared` route, which never calls EPA for
+/// separated pairs. `seed` optionally warm-starts the walk (a cached
+/// separating normal); overlapping pairs fall back to the strict enclosing
+/// walk ([`gjk_intersect_seeded`]) and return its simplex for EPA.
+#[allow(clippy::too_many_arguments)]
+pub fn gjk_contact(
+    shape_a: &CollisionShape,
+    position_a: Vector3,
+    orientation_a: Quaternion,
+    shape_b: &CollisionShape,
+    position_b: Vector3,
+    orientation_b: Quaternion,
+    seed: Option<Vector3>,
+    threshold: Real,
+) -> GjkOutcome {
+    let support = |dir: Vector3| -> SupportVertex {
+        let p_a = shape_a.support_world(position_a, orientation_a, dir);
+        let p_b = shape_b.support_world(position_b, orientation_b, -dir);
+        SupportVertex { w: p_a - p_b, p_b }
+    };
+
+    let center_dir = position_b - position_a;
+    let fallback = if center_dir.length_squared() > 1e-12 {
+        center_dir
+    } else {
+        Vector3::X
+    };
+    let initial_dir = seed
+        .filter(|s| s.length_squared() > 1e-12)
+        .unwrap_or(fallback);
+
+    let first = support(initial_dir);
+    // The simplex grows to at most four entries; `reduce` shrinks it back
+    // to the closest feature before each push.
+    let mut buf = [first; 4];
+    let mut len = 1usize;
+    // Last search direction, kept for the overlap fallback's seed.
+    let mut dir = -first.w;
+
+    for _ in 0..MAX_ITERATIONS {
+        match reduce(&mut buf, &mut len) {
+            ReduceStep::Inside => {
+                // The four buffered vertices already enclose the origin — use
+                // them directly as the EPA seed (no second walk).
+                return GjkOutcome::Overlap(Simplex {
+                    pts: [buf[0].w, buf[1].w, buf[2].w, buf[3].w],
+                    len: 4,
+                });
+            }
+            ReduceStep::Closest { v, p_b } => {
+                let v2 = v.length_squared();
+                if v2 < TOUCH_TOLERANCE2 {
+                    return overlap(
+                        shape_a,
+                        position_a,
+                        orientation_a,
+                        shape_b,
+                        position_b,
+                        orientation_b,
+                        Some(dir),
+                    );
+                }
+                dir = -v;
+                let w = support(dir);
+                let delta = v.dot(w.w);
+                // Early rejection (Bullet's `delta * delta > squaredDistance
+                // * m_maximumDistanceSquared`): every Minkowski point `x`
+                // satisfies `|x| >= v_hat . x >= v_hat . w`, so a projection
+                // beyond the band proves the pair is separated past the
+                // threshold without converging the walk — the cheap exit far
+                // pairs take on their first or second support query.
+                if delta > 0.0 && delta * delta > v2 * threshold * threshold {
+                    return GjkOutcome::Separated;
+                }
+                // Separation certificate / convergence, Bullet's combined exit:
+                // `delta = v . w` is the support projection along the closest
+                // direction, so `delta >= |v|^2` proves the whole Minkowski
+                // difference lies beyond the supporting plane at `v` (exact
+                // separation with distance `|v|`), and `delta >= |v|^2 (1 -
+                // REL_ERROR2)` is Bullet's `f0 <= f1` no-progress exit (the
+                // remaining guaranteed improvement fell below the relative
+                // tolerance).
+                if delta >= v2 * (1.0 - REL_ERROR2) {
+                    let distance = v2.sqrt();
+                    if distance < threshold {
+                        return GjkOutcome::Band {
+                            distance,
+                            normal: dir / distance,
+                            point_on_b: p_b,
+                        };
+                    }
+                    return GjkOutcome::Separated;
+                }
+                buf[len] = w;
+                len += 1;
+            }
+        }
+    }
+    // Iteration cap: report the best distance found (matches the strict
+    // walk's behavior of giving up on degenerate inputs).
+    GjkOutcome::Separated
+}
+
+/// Relative progress below which the walk stops improving (Bullet's
+/// `REL_ERROR2`, single precision).
+const REL_ERROR2: Real = 1e-6;
+
+/// The overlap fallback: run the strict enclosing walk seeded with the last
+/// search direction and hand its simplex to EPA. A failed walk (degenerate
+/// input) reports separation, like `gjk_intersect_seeded` returning `None`.
+#[allow(clippy::too_many_arguments)]
+fn overlap(
+    shape_a: &CollisionShape,
+    position_a: Vector3,
+    orientation_a: Quaternion,
+    shape_b: &CollisionShape,
+    position_b: Vector3,
+    orientation_b: Quaternion,
+    seed: Option<Vector3>,
+) -> GjkOutcome {
+    match gjk_intersect_seeded(
+        shape_a,
+        position_a,
+        orientation_a,
+        shape_b,
+        position_b,
+        orientation_b,
+        seed,
+    ) {
+        Some(simplex) if simplex.points().len() == 4 => GjkOutcome::Overlap(simplex),
+        _ => GjkOutcome::Separated,
+    }
+}
+
+enum ReduceStep {
+    /// The origin is enclosed by the simplex (or touching it): overlap.
+    Inside,
+    Closest { v: Vector3, p_b: Vector3 },
+}
+
+/// Shrink the simplex to its closest feature to the origin, returning the
+/// closest point on the Minkowski difference and the interpolated shape
+/// witnesses. Mirrors the region tests of the strict walk's `solve_*`
+/// routines (Ericson 5.1.5) with barycentric weights for the witnesses.
+fn reduce(buf: &mut [SupportVertex; 4], len: &mut usize) -> ReduceStep {
+    match *len {
+        1 => {
+            let s = buf[0];
+            ReduceStep::Closest { v: s.w, p_b: s.p_b }
+        }
+        2 => reduce_segment(buf, len),
+        3 => reduce_triangle(buf, len),
+        _ => reduce_tetrahedron(buf, len),
+    }
+}
+
+fn reduce_segment(buf: &mut [SupportVertex; 4], len: &mut usize) -> ReduceStep {
+    let a = buf[1];
+    let b = buf[0];
+    let ab = b.w - a.w;
+    let denom = ab.length_squared();
+    if denom < 1e-24 {
+        *len = 1;
+        buf[0] = a;
+        return ReduceStep::Closest { v: a.w, p_b: a.p_b };
+    }
+    let t = -a.w.dot(ab) / denom;
+    if t <= 0.0 {
+        *len = 1;
+        buf[0] = a;
+        ReduceStep::Closest { v: a.w, p_b: a.p_b }
+    } else if t >= 1.0 {
+        *len = 1;
+        buf[0] = b;
+        ReduceStep::Closest { v: b.w, p_b: b.p_b }
+    } else {
+        *len = 2;
+        buf[0] = a;
+        buf[1] = b;
+        ReduceStep::Closest {
+            v: a.w + ab * t,
+            p_b: a.p_b + (b.p_b - a.p_b) * t,
+        }
+    }
+}
+
+/// Closest point of the triangle `buf[2], buf[1], buf[0]` (a, b, c) to the
+/// origin with barycentric weights; shrinks the simplex to the closest
+/// feature. Returns `(closest, weights over (a, b, c))`.
+fn closest_triangle_bary(
+    a: SupportVertex,
+    b: SupportVertex,
+    c: SupportVertex,
+) -> (Vector3, [Real; 3]) {
+    let ab = b.w - a.w;
+    let ac = c.w - a.w;
+    let ap = -a.w;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return (a.w, [1.0, 0.0, 0.0]);
+    }
+    let bp = -b.w;
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return (b.w, [0.0, 1.0, 0.0]);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let t = d1 / (d1 - d3);
+        return (a.w + ab * t, [1.0 - t, t, 0.0]);
+    }
+    let cp = -c.w;
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return (c.w, [0.0, 0.0, 1.0]);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let t = d2 / (d2 - d6);
+        return (a.w + ac * t, [1.0 - t, 0.0, t]);
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (b.w + (c.w - b.w) * t, [0.0, 1.0 - t, t]);
+    }
+    // Interior: keep the whole triangle.
+    let denom = 1.0 / (va + vb + vc);
+    let v = vb * denom;
+    let w = vc * denom;
+    (a.w + ab * v + ac * w, [1.0 - v - w, v, w])
+}
+
+fn reduce_triangle(buf: &mut [SupportVertex; 4], len: &mut usize) -> ReduceStep {
+    let (a, b, c) = (buf[2], buf[1], buf[0]);
+    let (v, weights) = closest_triangle_bary(a, b, c);
+    // Rebuild the simplex from the vertices with nonzero weight.
+    let mut kept = [a; 4];
+    let mut n = 0usize;
+    for (vertex, weight) in [(a, weights[0]), (b, weights[1]), (c, weights[2])] {
+        if weight > 0.0 {
+            kept[n] = vertex;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        n = 1;
+        kept[0] = a;
+    }
+    buf[..n].copy_from_slice(&kept[..n]);
+    *len = n;
+    let p_b = a.p_b * weights[0] + b.p_b * weights[1] + c.p_b * weights[2];
+    ReduceStep::Closest { v, p_b }
+}
+
+fn reduce_tetrahedron(buf: &mut [SupportVertex; 4], len: &mut usize) -> ReduceStep {
+    let (a, b, c, d) = (buf[3], buf[2], buf[1], buf[0]);
+    let ab = b.w - a.w;
+    let ac = c.w - a.w;
+    let ad = d.w - a.w;
+    // Coplanar degenerate tetrahedron (flat Minkowski faces, e.g. triangle
+    // hulls): fall back to the closest of the four faces, like
+    // `closest_origin_tetrahedron`.
+    if ab.cross(ac).dot(ad).abs() < 1e-12 {
+        let faces = [(a, b, c), (a, b, d), (a, c, d), (b, c, d)];
+        let mut best_face = faces[0];
+        let mut best_v2 = Real::INFINITY;
+        let mut best = closest_triangle_bary(faces[0].0, faces[0].1, faces[0].2);
+        for &(x, y, z) in &faces[1..] {
+            let cand = closest_triangle_bary(x, y, z);
+            let v2 = cand.0.length_squared();
+            if v2 < best_v2 {
+                best_v2 = v2;
+                best = cand;
+                best_face = (x, y, z);
+            }
+        }
+        let (_, weights) = best;
+        let mut kept = [buf[0]; 4];
+        let mut n = 0usize;
+        for (vertex, weight) in [
+            (best_face.0, weights[0]),
+            (best_face.1, weights[1]),
+            (best_face.2, weights[2]),
+        ] {
+            if weight > 0.0 {
+                kept[n] = vertex;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            n = 1;
+            kept[0] = best_face.0;
+        }
+        buf[..n].copy_from_slice(&kept[..n]);
+        *len = n;
+        let p_b = best_face.0.p_b * weights[0]
+            + best_face.1.p_b * weights[1]
+            + best_face.2.p_b * weights[2];
+        return ReduceStep::Closest { v: best.0, p_b };
+    }
+    let abc = ab.cross(ac);
+    let acd = ac.cross(ad);
+    let adb = ad.cross(ab);
+    let ao = -a.w;
+    let bo = -b.w;
+    let bcd = (c.w - b.w).cross(d.w - b.w);
+    if abc.dot(ao) * abc.dot(ad) < 0.0 {
+        return triangle_step(buf, len, a, b, c);
+    }
+    if acd.dot(ao) * acd.dot(ab) < 0.0 {
+        return triangle_step(buf, len, a, c, d);
+    }
+    if adb.dot(ao) * adb.dot(ac) < 0.0 {
+        return triangle_step(buf, len, a, d, b);
+    }
+    if bcd.dot(bo) * bcd.dot(a.w - b.w) < 0.0 {
+        return triangle_step(buf, len, b, c, d);
+    }
+    // Origin inside the tetrahedron.
+    ReduceStep::Inside
+}
+
+/// Store the three face vertices and defer to the triangle reduction.
+#[inline]
+fn triangle_step(
+    buf: &mut [SupportVertex; 4],
+    len: &mut usize,
+    a: SupportVertex,
+    b: SupportVertex,
+    c: SupportVertex,
+) -> ReduceStep {
+    buf[0] = c;
+    buf[1] = b;
+    buf[2] = a;
+    *len = 3;
+    reduce_triangle(buf, len)
 }
 
 /// GJK with an optional warm-start seed direction (a cached separating
@@ -515,5 +901,109 @@ mod tests {
         let b = CollisionShape::box_shape(Vector3::splat(1.0));
         assert!(overlaps(&a, Vector3::new(1.4, 0.0, 0.0), &b, Vector3::ZERO));
         assert!(!overlaps(&a, Vector3::new(2.0, 0.0, 0.0), &b, Vector3::ZERO));
+    }
+
+    fn contact(
+        a: &CollisionShape,
+        pa: Vector3,
+        b: &CollisionShape,
+        pb: Vector3,
+        threshold: Real,
+    ) -> GjkOutcome {
+        gjk_contact(
+            a,
+            pa,
+            Quaternion::IDENTITY,
+            b,
+            pb,
+            Quaternion::IDENTITY,
+            None,
+            threshold,
+        )
+    }
+
+    /// Separated spheres inside the contact band report the exact distance,
+    /// the A->B normal, and the witness on B.
+    #[test]
+    fn contact_walk_reports_band_separation() {
+        let a = CollisionShape::sphere(0.5);
+        let b = CollisionShape::sphere(0.5);
+        // Gap of 0.01 along X, inside the 0.0173 band.
+        match contact(&a, Vector3::ZERO, &b, Vector3::new(1.01, 0.0, 0.0), 0.0173) {
+            GjkOutcome::Band { distance, normal, point_on_b } => {
+                assert!((distance - 0.01).abs() < 1e-4, "distance {distance}");
+                assert!((normal - Vector3::X).length() < 1e-4);
+                // Witness on B: the closest point of B toward A.
+                assert!((point_on_b - Vector3::new(0.51, 0.0, 0.0)).length() < 1e-4);
+            }
+            other => panic!("expected Band, got {other:?}"),
+        }
+        // Outside the band: Separated.
+        assert!(matches!(
+            contact(&a, Vector3::ZERO, &b, Vector3::new(1.5, 0.0, 0.0), 0.0173),
+            GjkOutcome::Separated
+        ));
+    }
+
+    /// Overlapping shapes take the Overlap branch with a four-point simplex
+    /// (the EPA seed); an axis-aligned capsule pair reports the exact gap,
+    /// and a rotated pair converges to the same distance from any seed
+    /// (seed invariance of the walk's fixed point).
+    #[test]
+    fn contact_walk_routes_overlap_and_rotated_band() {
+        let a = CollisionShape::sphere(0.5);
+        let b = CollisionShape::sphere(0.5);
+        assert!(matches!(
+            contact(&a, Vector3::ZERO, &b, Vector3::new(0.7, 0.0, 0.0), 0.0173),
+            GjkOutcome::Overlap(_)
+        ));
+
+        let cap = CollisionShape::capsule(0.5, 1.0);
+        match contact(&cap, Vector3::ZERO, &cap, Vector3::new(1.01, 0.0, 0.0), 0.5) {
+            GjkOutcome::Band { distance, .. } => {
+                assert!((distance - 0.01).abs() < 1e-4, "distance {distance}");
+            }
+            other => panic!("expected Band, got {other:?}"),
+        }
+
+        let q = Quaternion::from_rotation_z(0.5);
+        let pb = Vector3::new(1.6, 0.2, 0.1);
+        let reference = match gjk_contact(
+            &cap,
+            Vector3::ZERO,
+            q,
+            &cap,
+            pb,
+            Quaternion::IDENTITY,
+            None,
+            0.5,
+        ) {
+            GjkOutcome::Band { distance, .. } => distance,
+            other => panic!("expected Band, got {other:?}"),
+        };
+        for seed in [
+            Vector3::X,
+            Vector3::Y,
+            Vector3::new(0.3, -0.5, 0.8).normalize(),
+        ] {
+            match gjk_contact(
+                &cap,
+                Vector3::ZERO,
+                q,
+                &cap,
+                pb,
+                Quaternion::IDENTITY,
+                Some(seed),
+                0.5,
+            ) {
+                GjkOutcome::Band { distance, .. } => {
+                    assert!(
+                        (distance - reference).abs() < 2e-3,
+                        "seeded distance {distance} vs reference {reference}"
+                    );
+                }
+                other => panic!("expected Band, got {other:?}"),
+            }
+        }
     }
 }

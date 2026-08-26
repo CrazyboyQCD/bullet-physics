@@ -160,6 +160,10 @@ pub struct PersistentManifold {
     /// Whether the detection poses are meaningful (false until the first
     /// capture).
     initialized: bool,
+    /// Per-pair contact band: how far a cached point may separate (or drift
+    /// sideways) before it dies (Bullet stores the manifold breaking
+    /// threshold; pairs take the smaller shape disc * 0.02).
+    threshold: Real,
     /// Step counter stamp of the last broad-phase pair sighting, for the
     /// lifecycle prune (entries whose pair disappeared are dropped).
     touched: u32,
@@ -196,6 +200,7 @@ impl PersistentManifold {
             detect_pos_b: Vector3::ZERO,
             detect_ori_b: Quaternion::IDENTITY,
             initialized: false,
+            threshold: CONTACT_BREAKING_THRESHOLD,
             touched: 0,
             spare: Vec::new(),
         }
@@ -236,13 +241,14 @@ impl PersistentManifold {
         out: &mut Vec<ContactPoint>,
     ) {
         out.clear();
-        let threshold_sq = CONTACT_BREAKING_THRESHOLD * CONTACT_BREAKING_THRESHOLD;
+        let threshold = self.threshold;
+        let threshold_sq = threshold * threshold;
         self.points.retain_mut(|p| {
             let wa = pos_a + ori_a.mul_vec3(p.local_a);
             let wb = pos_b + ori_b.mul_vec3(p.local_b);
             let d = wa - wb;
             let penetration = d.dot(p.normal);
-            if penetration < -CONTACT_BREAKING_THRESHOLD {
+            if penetration < -threshold {
                 return false;
             }
             let lateral = d - p.normal * penetration;
@@ -289,6 +295,7 @@ impl PersistentManifold {
     /// is rebuilt from the current normal every step, and stale tangential
     /// impulses along a rotated basis made resting bodies oscillate (see
     /// the warm-starting notes in `world.rs`).
+    #[allow(clippy::too_many_arguments)]
     pub fn capture(
         &mut self,
         manifold: &ContactManifold,
@@ -296,7 +303,9 @@ impl PersistentManifold {
         ori_a: Quaternion,
         pos_b: Vector3,
         ori_b: Quaternion,
+        threshold: Real,
     ) {
+        self.threshold = threshold;
         let inv_a = ori_a.inverse();
         let inv_b = ori_b.inverse();
         // Double-buffer rebuild: move the current points into the spare
@@ -305,7 +314,7 @@ impl PersistentManifold {
         let mut old = std::mem::take(&mut self.spare);
         old.clear();
         old.append(&mut self.points);
-        let threshold_sq = CONTACT_BREAKING_THRESHOLD * CONTACT_BREAKING_THRESHOLD;
+        let threshold_sq = threshold * threshold;
         for cp in &manifold.points {
             // Reconstruct the A-side witness from the reported contact
             // point: our detection reports the witness on B plus the
@@ -373,7 +382,14 @@ mod tests {
     fn refresh_reprojects_separation_and_keeps_band_points() {
         let (manifold, pos_a, pos_b) = resting_contact(0.01);
         let mut cache = PersistentManifold::new();
-        cache.capture(&manifold, pos_a, Quaternion::IDENTITY, pos_b, Quaternion::IDENTITY);
+        cache.capture(
+            &manifold,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
 
         // Move A away from B along the normal by 0.015: from +0.01
         // penetration to a 0.005 separation (margin band).
@@ -399,7 +415,14 @@ mod tests {
     fn refresh_drops_separated_and_sideways_drifted_points() {
         let (manifold, pos_a, pos_b) = resting_contact(0.01);
         let mut cache = PersistentManifold::new();
-        cache.capture(&manifold, pos_a, Quaternion::IDENTITY, pos_b, Quaternion::IDENTITY);
+        cache.capture(
+            &manifold,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
 
         // Moved beyond the breaking threshold: the point dies.
         let mut gone = Vec::new();
@@ -415,7 +438,14 @@ mod tests {
         // Recapture, then slide A sideways by more than the threshold: the
         // lateral anchor drift kills the point even though the separation
         // stays small.
-        cache.capture(&manifold, pos_a, Quaternion::IDENTITY, pos_b, Quaternion::IDENTITY);
+        cache.capture(
+            &manifold,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
         let mut drifted = Vec::new();
         cache.refresh(
             pos_a + Vector3::X * 0.03,
@@ -431,7 +461,14 @@ mod tests {
     fn capture_anchors_round_trip_to_the_detection_points() {
         let (manifold, pos_a, pos_b) = resting_contact(0.01);
         let mut cache = PersistentManifold::new();
-        cache.capture(&manifold, pos_a, Quaternion::IDENTITY, pos_b, Quaternion::IDENTITY);
+        cache.capture(
+            &manifold,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
         let p = cache.points()[0];
         let wa = pos_a + Quaternion::IDENTITY.mul_vec3(p.local_a);
         let wb = pos_b + Quaternion::IDENTITY.mul_vec3(p.local_b);
@@ -446,12 +483,26 @@ mod tests {
     fn capture_inherits_the_impulse_of_persisting_points_only() {
         let (manifold, pos_a, pos_b) = resting_contact(0.01);
         let mut cache = PersistentManifold::new();
-        cache.capture(&manifold, pos_a, Quaternion::IDENTITY, pos_b, Quaternion::IDENTITY);
+        cache.capture(
+            &manifold,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
         cache.point_mut(0).unwrap().normal_impulse = 5.0;
 
         // Re-detection at the same pose: the point is the same physical
         // contact, so the impulse survives.
-        cache.capture(&manifold, pos_a, Quaternion::IDENTITY, pos_b, Quaternion::IDENTITY);
+        cache.capture(
+            &manifold,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
         assert_relative_eq!(cache.points()[0].normal_impulse, 5.0);
 
         // Re-detection with a flipped normal: the point is a different
@@ -461,7 +512,14 @@ mod tests {
             -Vector3::Y,
             0.01,
         )]);
-        cache.capture(&flipped, pos_a, Quaternion::IDENTITY, pos_b, Quaternion::IDENTITY);
+        cache.capture(
+            &flipped,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
         assert_relative_eq!(cache.points()[0].normal_impulse, 0.0);
     }
 
@@ -470,7 +528,14 @@ mod tests {
         let (manifold, pos_a, pos_b) = resting_contact(0.01);
         let mut cache = PersistentManifold::new();
         assert!(cache.needs_redetect(pos_a, Quaternion::IDENTITY, pos_b, Quaternion::IDENTITY));
-        cache.capture(&manifold, pos_a, Quaternion::IDENTITY, pos_b, Quaternion::IDENTITY);
+        cache.capture(
+            &manifold,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
         // Small drift: keep refreshing.
         assert!(!cache.needs_redetect(
             pos_a + Vector3::Y * 0.004,

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use bullet_collision::broadphase::{AxisSweep3, BroadPhase};
-use bullet_collision::manifold::{ContactManifold, PersistentManifold};
+use bullet_collision::manifold::{ContactManifold, PersistentManifold, CONTACT_BREAKING_THRESHOLD};
 use bullet_collision::narrowphase::{self, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
 use crate::body::RigidBody;
@@ -14,6 +14,12 @@ use crate::multibody::contact::{self, ContactSide, MbContactRow, PendingContact}
 use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
 use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, SLOP, SPLIT_TURN_ERP};
+
+/// Every broad-phase AABB is padded by the global contact-breaking
+/// threshold (Bullet's `btCollisionWorld::updateSingleAabb` — "need to
+/// increase the aabb for contact thresholds"), so pairs live in the
+/// broadphase while their margin-band contacts can still form.
+const BROADPHASE_AABB_MARGIN: Real = CONTACT_BREAKING_THRESHOLD;
 
 /// Scale applied to a cached impulse before the warm-start pass (Bullet's
 /// `m_warmstartingFactor`): old impulses are faded slightly so the solver can
@@ -299,7 +305,10 @@ impl PhysicsWorld {
     /// they are tracked in [`PhysicsWorld::body_proxies`] (visible to tests);
     /// body removal is not yet supported.
     pub fn add_body(&mut self, body: RigidBody) -> usize {
-        let aabb = body.shape.world_aabb(body.position, body.orientation);
+        let aabb = body
+            .shape
+            .world_aabb(body.position, body.orientation)
+            .expanded(BROADPHASE_AABB_MARGIN);
         let proxy = self.broadphase.create_proxy(aabb);
         let index = self.bodies.len();
         self.bodies.push(body);
@@ -435,7 +444,8 @@ impl PhysicsWorld {
                         .shape
                         .world_aabb(mb.link_world_position(l), mb.link_world_orientation(l))
                 }
-            };
+            }
+            .expanded(BROADPHASE_AABB_MARGIN);
             let proxy = self.broadphase.create_proxy(aabb);
             self.collider_entries[i].proxy = Some(proxy);
             debug_assert_eq!(proxy, self.proxy_owners.len());
@@ -591,7 +601,10 @@ impl PhysicsWorld {
         let body = &mut self.bodies[index];
         body.position = position;
         body.orientation = orientation;
-        let aabb = body.shape.world_aabb(position, orientation);
+        let aabb = body
+            .shape
+            .world_aabb(position, orientation)
+            .expanded(BROADPHASE_AABB_MARGIN);
         self.broadphase.set_aabb(self.body_proxies[index], aabb);
     }
 
@@ -678,7 +691,10 @@ impl PhysicsWorld {
             if !body.is_active() {
                 continue;
             }
-            let aabb = body.shape.world_aabb(self.predicted_poses[i], body.orientation);
+            let aabb = body
+                .shape
+                .world_aabb(self.predicted_poses[i], body.orientation)
+                .expanded(BROADPHASE_AABB_MARGIN);
             self.broadphase.set_aabb(self.body_proxies[i], aabb);
         }
 
@@ -708,7 +724,8 @@ impl PhysicsWorld {
                     .expect("registered link collider")
                     .shape
                     .world_aabb(mb.link_world_position(l), mb.link_world_orientation(l))
-            };
+            }
+            .expanded(BROADPHASE_AABB_MARGIN);
             self.broadphase.set_aabb(proxy, aabb);
         }
         clk.mark(&mut self.step_timings, StepStage::UpdateAabbs);
@@ -902,7 +919,11 @@ impl PhysicsWorld {
                 // right away so this step's prune keeps it.
                 let cache = self.manifold_cache.entry((i, j)).or_default();
                 cache.mark_paired(stamp);
-                cache.capture(&manifold, pa, a.orientation, pb, b.orientation);
+                let threshold = a
+                    .shape
+                    .contact_breaking_threshold()
+                    .min(b.shape.contact_breaking_threshold());
+                cache.capture(&manifold, pa, a.orientation, pb, b.orientation, threshold);
                 for (k, (detected, cached)) in manifold.points.iter().zip(cache.points()).enumerate() {
                     let mut cp = *detected;
                     cp.normal_impulse = cached.normal_impulse * WARM_STARTING_FACTOR;
@@ -1767,6 +1788,35 @@ mod tests {
         assert!(points.iter().any(|p| p.penetration < 0.0));
     }
 
+    /// A sphere dropped from slightly above the plane is caught by the
+    /// margin-band contact *before* touching: the contact forms while the
+    /// surfaces are still separated (inside the breaking-threshold band) and
+    /// the band softening limits the approach to the separation rate, so the
+    /// sphere settles onto the surface without ever penetrating past the
+    /// slop — the behavior Bullet's positive-distance contacts give.
+    #[test]
+    fn band_contact_catches_a_falling_sphere_before_touching() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.508, 0.0),
+            1.0,
+        ));
+        let mut min_y = Real::INFINITY;
+        for _ in 0..60 {
+            world.step_simulation(1.0 / 60.0);
+            min_y = min_y.min(world.body(ball).position.y);
+        }
+        // Never penetrated past the slop zone on the way down.
+        assert!(min_y > 0.5 - 0.006, "min height {min_y}");
+        // And it settles on the surface.
+        assert_relative_eq!(world.body(ball).position.y, 0.5, epsilon = 0.006);
+    }
+
     /// A body at rest for longer than `DEACTIVATION_TIME` goes to sleep and
     /// stops being integrated.
     #[test]
@@ -1961,7 +2011,7 @@ mod tests {
         world.add_multibody(mb);
         world.step_simulation(1.0 / 60.0);
         // The link COM hangs 1 m below the pivot; the sphere AABB spans
-        // y ∈ [−1.5, −0.5].
+        // y ∈ [−1.5, −0.5], padded by the 0.02 broad-phase contact margin.
         let entry = world
             .collider_entries
             .iter()
@@ -1969,13 +2019,13 @@ mod tests {
             .expect("collider registered");
         let proxy = entry.proxy.expect("proxy assigned");
         let aabb = world.broadphase.proxy_aabb(proxy).unwrap();
-        assert_relative_eq!(aabb.min.y, -1.5, epsilon = 1e-4);
-        assert_relative_eq!(aabb.max.y, -0.5, epsilon = 1e-4);
+        assert_relative_eq!(aabb.min.y, -1.52, epsilon = 1e-4);
+        assert_relative_eq!(aabb.max.y, -0.48, epsilon = 1e-4);
         // Moving the base moves the collider with the next FK pass.
         world.multibody_mut(0).base_pos = Vector3::new(0.0, 5.0, 0.0);
         world.step_simulation(1.0 / 60.0);
         let aabb = world.broadphase.proxy_aabb(proxy).unwrap();
-        assert_relative_eq!(aabb.min.y, 3.5, epsilon = 1e-4);
+        assert_relative_eq!(aabb.min.y, 3.48, epsilon = 1e-4);
     }
 
     /// A sleeping multibody keeps its collider AABB (like sleeping rigid

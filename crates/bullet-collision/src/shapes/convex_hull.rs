@@ -9,12 +9,28 @@ use bullet_math::{Aabb, Quaternion, Real, Vector3};
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConvexHull {
     pub points: Vec<Vector3>,
+    /// Cached local AABB over the vertices (hot: `world_aabb`, the inertia
+    /// approximation and the contact-breaking threshold all read it).
+    local_bounds: Aabb,
 }
 
 impl ConvexHull {
     #[inline]
     pub fn new(points: Vec<Vector3>) -> Self {
-        Self { points }
+        let local_bounds = {
+            let mut min = Vector3::splat(Real::INFINITY);
+            let mut max = Vector3::splat(Real::NEG_INFINITY);
+            for p in &points {
+                min = min.min(*p);
+                max = max.max(*p);
+            }
+            if points.is_empty() {
+                min = Vector3::ZERO;
+                max = Vector3::ZERO;
+            }
+            Aabb::new(min, max)
+        };
+        Self { points, local_bounds }
     }
 
     /// Bullet's default convex distance margin (informational only, not baked
@@ -26,13 +42,7 @@ impl ConvexHull {
 
     #[inline]
     pub fn local_aabb(&self) -> Aabb {
-        let mut min = Vector3::splat(Real::INFINITY);
-        let mut max = Vector3::splat(Real::NEG_INFINITY);
-        for p in &self.points {
-            min = min.min(*p);
-            max = max.max(*p);
-        }
-        Aabb::new(min, max)
+        self.local_bounds
     }
 
     /// Support vertex by linear scan. Bullet keeps neighbor lists for O(log n)
