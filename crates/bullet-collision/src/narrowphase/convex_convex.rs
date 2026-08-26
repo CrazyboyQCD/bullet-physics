@@ -30,11 +30,11 @@ pub fn convex_convex(
     )?;
     // GJK only reports success once the origin is enclosed, which needs a full
     // tetrahedron (four vertices).
-    if simplex.p.len() < 4 {
+    if simplex.points().len() < 4 {
         return None;
     }
     let mut seed = [Vector3::ZERO; 4];
-    seed.copy_from_slice(&simplex.p[..4]);
+    seed.copy_from_slice(&simplex.points()[..4]);
 
     let support = |dir: Vector3| {
         gjk::support_minkowski(

@@ -9,19 +9,43 @@ use crate::shapes::CollisionShape;
 
 const MAX_ITERATIONS: u32 = 64;
 
-/// A simplex of Minkowski-difference vertices. `p[0]` is the most recent.
+/// A simplex of Minkowski-difference vertices: at most four points in a
+/// fixed-size buffer (`pts[..len]`, with `pts[0]` the most recent), so the
+/// GJK hot loop performs no heap allocation.
 #[derive(Clone, Debug)]
 pub struct Simplex {
-    pub p: Vec<Vector3>,
+    pts: [Vector3; 4],
+    len: usize,
 }
 
 impl Simplex {
     fn new(initial: Vector3) -> Self {
-        Simplex { p: vec![initial] }
+        Simplex {
+            pts: [initial; 4],
+            len: 1,
+        }
     }
 
     fn add(&mut self, v: Vector3) {
-        self.p.insert(0, v);
+        self.pts.copy_within(0..self.len, 1);
+        self.pts[0] = v;
+        self.len += 1;
+    }
+
+    /// Replace the active vertices (`pts[0]` first).
+    fn set(&mut self, new_pts: &[Vector3]) {
+        self.pts[..new_pts.len()].copy_from_slice(new_pts);
+        self.len = new_pts.len();
+    }
+
+    /// The active vertices, most recent first.
+    pub fn points(&self) -> &[Vector3] {
+        &self.pts[..self.len]
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
     }
 }
 
@@ -66,7 +90,7 @@ pub fn gjk_intersect(
         orientation_b,
         initial_dir,
     ));
-    let mut dir = -simplex.p[0];
+    let mut dir = -simplex.points()[0];
 
     for _ in 0..MAX_ITERATIONS {
         let a = support_minkowski(
@@ -87,10 +111,10 @@ pub fn gjk_intersect(
         }
         // Degenerate case: the search direction collapsed (origin lies on the
         // simplex, or numeric noise shrank it). Pick a perpendicular.
-        let reference = if simplex.p.len() >= 2 {
-            simplex.p[0] - simplex.p[simplex.p.len() - 1]
+        let reference = if simplex.len() >= 2 {
+            simplex.points()[0] - simplex.points()[simplex.len() - 1]
         } else {
-            simplex.p[0]
+            simplex.points()[0]
         };
         if dir.length_squared() < reference.length_squared() * 1e-12 {
             dir = perpendicular(reference);
@@ -102,20 +126,20 @@ pub fn gjk_intersect(
 /// Solve the simplex for the point closest to the origin, updating the search
 /// direction. Returns `true` if the origin is enclosed by the simplex.
 fn solve(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
-    match simplex.p.len() {
+    match simplex.len() {
         2 => solve_segment(simplex, dir),
         3 => solve_triangle(simplex, dir),
         4 => solve_tetrahedron(simplex, dir),
         _ => {
-            *dir = -simplex.p[0];
+            *dir = -simplex.points()[0];
             false
         }
     }
 }
 
 fn solve_segment(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
-    let a = simplex.p[1];
-    let b = simplex.p[0];
+    let a = simplex.pts[1];
+    let b = simplex.pts[0];
     let ab = b - a;
     let ao = -a;
     if ab.dot(ao) > 0.0 {
@@ -128,7 +152,7 @@ fn solve_segment(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
             *dir = perpendicular(ab);
         }
     } else {
-        simplex.p = vec![a];
+        simplex.set(&[a]);
         *dir = ao;
     }
     false
@@ -146,9 +170,9 @@ fn perpendicular(v: Vector3) -> Vector3 {
 /// the simplex), keep the triangle and search along its normal for a fourth
 /// point instead of shrinking it.
 fn solve_triangle(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
-    let a = simplex.p[2];
-    let b = simplex.p[1];
-    let c = simplex.p[0];
+    let a = simplex.pts[2];
+    let b = simplex.pts[1];
+    let c = simplex.pts[0];
 
     let ab = b - a;
     let ac = c - a;
@@ -157,7 +181,7 @@ fn solve_triangle(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
     let d1 = ab.dot(ap);
     let d2 = ac.dot(ap);
     if d1 <= 0.0 && d2 <= 0.0 {
-        simplex.p = vec![a];
+        simplex.set(&[a]);
         *dir = -a;
         return false;
     }
@@ -165,7 +189,7 @@ fn solve_triangle(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
     let d3 = ab.dot(bp);
     let d4 = ac.dot(bp);
     if d3 >= 0.0 && d4 <= d3 {
-        simplex.p = vec![b];
+        simplex.set(&[b]);
         *dir = -b;
         return false;
     }
@@ -173,13 +197,13 @@ fn solve_triangle(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
     if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
         let v = d1 / (d1 - d3);
         let closest = a + ab * v;
-        return shrink_or_normal(simplex, dir, closest, normal, vec![b, a]);
+        return shrink_or_normal(simplex, dir, closest, normal, [b, a]);
     }
     let cp = -c;
     let d5 = ab.dot(cp);
     let d6 = ac.dot(cp);
     if d6 >= 0.0 && d5 <= d6 {
-        simplex.p = vec![c];
+        simplex.set(&[c]);
         *dir = -c;
         return false;
     }
@@ -187,13 +211,13 @@ fn solve_triangle(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
     if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
         let w = d2 / (d2 - d6);
         let closest = a + ac * w;
-        return shrink_or_normal(simplex, dir, closest, normal, vec![c, a]);
+        return shrink_or_normal(simplex, dir, closest, normal, [c, a]);
     }
     let va = d3 * d6 - d5 * d4;
     if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
         let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
         let closest = b + (c - b) * w;
-        return shrink_or_normal(simplex, dir, closest, normal, vec![c, b]);
+        return shrink_or_normal(simplex, dir, closest, normal, [c, b]);
     }
     // Interior: keep the triangle.
     let denom = 1.0 / (va + vb + vc);
@@ -215,12 +239,12 @@ fn shrink_or_normal(
     dir: &mut Vector3,
     closest: Vector3,
     normal: Vector3,
-    new_p: Vec<Vector3>,
+    new_pts: [Vector3; 2],
 ) -> bool {
     if closest.length_squared() < 1e-24 {
         *dir = normal;
     } else {
-        simplex.p = new_p;
+        simplex.set(&new_pts);
         *dir = -closest;
     }
     false
@@ -229,10 +253,10 @@ fn shrink_or_normal(
 /// Tetrahedron case: the origin is inside iff, for every face, it lies on the
 /// same side as the opposite vertex. Otherwise shrink to the offending face.
 fn solve_tetrahedron(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
-    let a = simplex.p[3];
-    let b = simplex.p[2];
-    let c = simplex.p[1];
-    let d = simplex.p[0];
+    let a = simplex.pts[3];
+    let b = simplex.pts[2];
+    let c = simplex.pts[1];
+    let d = simplex.pts[0];
 
     let ab = b - a;
     let ac = c - a;
@@ -249,22 +273,22 @@ fn solve_tetrahedron(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
     // opposite vertex (dot products have opposite signs). Shrink to that face
     // and search along its normal (pointing toward the origin).
     if abc.dot(ao) * abc.dot(ad) < 0.0 {
-        simplex.p = vec![c, b, a];
+        simplex.set(&[c, b, a]);
         *dir = toward_origin(abc, ao);
         return false;
     }
     if acd.dot(ao) * acd.dot(ab) < 0.0 {
-        simplex.p = vec![d, c, a];
+        simplex.set(&[d, c, a]);
         *dir = toward_origin(acd, ao);
         return false;
     }
     if adb.dot(ao) * adb.dot(ac) < 0.0 {
-        simplex.p = vec![d, b, a];
+        simplex.set(&[d, b, a]);
         *dir = toward_origin(adb, ao);
         return false;
     }
     if bcd.dot(bo) * bcd.dot(a - b) < 0.0 {
-        simplex.p = vec![d, c, b];
+        simplex.set(&[d, c, b]);
         *dir = toward_origin(bcd, bo);
         return false;
     }

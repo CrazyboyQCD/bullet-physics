@@ -272,7 +272,7 @@ mod tests {
         )
         .expect("spheres overlap");
         let mut sp = [Vector3::ZERO; 4];
-        for (i, v) in simplex.p.iter().take(4).enumerate() {
+        for (i, v) in simplex.points().iter().take(4).enumerate() {
             sp[i] = *v;
         }
 
@@ -309,7 +309,7 @@ mod tests {
         )
         .expect("spheres overlap");
         let mut sp = [Vector3::ZERO; 4];
-        for (i, v) in simplex.p.iter().take(4).enumerate() {
+        for (i, v) in simplex.points().iter().take(4).enumerate() {
             sp[i] = *v;
         }
         let support = |dir: Vector3| {
