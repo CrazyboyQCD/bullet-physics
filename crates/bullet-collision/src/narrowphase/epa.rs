@@ -46,21 +46,49 @@ struct Face {
 /// Compute penetration `(normal, depth)` from a GJK simplex enclosing the
 /// origin and the Minkowski support function. `support` maps a direction to
 /// the farthest point of `A - B` along it.
+///
+/// The vertex, face and boundary-edge buffers are pooled per thread (the
+/// allocations used to dominate the EPA profile — `Vec<Face>` churn from the
+/// per-iteration `retain`/push cycle and the per-`expand` boundary set).
 pub fn penetration(
     simplex: &[Vector3; 4],
     support: impl Fn(Vector3) -> Vector3,
 ) -> (Vector3, Real) {
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<EpaScratch> =
+            std::cell::RefCell::new(EpaScratch::default());
+    }
+    SCRATCH.with_borrow_mut(|s| penetration_inner(simplex, support, s))
+}
+
+/// Pooled EPA buffers (capacity survives `clear()`, so steady-state calls
+/// allocate nothing).
+#[derive(Default)]
+struct EpaScratch {
+    vertices: Vec<Vector3>,
+    faces: Vec<Face>,
+    boundary: std::collections::HashSet<(usize, usize)>,
+}
+
+fn penetration_inner(
+    simplex: &[Vector3; 4],
+    support: impl Fn(Vector3) -> Vector3,
+    scratch: &mut EpaScratch,
+) -> (Vector3, Real) {
+    let EpaScratch { vertices, faces, boundary } = scratch;
+    vertices.clear();
+    faces.clear();
     // Seed the polytope with the GJK tetrahedron (which encloses the origin),
     // then expand it with the six axis-direction support points. Seeding from
     // the tetrahedron alone is fragile: for elongated Minkowski differences it
     // is near-degenerate and the iteration converges to a wrong face. Seeding
     // from the six directions alone does not guarantee the polytope encloses
     // the origin. Bullet's `btGjkEpa2` combines both the same way.
-    let mut vertices: Vec<Vector3> = simplex.to_vec();
-    let mut faces = build_initial_faces(simplex);
+    vertices.extend_from_slice(simplex);
+    build_initial_faces(simplex, faces);
     debug_assert!(!faces.is_empty(), "GJK tetrahedron is fully degenerate");
 
-    for &d in &[
+    for d in [
         Vector3::X,
         Vector3::NEG_X,
         Vector3::Y,
@@ -74,13 +102,13 @@ pub fn penetration(
         let idx = vertices.len();
         let point = support(d);
         vertices.push(point);
-        if !expand(&mut faces, &vertices, point, idx) {
+        if !expand(faces, vertices, boundary, point, idx) {
             break;
         }
     }
 
     for _ in 0..MAX_ITERATIONS {
-        let (best_idx, best_normal, best_dist) = find_best(&faces);
+        let (best_idx, best_normal, best_dist) = find_best(faces);
 
         let new_point = support(best_normal);
         // Bullet: `wdist = dot(best->n, w) - best->d`; only expand when the
@@ -98,7 +126,7 @@ pub fn penetration(
         }
         let new_idx = vertices.len();
         vertices.push(new_point);
-        if !expand(&mut faces, &vertices, new_point, new_idx) {
+        if !expand(faces, vertices, boundary, new_point, new_idx) {
             // Degenerate expansion: keep the current hull and return its
             // closest face (matches Bullet's `InvalidHull` early exit).
             break;
@@ -106,7 +134,7 @@ pub fn penetration(
         let _ = best_idx;
     }
 
-    let (_, best_normal, best_dist) = find_best(&faces);
+    let (_, best_normal, best_dist) = find_best(faces);
     (best_normal, best_dist)
 }
 
@@ -126,39 +154,36 @@ fn find_best(faces: &[Face]) -> (usize, Vector3, Real) {
     (best.0, best.1.normal, best.1.distance)
 }
 
-fn build_initial_faces(simplex: &[Vector3; 4]) -> Vec<Face> {
+fn build_initial_faces(simplex: &[Vector3; 4], out: &mut Vec<Face>) {
     // (a, b, c, opposite) for the four triangular faces of the tetrahedron.
     let quads = [(0usize, 1usize, 2usize, 3usize), (0, 3, 1, 2), (0, 2, 3, 1), (1, 3, 2, 0)];
-    quads
-        .iter()
-        .filter_map(|&(a, b0, c0, opp)| {
-            let mut b = b0;
-            let mut c = c0;
-            let mut normal = (simplex[b] - simplex[a]).cross(simplex[c] - simplex[a]);
-            // Orient the normal outward (away from the opposite vertex, which
-            // lies inside the tetrahedron). Swapping b/c keeps the vertex
-            // winding consistent with the normal, which the boundary-edge
-            // tracking in expand() relies on.
-            if normal.dot(simplex[opp] - simplex[a]) > 0.0 {
-                normal = -normal;
-                std::mem::swap(&mut b, &mut c);
-            }
-            let len = normal.length();
-            if len < 1e-12 {
-                // Degenerate face (collinear vertices): skip it.
-                return None;
-            }
-            normal /= len;
-            Some(Face {
-                a,
-                b,
-                c,
-                normal,
-                plane_distance: normal.dot(simplex[a]),
-                distance: face_distance(normal, simplex[a], simplex[b], simplex[c]),
-            })
-        })
-        .collect()
+    for &(a, b0, c0, opp) in &quads {
+        let mut b = b0;
+        let mut c = c0;
+        let mut normal = (simplex[b] - simplex[a]).cross(simplex[c] - simplex[a]);
+        // Orient the normal outward (away from the opposite vertex, which
+        // lies inside the tetrahedron). Swapping b/c keeps the vertex
+        // winding consistent with the normal, which the boundary-edge
+        // tracking in expand() relies on.
+        if normal.dot(simplex[opp] - simplex[a]) > 0.0 {
+            normal = -normal;
+            std::mem::swap(&mut b, &mut c);
+        }
+        let len = normal.length();
+        if len < 1e-12 {
+            // Degenerate face (collinear vertices): skip it.
+            continue;
+        }
+        normal /= len;
+        out.push(Face {
+            a,
+            b,
+            c,
+            normal,
+            plane_distance: normal.dot(simplex[a]),
+            distance: face_distance(normal, simplex[a], simplex[b], simplex[c]),
+        });
+    }
 }
 
 /// Distance from the origin to the triangle, via Bullet's `getedgedist`: when
@@ -201,9 +226,15 @@ fn edge_distance(pa: Vector3, pb: Vector3, normal: Vector3) -> Option<Real> {
 /// Expand the hull toward `new_point`, removing visible faces and stitching
 /// new ones along the horizon. Returns `false` when an edge is degenerate
 /// (leaving the hull would be invalid); the caller should stop iterating.
-fn expand(faces: &mut Vec<Face>, vertices: &[Vector3], new_point: Vector3, new_idx: usize) -> bool {
+fn expand(
+    faces: &mut Vec<Face>,
+    vertices: &[Vector3],
+    boundary: &mut std::collections::HashSet<(usize, usize)>,
+    new_point: Vector3,
+    new_idx: usize,
+) -> bool {
     // Remove faces visible from the new point, tracking the boundary loop.
-    let mut boundary: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    boundary.clear();
 
     faces.retain(|f| {
         // Coplanar tolerance (Bullet's `-EPA_PLANE_EPS`): a support point on
@@ -221,7 +252,8 @@ fn expand(faces: &mut Vec<Face>, vertices: &[Vector3], new_point: Vector3, new_i
         !visible
     });
 
-    for (u, v) in boundary {
+    // Drain keeps the pooled set's capacity for the next expansion.
+    for (u, v) in boundary.drain() {
         let cross = (vertices[v] - vertices[u]).cross(new_point - vertices[u]);
         let len = cross.length();
         if len < 1e-12 {
