@@ -23,6 +23,7 @@
 //! bodies by default ([`Constraint::set_disable_collisions`]).
 
 use bullet_math::{Matrix3, Quaternion, Real, Vector3};
+use bullet_math::compat::{quat_from_axis_angle, quat_from_mat3, quat_from_rotation_arc, quat_xyz};
 
 use crate::body::RigidBody;
 use crate::solver::sequential_impulse::{ConstraintRow, RowLimits};
@@ -533,7 +534,7 @@ impl HingeConstraint {
         let basis_a = Matrix3::from_cols(t1, t2, axis_a);
         // Rotate the basis so its Z aligns with axis_b (Bullet's
         // `shortestArcQuat`); X follows, Y is rebuilt orthogonal.
-        let rotation = Quaternion::from_rotation_arc(axis_a, axis_b);
+        let rotation = quat_from_rotation_arc(axis_a, axis_b);
         let t1_b = rotation * t1;
         let t2_b = axis_b.cross(t1_b);
         let basis_b = Matrix3::from_cols(t1_b, t2_b, axis_b);
@@ -1088,7 +1089,7 @@ impl ConeTwistConstraint {
         let target = q;
         // Clamp the motor target to within the limits, like Bullet.
         let v_twisted = target * CONE_TWIST_AXIS;
-        let mut q_target_cone = Quaternion::from_rotation_arc(CONE_TWIST_AXIS, v_twisted);
+        let mut q_target_cone = quat_from_rotation_arc(CONE_TWIST_AXIS, v_twisted);
         q_target_cone = q_target_cone.normalize();
         let mut q_target_twist = q_target_cone.inverse() * target;
         q_target_twist = q_target_twist.normalize();
@@ -1103,7 +1104,7 @@ impl ConeTwistConstraint {
                 } else if swing_angle < -swing_limit * softness {
                     swing_angle = -swing_limit * softness;
                 }
-                q_target_cone = Quaternion::from_axis_angle(swing_axis, swing_angle);
+                q_target_cone = quat_from_axis_angle(swing_axis, swing_angle);
             }
         }
 
@@ -1115,7 +1116,7 @@ impl ConeTwistConstraint {
                 } else if twist_angle < -self.twist_span * 1.0 {
                     twist_angle = -self.twist_span * 1.0;
                 }
-                q_target_twist = Quaternion::from_axis_angle(twist_axis, twist_angle);
+                q_target_twist = quat_from_axis_angle(twist_axis, twist_angle);
             }
         }
 
@@ -1299,9 +1300,9 @@ impl ConeTwistConstraint {
             // assumes `setMotorTarget` was called and the target is within
             // the limits).
             let r_delta = *tr_b * Matrix3::from_quat(motor.target) * tr_a.transpose();
-            let mut q_delta = Quaternion::from_mat3(&r_delta);
+            let mut q_delta = quat_from_mat3(&r_delta);
             q_delta = q_delta.normalize();
-            let swing_axis = q_delta.xyz();
+            let swing_axis = quat_xyz(q_delta);
             let len2 = swing_axis.length_squared();
             if len2 > SIMD_EPSILON {
                 self.swing_axis = swing_axis / len2.sqrt();
@@ -1315,13 +1316,13 @@ impl ConeTwistConstraint {
 
         // Non-motor branch: decompose the relative rotation into cone (no
         // twist) and pure twist, from B's perspective.
-        let q_a = Quaternion::from_mat3(tr_a);
-        let q_b = Quaternion::from_mat3(tr_b);
+        let q_a = quat_from_mat3(tr_a);
+        let q_b = quat_from_mat3(tr_b);
         let mut q_ab = q_b.inverse() * q_a;
         q_ab = q_ab.normalize();
         let mut v_cone_no_twist = q_ab * CONE_TWIST_AXIS;
         v_cone_no_twist = v_cone_no_twist.normalize();
-        let mut q_ab_cone = Quaternion::from_rotation_arc(CONE_TWIST_AXIS, v_cone_no_twist);
+        let mut q_ab_cone = quat_from_rotation_arc(CONE_TWIST_AXIS, v_cone_no_twist);
         q_ab_cone = q_ab_cone.normalize();
         let mut q_ab_twist = q_ab_cone.inverse() * q_ab;
         q_ab_twist = q_ab_twist.normalize();
@@ -1422,7 +1423,7 @@ impl ConeTwistConstraint {
     fn compute_cone_limit_info(&self, q_cone: &Quaternion) -> (Real, Vector3, Real) {
         let swing_angle = quaternion_angle(q_cone);
         if swing_angle > SIMD_EPSILON {
-            let mut swing_axis = q_cone.xyz();
+            let mut swing_axis = quat_xyz(*q_cone);
             swing_axis = swing_axis.normalize();
             let x_ellipse = swing_axis.y;
             let y_ellipse = -swing_axis.z;
@@ -1449,7 +1450,7 @@ impl ConeTwistConstraint {
             q_min_twist = -*q_twist;
             twist_angle = quaternion_angle(&q_min_twist);
         }
-        let mut twist_axis = q_min_twist.xyz();
+        let mut twist_axis = quat_xyz(q_min_twist);
         if twist_angle > SIMD_EPSILON {
             twist_axis = twist_axis.normalize();
         }
@@ -1492,7 +1493,7 @@ fn quaternion_angle(q: &Quaternion) -> Real {
 /// `btTransform::getRotation`).
 impl JointFrame {
     fn basis_quat(&self) -> Quaternion {
-        Quaternion::from_mat3(&self.basis)
+        quat_from_mat3(&self.basis)
     }
 }
 
@@ -3087,8 +3088,8 @@ mod tests {
             world.step_simulation(DT);
             let ba = world.body(a);
             let bb = world.body(b);
-            let rel_quat = Quaternion::from_mat3(&Matrix3::from_quat(bb.orientation)).inverse()
-                * Quaternion::from_mat3(&Matrix3::from_quat(ba.orientation));
+            let rel_quat = quat_from_mat3(&Matrix3::from_quat(bb.orientation)).inverse()
+                * quat_from_mat3(&Matrix3::from_quat(ba.orientation));
             max_rel_angle = max_rel_angle.max(quaternion_angle(&rel_quat));
             // The weld residual: the two frame origins must stay coincident
             // (their world positions differ by the rigid offset).

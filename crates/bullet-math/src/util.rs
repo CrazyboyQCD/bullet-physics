@@ -26,7 +26,15 @@ impl Aabb {
     /// True if the two boxes overlap (touching counts as overlapping).
     #[inline]
     pub fn overlaps(&self, other: &Aabb) -> bool {
-        self.min.cmple(other.max).all() && other.min.cmple(self.max).all()
+        // Explicit components: Vec3A's mask ops would also test the unused
+        // w lane (garbage after min/max arithmetic), which could spuriously
+        // report non-overlap.
+        self.min.x <= other.max.x
+            && self.min.y <= other.max.y
+            && self.min.z <= other.max.z
+            && other.min.x <= self.max.x
+            && other.min.y <= self.max.y
+            && other.min.z <= self.max.z
     }
 
     #[inline]
@@ -61,7 +69,10 @@ impl Aabb {
                 if i & 2 == 0 { c.y + e.y } else { c.y - e.y },
                 if i & 4 == 0 { c.z + e.z } else { c.z - e.z },
             );
-            let p = orientation.mul_vec3(corner) + position;
+            #[cfg(not(feature = "f64"))]
+            let p = orientation.mul_vec3a(corner) + position;
+            #[cfg(feature = "f64")]
+            let p = orientation * corner + position;
             min = min.min(p);
             max = max.max(p);
         }

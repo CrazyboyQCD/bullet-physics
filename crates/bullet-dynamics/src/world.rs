@@ -1067,11 +1067,21 @@ impl PhysicsWorld {
             // without changing the real velocities. The turn velocity is
             // scaled by `m_splitImpulseTurnErp`. Push is cleared here; the
             // solver starts every step from zero.
-            if body.is_active() && !body.is_static() && body.push_linear != Vector3::ZERO {
-                body.position += body.push_linear * dt;
+            // Vec3A equality compares the unused w lane too, so test the
+            // components explicitly (the scalar Vec3 compared exactly xyz).
+            let push_lin = body.push_linear;
+            let push_ang = body.push_angular;
+            if body.is_active()
+                && !body.is_static()
+                && (push_lin.x != 0.0 || push_lin.y != 0.0 || push_lin.z != 0.0)
+            {
+                body.position += push_lin * dt;
             }
-            if body.is_active() && !body.is_static() && body.push_angular != Vector3::ZERO {
-                let w = body.push_angular * SPLIT_TURN_ERP;
+            if body.is_active()
+                && !body.is_static()
+                && (push_ang.x != 0.0 || push_ang.y != 0.0 || push_ang.z != 0.0)
+            {
+                let w = push_ang * SPLIT_TURN_ERP;
                 let dq = Quaternion::from_xyzw(
                     w.x * dt * 0.5,
                     w.y * dt * 0.5,

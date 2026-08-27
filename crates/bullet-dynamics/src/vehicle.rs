@@ -34,6 +34,7 @@
 //! the current chassis pose instead of reusing stale state.
 
 use bullet_math::{Matrix3, Quaternion, Real, Transform, Vector3};
+use bullet_math::compat::{quat_from_axis_angle, transform_from_mat3_translation};
 
 use crate::body::RigidBody;
 use crate::world::PhysicsWorld;
@@ -220,7 +221,7 @@ impl WheelInfo {
     /// The wheel's world-space pose for rendering (Bullet's
     /// `m_worldTransform`).
     pub fn world_transform(&self) -> Transform {
-        Transform::from_mat3_translation(self.world_basis, self.world_origin)
+        transform_from_mat3_translation(self.world_basis, self.world_origin)
     }
 }
 
@@ -477,8 +478,8 @@ impl RaycastVehicle {
         let fwd = up.cross(right).normalize();
 
         // Steering rotates around the up axis; the spin around the axle.
-        let steering_quat = Quaternion::from_axis_angle(up.normalize(), wheel.steering);
-        let rotating_quat = Quaternion::from_axis_angle(right.normalize(), -wheel.rotation);
+        let steering_quat = quat_from_axis_angle(up.normalize(), wheel.steering);
+        let rotating_quat = quat_from_axis_angle(right.normalize(), -wheel.rotation);
 
         // Chassis-axes basis: the wheel's right/up/forward columns hold
         // -right / up / fwd (Bullet's `basis2`).

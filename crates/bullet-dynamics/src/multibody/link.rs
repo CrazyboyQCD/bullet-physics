@@ -10,6 +10,7 @@
 use bullet_math::{
     Quaternion, Real, SpatialForceVector, SpatialMotionVector, Transform, Vector3,
 };
+use bullet_math::compat::quat_from_axis_angle;
 
 /// Link flags (Bullet's `btMultiBodyLinkFlags`). Parent-collision flags are
 /// honored by the collision layer; this crate's multibody subsystem does not
@@ -178,7 +179,7 @@ impl MultiBodyLink {
         let cached_vector;
         match self.joint_type {
             JointType::Revolute => {
-                cached_rot = Quaternion::from_axis_angle(self.axis_top(0), -pos[0]) * self.zero_rot_parent_to_this;
+                cached_rot = quat_from_axis_angle(self.axis_top(0), -pos[0]) * self.zero_rot_parent_to_this;
                 cached_vector = self.d_vector + (cached_rot * self.e_vector);
             }
             JointType::Prismatic => {
@@ -194,8 +195,8 @@ impl MultiBodyLink {
                 cached_vector = self.d_vector + (cached_rot * self.e_vector);
             }
             JointType::Planar => {
-                cached_rot = Quaternion::from_axis_angle(self.axis_top(0), -pos[0]) * self.zero_rot_parent_to_this;
-                let q_rot = Quaternion::from_axis_angle(self.axis_top(0), -pos[0]);
+                cached_rot = quat_from_axis_angle(self.axis_top(0), -pos[0]) * self.zero_rot_parent_to_this;
+                let q_rot = quat_from_axis_angle(self.axis_top(0), -pos[0]);
                 let disp = pos[1] * self.axis_bottom(1) + pos[2] * self.axis_bottom(2);
                 cached_vector = q_rot * disp + (cached_rot * self.e_vector);
             }

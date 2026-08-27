@@ -3,6 +3,7 @@
 //! fused world of phase A must reproduce its behavior exactly).
 
 use bullet_math::{Matrix3, Quaternion, Real, Vector3};
+use bullet_math::compat::{quat_from_axis_angle};
 
 use super::body::MultiBody;
 use super::constraint::MultiBodyConstraint;
@@ -547,7 +548,7 @@ fn joint_feedback_world_space_rotation() {
     mb.finalize_multidof();
     // Base rotated 90° about Y: the COM still starts horizontal (along −Z in
     // the world), and the link-frame Z axis points along world X.
-    mb.base_quat = Quaternion::from_axis_angle(Vector3::Y, bullet_math::FRAC_PI_2);
+    mb.base_quat = quat_from_axis_angle(Vector3::Y, bullet_math::FRAC_PI_2);
     mb.set_joint_pos_multidof(0, &[0.0]);
     mb.enable_link_joint_feedback(0);
     mb.set_joint_feedback_in_world_space(true);

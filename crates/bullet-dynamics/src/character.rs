@@ -15,6 +15,7 @@
 
 use bullet_collision::shapes::CollisionShape;
 use bullet_math::{Quaternion, Real, Vector3};
+use bullet_math::compat::{quat_from_scaled_axis};
 
 use crate::world::PhysicsWorld;
 
@@ -245,13 +246,18 @@ impl KinematicCharacterController {
         if self.angular_velocity.length_squared() > 0.0 {
             self.angular_velocity *= (1.0 - self.angular_damping).powf(dt);
             if self.angular_velocity.length_squared() > 0.0 {
-                let dq = Quaternion::from_scaled_axis(self.angular_velocity * dt);
+                let dq = quat_from_scaled_axis(self.angular_velocity * dt);
                 self.current_orientation = (dq * self.current_orientation).normalize();
             }
         }
 
+        // Vec3A equality also compares the unused w lane; test the
+        // components explicitly (the scalar Vec3 compared exactly xyz).
+        let walk_zero = self.walk_direction.x == 0.0
+            && self.walk_direction.y == 0.0
+            && self.walk_direction.z == 0.0;
         // No motion when a velocity interval has expired (or is zero).
-        if !self.use_walk_direction && (self.velocity_time_interval <= 0.0 || self.walk_direction == Vector3::ZERO)
+        if !self.use_walk_direction && (self.velocity_time_interval <= 0.0 || walk_zero)
         {
             return;
         }

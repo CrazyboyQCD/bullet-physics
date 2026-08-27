@@ -44,7 +44,7 @@ pub fn convex_mesh(
             if i & 2 == 0 { c.y + e.y } else { c.y - e.y },
             if i & 4 == 0 { c.z + e.z } else { c.z - e.z },
         );
-        let p = inv_m.mul_vec3(corner - position_mesh);
+        let p = inv_m * (corner - position_mesh);
         local_min = local_min.min(p);
         local_max = local_max.max(p);
     }

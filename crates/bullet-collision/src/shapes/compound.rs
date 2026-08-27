@@ -83,8 +83,8 @@ impl Compound {
         let mut best = Vector3::ZERO;
         let mut best_dot = Real::NEG_INFINITY;
         for child in &self.children {
-            let local_dir = child.orientation.inverse().mul_vec3(dir);
-            let p = child.orientation.mul_vec3(child.shape.support_local(local_dir))
+            let local_dir = child.orientation.inverse() * dir;
+            let p = child.orientation * child.shape.support_local(local_dir)
                 + child.position;
             let d = p.dot(dir);
             if d > best_dot {
@@ -100,7 +100,7 @@ impl Compound {
     pub fn world_aabb(&self, position: Vector3, orientation: Quaternion) -> Aabb {
         let mut aabb: Option<Aabb> = None;
         for child in &self.children {
-            let child_pos = position + orientation.mul_vec3(child.position);
+            let child_pos = position + orientation * child.position;
             let child_ori = orientation * child.orientation;
             let child_aabb = child.shape.world_aabb(child_pos, child_ori);
             aabb = Some(match aabb {

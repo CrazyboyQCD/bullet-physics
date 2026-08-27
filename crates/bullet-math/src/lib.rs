@@ -18,7 +18,7 @@ pub type Real = f64;
 
 /// 3D vector (SIMD). Equivalent to `btVector3`.
 #[cfg(not(feature = "f64"))]
-pub use glam::Vec3 as Vector3;
+pub use glam::Vec3A as Vector3;
 #[cfg(feature = "f64")]
 pub use glam::DVec3 as Vector3;
 
@@ -30,7 +30,7 @@ pub use glam::DQuat as Quaternion;
 
 /// 3x3 matrix. Equivalent to `btMatrix3x3`.
 #[cfg(not(feature = "f64"))]
-pub use glam::Mat3 as Matrix3;
+pub use glam::Mat3A as Matrix3;
 #[cfg(feature = "f64")]
 pub use glam::DMat3 as Matrix3;
 
@@ -39,6 +39,8 @@ pub use glam::DMat3 as Matrix3;
 pub use glam::Affine3A as Transform;
 #[cfg(feature = "f64")]
 pub use glam::DAffine3 as Transform;
+
+pub mod compat;
 
 /// `pi` at the active precision.
 #[cfg(not(feature = "f64"))]

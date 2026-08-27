@@ -62,7 +62,7 @@ pub fn raycast(
     let (fraction, local_normal) = local_raycast(shape, inv, position, ray_from, ray_to)?;
 
     let normal = if fraction > 0.0 {
-        orientation.mul_vec3(local_normal)
+        orientation * local_normal
     } else {
         // Interior start: no surface was entered, report the ray direction.
         dir / dir_len2.sqrt()
@@ -83,8 +83,8 @@ fn local_raycast(
     ray_from: Vector3,
     ray_to: Vector3,
 ) -> Option<LocalHit> {
-    let local_from = inv.mul_vec3(ray_from - position);
-    let local_to = inv.mul_vec3(ray_to - position);
+    let local_from = inv * (ray_from - position);
+    let local_to = inv * (ray_to - position);
     match shape {
         CollisionShape::Sphere(s) => sphere_raycast(s.radius, local_from, local_to),
         CollisionShape::BoxShape(b) => box_raycast(b.half_extents, local_from, local_to),
@@ -118,25 +118,30 @@ fn local_inside(
             (point - position).length_squared() <= s.radius * s.radius
         }
         CollisionShape::BoxShape(b) => {
-            let p = orientation.inverse().mul_vec3(point - position);
-            !p.cmplt(-b.half_extents).any() && !p.cmpgt(b.half_extents).any()
+            let p = orientation.inverse() * (point - position);
+            p.x >= -b.half_extents.x
+                && p.x <= b.half_extents.x
+                && p.y >= -b.half_extents.y
+                && p.y <= b.half_extents.y
+                && p.z >= -b.half_extents.z
+                && p.z <= b.half_extents.z
         }
         CollisionShape::Capsule(c) => {
-            let p = orientation.inverse().mul_vec3(point - position);
+            let p = orientation.inverse() * (point - position);
             segment_distance_squared(Vector3::ZERO, Vector3::new(0.0, c.half_height, 0.0), p)
                 <= c.radius * c.radius
         }
         CollisionShape::Cylinder(c) => {
-            let p = orientation.inverse().mul_vec3(point - position);
+            let p = orientation.inverse() * (point - position);
             p.y.abs() <= c.half_height
                 && (p.x * p.x + p.z * p.z) <= c.radius * c.radius
         }
         CollisionShape::Cone(c) => {
-            let p = orientation.inverse().mul_vec3(point - position);
+            let p = orientation.inverse() * (point - position);
             cone_radial(c.radius, c.half_height, p) <= 0.0
         }
         CollisionShape::ConvexHull(h) => {
-            let p = orientation.inverse().mul_vec3(point - position);
+            let p = orientation.inverse() * (point - position);
             hull_distance_squared(&h.points, p) <= 1e-12
         }
         CollisionShape::Plane(_) => false,
@@ -144,7 +149,7 @@ fn local_inside(
         // normal facing the ray origin from either side.
         CollisionShape::TriangleMesh(_) | CollisionShape::Heightfield(_) => false,
         CollisionShape::Compound(compound) => compound.children.iter().any(|child| {
-            let child_pos = position + orientation.mul_vec3(child.position);
+            let child_pos = position + orientation * child.position;
             let child_ori = orientation * child.orientation;
             local_inside(&child.shape, child_pos, child_ori, point)
         }),
@@ -567,7 +572,7 @@ fn compound_raycast(
     let mut best: Option<LocalHit> = None;
     for child in &compound.children {
         // World transform of the child, then back into its local frame.
-        let child_pos = position + inv.inverse().mul_vec3(child.position);
+        let child_pos = position + inv.inverse() * child.position;
         let child_ori = inv.inverse() * child.orientation;
         if let Some(hit) =
             local_raycast(&child.shape, child_ori.inverse(), child_pos, ray_from, ray_to)

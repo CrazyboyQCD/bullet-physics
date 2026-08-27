@@ -57,8 +57,8 @@ impl Capsule {
     /// `radius` (exact for a sphere-swept segment).
     #[inline]
     pub fn world_aabb(&self, position: Vector3, orientation: Quaternion) -> Aabb {
-        let top = orientation.mul_vec3(Vector3::new(0.0, self.half_height, 0.0)) + position;
-        let bottom = orientation.mul_vec3(Vector3::new(0.0, -self.half_height, 0.0)) + position;
+        let top = orientation * Vector3::new(0.0, self.half_height, 0.0) + position;
+        let bottom = orientation * Vector3::new(0.0, -self.half_height, 0.0) + position;
         let r = Vector3::splat(self.radius);
         Aabb::new(top.min(bottom) - r, top.max(bottom) + r)
     }

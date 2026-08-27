@@ -212,9 +212,9 @@ impl CollisionShape {
         orientation: Quaternion,
         dir: Vector3,
     ) -> Vector3 {
-        let local_dir = orientation.inverse().mul_vec3(dir);
+        let local_dir = orientation.inverse() * dir;
         let local = self.support_local(local_dir);
-        orientation.mul_vec3(local) + position
+        orientation * local + position
     }
 
     /// World-space AABB, given a pose.
@@ -279,9 +279,9 @@ pub(crate) fn support_projected_aabb(
     position: Vector3,
     orientation: Quaternion,
 ) -> Aabb {
-    let ux = orientation.inverse().mul_vec3(Vector3::X);
-    let uy = orientation.inverse().mul_vec3(Vector3::Y);
-    let uz = orientation.inverse().mul_vec3(Vector3::Z);
+    let ux = orientation.inverse() * Vector3::X;
+    let uy = orientation.inverse() * Vector3::Y;
+    let uz = orientation.inverse() * Vector3::Z;
     // min projection along `u` equals `support(-u) . u` (the farthest point
     // along `-u`, projected back onto `u`).
     let min = Vector3::new(

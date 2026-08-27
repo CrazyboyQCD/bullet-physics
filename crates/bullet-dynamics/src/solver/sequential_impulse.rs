@@ -237,7 +237,11 @@ impl ContactConstraint {
 /// Two orthonormal vectors perpendicular to `n`.
 fn tangent_basis(n: Vector3) -> (Vector3, Vector3) {
     let helper = if n.x.abs() < 0.9 { Vector3::X } else { Vector3::Y };
-    let t1 = n.cross(helper).normalize();
+    // mul-by-recip keeps the scalar-Vec3 bit pattern (Vec3A::normalize
+    // divides, which differs in the last ulp and measurably destabilizes
+    // tall box stacks through the friction basis).
+    let c = n.cross(helper);
+    let t1 = c * c.length_recip();
     let t2 = n.cross(t1);
     (t1, t2)
 }

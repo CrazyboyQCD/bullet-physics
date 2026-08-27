@@ -259,7 +259,7 @@ fn sweep_plane(
     plane: &Plane,
     other_ori: Quaternion,
 ) -> Option<SweepHit> {
-    let n = other_ori.mul_vec3(plane.normal);
+    let n = other_ori * plane.normal;
     let dn0 = n.dot(from) - plane.constant;
     if dn0.abs() <= radius {
         // Already touching: clamp at the start.
@@ -299,8 +299,8 @@ fn sweep_mesh(
     ori: Quaternion,
 ) -> Option<SweepHit> {
     let inv_ori = ori.inverse();
-    let local_from = inv_ori.mul_vec3(from - pos);
-    let local_to = inv_ori.mul_vec3(to - pos);
+    let local_from = inv_ori * (from - pos);
+    let local_to = inv_ori * (to - pos);
     let delta = local_to - local_from;
     let length = delta.length();
     if length <= Real::EPSILON {
@@ -326,8 +326,8 @@ fn sweep_mesh(
     }
     best.map(|h| SweepHit {
         fraction: h.fraction,
-        normal: ori.mul_vec3(h.normal),
-        point: ori.mul_vec3(h.point) + pos,
+        normal: ori * h.normal,
+        point: ori * h.point + pos,
     })
 }
 
@@ -433,7 +433,7 @@ fn sweep_convex_plane(
     if length <= Real::EPSILON {
         return None;
     }
-    let n = other_ori.mul_vec3(plane.normal);
+    let n = other_ori * plane.normal;
     let c = plane.constant + n.dot(other_pos);
     // Normal from the plane toward the shape (the plane narrow phase's
     // orientation convention).
@@ -479,8 +479,8 @@ fn sweep_convex_mesh(
     other_ori: Quaternion,
 ) -> Option<SweepHit> {
     let inv = other_ori.inverse();
-    let from_l = inv.mul_vec3(from - other_pos);
-    let to_l = inv.mul_vec3(to - other_pos);
+    let from_l = inv * (from - other_pos);
+    let to_l = inv * (to - other_pos);
     let ori_l = inv * ori;
     // Swept AABB: the union of the shape's AABBs at the two endpoints (the
     // AABB of a convex set moving linearly is the union of endpoint AABBs).
@@ -506,8 +506,8 @@ fn sweep_convex_mesh(
     }
     best.map(|h| SweepHit {
         fraction: h.fraction,
-        normal: other_ori.mul_vec3(h.normal),
-        point: other_ori.mul_vec3(h.point) + other_pos,
+        normal: other_ori * h.normal,
+        point: other_ori * h.point + other_pos,
     })
 }
 

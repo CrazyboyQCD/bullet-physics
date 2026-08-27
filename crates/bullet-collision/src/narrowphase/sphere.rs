@@ -42,7 +42,7 @@ pub fn sphere_box(
     threshold: Real,
 ) -> Option<ContactManifold> {
     // Sphere center in box-local space.
-    let local = ob.inverse().mul_vec3(ps - pb);
+    let local = ob.inverse() * (ps - pb);
     let h = b.half_extents;
     let clamped = local.clamp(-h, h);
     let delta = local - clamped;
@@ -72,8 +72,8 @@ pub fn sphere_box(
         (n, s.radius + d)
     };
 
-    let normal = ob.mul_vec3(normal_local);
-    let position = ob.mul_vec3(clamped) + pb;
+    let normal = ob * normal_local;
+    let position = ob * clamped + pb;
     Some(ContactManifold::from_points(vec![ContactPoint::new(
         position, normal, penetration,
     )]))

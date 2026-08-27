@@ -211,7 +211,7 @@ fn compound_collide(
 ) -> Option<ContactManifold> {
     let mut manifold = ContactManifold::new();
     for child in &compound.children {
-        let child_pos = position + orientation.mul_vec3(child.position);
+        let child_pos = position + orientation * child.position;
         let child_ori = orientation * child.orientation;
         if let Some(m) = collide_seeded(
             &child.shape,

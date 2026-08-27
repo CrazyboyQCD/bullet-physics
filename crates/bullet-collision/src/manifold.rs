@@ -244,8 +244,8 @@ impl PersistentManifold {
         let threshold = self.threshold;
         let threshold_sq = threshold * threshold;
         self.points.retain_mut(|p| {
-            let wa = pos_a + ori_a.mul_vec3(p.local_a);
-            let wb = pos_b + ori_b.mul_vec3(p.local_b);
+            let wa = pos_a + ori_a * p.local_a;
+            let wb = pos_b + ori_b * p.local_b;
             let d = wa - wb;
             let penetration = d.dot(p.normal);
             if penetration < -threshold {
@@ -323,8 +323,8 @@ impl PersistentManifold {
             let wb = cp.position;
             let wa = cp.position + cp.normal * cp.penetration;
             let mut point = PersistentPoint {
-                local_a: inv_a.mul_vec3(wa - pos_a),
-                local_b: inv_b.mul_vec3(wb - pos_b),
+                local_a: inv_a * (wa - pos_a),
+                local_b: inv_b * (wb - pos_b),
                 normal: cp.normal,
                 penetration: cp.penetration,
                 normal_impulse: 0.0,
@@ -470,8 +470,8 @@ mod tests {
             CONTACT_BREAKING_THRESHOLD,
         );
         let p = cache.points()[0];
-        let wa = pos_a + Quaternion::IDENTITY.mul_vec3(p.local_a);
-        let wb = pos_b + Quaternion::IDENTITY.mul_vec3(p.local_b);
+        let wa = pos_a + Quaternion::IDENTITY * p.local_a;
+        let wb = pos_b + Quaternion::IDENTITY * p.local_b;
         // wb is the reported contact point; wa sits one penetration above it.
         assert_eq!(wb, Vector3::ZERO);
         assert_relative_eq!(wa.x, 0.0, epsilon = 1e-6);

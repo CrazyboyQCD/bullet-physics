@@ -24,7 +24,7 @@ pub fn plane_convex(
     threshold: Real,
 ) -> Option<ContactManifold> {
     // World-space plane: `n . x = c` (rotated local normal, shifted constant).
-    let n = plane_orientation.mul_vec3(plane.normal);
+    let n = plane_orientation * plane.normal;
     let c = plane.constant + n.dot(plane_position);
 
     // Orient the contact normal from the plane toward the convex shape.
@@ -33,7 +33,12 @@ pub fn plane_convex(
     } else {
         -n
     };
-    let c = if normal == n { c } else { -c };
+    // Component-wise: Vec3A equality also compares the unused w lane.
+    let c = if normal.x == n.x && normal.y == n.y && normal.z == n.z {
+        c
+    } else {
+        -c
+    };
 
     // Deepest point of the convex shape along -normal.
     let deepest = convex.support_world(convex_position, convex_orientation, -normal);

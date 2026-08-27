@@ -475,6 +475,7 @@ pub fn spatial_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::compat::matrix3_from_diagonal;
 
     #[test]
     fn transform_and_inverse_are_round_trips() {
@@ -512,10 +513,10 @@ mod tests {
     fn dyad_apply_matches_definition() {
         // Inertia of a point mass at the origin: I·(ω,v) = (m·v, I·ω).
         let m = 2.0;
-        let inertia = Matrix3::from_diagonal(Vector3::new(3.0, 4.0, 5.0));
+        let inertia = matrix3_from_diagonal(Vector3::new(3.0, 4.0, 5.0));
         let dyad = SymmetricSpatialDyad::new(
             Matrix3::ZERO,
-            Matrix3::from_diagonal(Vector3::splat(m)),
+            matrix3_from_diagonal(Vector3::splat(m)),
             inertia,
         );
         let v = SpatialMotionVector::new(Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0));

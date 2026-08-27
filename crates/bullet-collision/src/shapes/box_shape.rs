@@ -48,7 +48,7 @@ impl BoxShape {
                 if i & 2 == 0 { h.y } else { -h.y },
                 if i & 4 == 0 { h.z } else { -h.z },
             );
-            let p = orientation.mul_vec3(corner) + position;
+            let p = orientation * corner + position;
             min = min.min(p);
             max = max.max(p);
         }

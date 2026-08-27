@@ -23,6 +23,7 @@ use bullet_math::spatial::{
     SpatialTransformationMatrix, SymmetricSpatialDyad,
 };
 use bullet_math::{Matrix3, Quaternion, Real, Transform, Vector3};
+use bullet_math::compat::{matrix3_from_diagonal, quat_from_axis_angle, quat_from_mat3, transform_from_rotation_translation};
 
 use super::link::{JointType, MultiBodyLink};
 use bullet_collision::shapes::CollisionShape;
@@ -512,7 +513,7 @@ impl MultiBody {
 
     /// The base's world transform.
     pub fn base_world_transform(&self) -> Transform {
-        Transform::from_rotation_translation(self.base_quat.inverse(), self.base_pos)
+        transform_from_rotation_translation(self.base_quat.inverse(), self.base_pos)
     }
 
     pub fn set_base_pos(&mut self, pos: Vector3) {
@@ -533,7 +534,7 @@ impl MultiBody {
             Vector3::from(tr.matrix3.col(1)),
             Vector3::from(tr.matrix3.col(2)),
         );
-        self.base_quat = Quaternion::from_mat3(&m).inverse();
+        self.base_quat = quat_from_mat3(&m).inverse();
     }
 
     /// The world orientation of link `i`, extracted from its cached world
@@ -546,7 +547,7 @@ impl MultiBody {
             Vector3::from(m3.col(1)),
             Vector3::from(m3.col(2)),
         );
-        Quaternion::from_mat3(&m)
+        quat_from_mat3(&m)
     }
 
     pub fn set_base_vel(&mut self, vel: Vector3) {
@@ -926,8 +927,8 @@ impl MultiBody {
         // origin is the base COM).
         scratch.spat_inertia[0] = SymmetricSpatialDyad::new(
             Matrix3::ZERO,
-            Matrix3::from_diagonal(Vector3::splat(self.base_mass)),
-            Matrix3::from_diagonal(self.base_inertia),
+            matrix3_from_diagonal(Vector3::splat(self.base_mass)),
+            matrix3_from_diagonal(self.base_inertia),
         );
 
         scratch.rot_from_world[0] = self.rot_from_parent[0];
@@ -990,8 +991,8 @@ impl MultiBody {
             // Îᵢᴬ (block-diagonal at the link COM).
             scratch.spat_inertia[i + 1] = SymmetricSpatialDyad::new(
                 Matrix3::ZERO,
-                Matrix3::from_diagonal(Vector3::splat(self.links[i].mass)),
-                Matrix3::from_diagonal(self.links[i].inertia_local),
+                matrix3_from_diagonal(Vector3::splat(self.links[i].mass)),
+                matrix3_from_diagonal(self.links[i].inertia_local),
             );
         }
 
@@ -1424,7 +1425,7 @@ impl MultiBody {
                     let q0_coors = joint_vel[1] * self.links[i].axis_bottom(1)
                         + joint_vel[2] * self.links[i].axis_bottom(2);
                     let no_q0_coors =
-                        Quaternion::from_axis_angle(self.links[i].axis_top(0), self.links[i].joint_pos[0]) * q0_coors;
+                        quat_from_axis_angle(self.links[i].axis_top(0), self.links[i].joint_pos[0]) * q0_coors;
                     self.links[i].joint_pos[1] += self.links[i].axis_bottom(1).dot(no_q0_coors) * dt;
                     self.links[i].joint_pos[2] += self.links[i].axis_bottom(2).dot(no_q0_coors) * dt;
                 }
@@ -1577,7 +1578,7 @@ impl MultiBody {
                 world_to_local[index].w,
             );
             self.links[link].cached_world_transform =
-                Transform::from_rotation_translation(rot, local_origin[index]);
+                transform_from_rotation_translation(rot, local_origin[index]);
         }
     }
 
