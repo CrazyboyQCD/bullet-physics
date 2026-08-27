@@ -1,8 +1,50 @@
 use std::collections::HashSet;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use bullet_math::{Aabb, Real, Vector3};
 
 use super::{aabb_raycast_candidates, BroadPhase};
+
+/// FxHash-style hasher for the pair cache: the keys are `(usize, usize)` pairs
+/// touched on every edge swap, where SipHash's diffusion is pure overhead —
+/// a multiply-xor-rotate mix is collision-safe enough for index pairs and
+/// several times cheaper (the default `RandomState` showed up in the
+/// profile at a few percent of a full step).
+#[derive(Default)]
+struct FxHasher {
+    hash: u64,
+}
+
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Byte-wise fallback; never hit by the usize-only pair keys.
+        for &b in bytes {
+            self.add_to_hash(b as u64);
+        }
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add_to_hash(i as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+impl FxHasher {
+    #[inline]
+    fn add_to_hash(&mut self, i: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(FX_SEED);
+    }
+}
+
+type FxBuild = BuildHasherDefault<FxHasher>;
 
 /// Quantized position mask and sentinel (Bullet's 16-bit `btAxisSweep3`:
 /// `m_bpHandleMask = 0xfffe`, `m_handleSentinel = 0xffff`).
@@ -47,8 +89,8 @@ pub struct AxisSweep3 {
     handles: Vec<Option<Handle>>,
     edges: [Vec<Edge>; 3],
     /// Persistently maintained quantized-overlap set (Bullet's pair cache),
-    /// normalized `(min, max)` proxy ids.
-    pairs: HashSet<(usize, usize)>,
+    /// normalized `(min, max)` proxy ids (Fx-hash keyed — see `FxHasher`).
+    pairs: HashSet<(usize, usize), FxBuild>,
     /// Quantization frame (Bullet's `m_worldAabbMin/Max` + `m_quantize`),
     /// grown from the finite proxy AABBs with 50% headroom per axis.
     frame_min: Vector3,
@@ -101,7 +143,7 @@ impl AxisSweep3 {
         Self {
             handles: Vec::new(),
             edges: [Vec::new(), Vec::new(), Vec::new()],
-            pairs: HashSet::new(),
+            pairs: HashSet::with_hasher(FxBuild::default()),
             frame_min: Vector3::ZERO,
             frame_max: Vector3::ZERO,
             quant: Vector3::ZERO,
