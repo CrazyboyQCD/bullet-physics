@@ -73,10 +73,10 @@ fn main() {
     // Both bodies settle on the terrain: near rest, with the center between
     // the surface range (y in [0, 0.5]) plus the 0.5 body offset. Sliding on
     // the ridge means the exact resting height is path-dependent.
-    // The sphere keeps a slow creep along the valley floor: a rolling
-    // sphere has no rolling friction, and the persistent-manifold impulse
-    // inheritance no longer damps it numerically, so only require it to
-    // stay on the surface (the box has no rolling freedom and must stop).
+    // The sphere keeps rolling along the valley floor: a rolling sphere has
+    // no rolling friction, and since the sphere-triangle analytic fast path
+    // the contacts carry no EPA noise to damp it numerically, so it only has
+    // to stay on the surface (the box has no rolling freedom and must stop).
     let sphere_y = world.body(sphere).position.y;
     let box_y = world.body(box_body).position.y;
     let sphere_v = world.body(sphere).linear_velocity.length();
@@ -86,7 +86,7 @@ fn main() {
         sphere_y, box_y
     );
     assert!(
-        sphere_v < 1.0
+        sphere_v < 1.5
             && box_v < 0.1
             && (0.4..1.3).contains(&sphere_y)
             && (0.4..1.3).contains(&box_y),
