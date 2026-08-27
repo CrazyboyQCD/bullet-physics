@@ -189,16 +189,26 @@ fn build_initial_faces(simplex: &[Vector3; 4], out: &mut Vec<Face>) {
 /// Distance from the origin to the triangle, via Bullet's `getedgedist`: when
 /// the origin projects outside the triangle (past an edge), use the distance
 /// to that edge (or its endpoints); otherwise use the plane distance.
+#[inline]
 fn face_distance(normal: Vector3, pa: Vector3, pb: Vector3, pc: Vector3) -> Real {
-    edge_distance(pa, pb, normal)
-        .or_else(|| edge_distance(pb, pc, normal))
-        .or_else(|| edge_distance(pc, pa, normal))
-        .unwrap_or_else(|| pa.dot(normal))
+    // Early returns instead of `Option::or_else` plumbing — same probe
+    // order, identical numerics, no closure chain on the hot path.
+    if let Some(d) = edge_distance(pa, pb, normal) {
+        return d;
+    }
+    if let Some(d) = edge_distance(pb, pc, normal) {
+        return d;
+    }
+    if let Some(d) = edge_distance(pc, pa, normal) {
+        return d;
+    }
+    pa.dot(normal)
 }
 
 /// Distance from the origin to the segment `a -> b`, when the origin lies
 /// outside the triangle past that edge (`None` otherwise). Mirrors Bullet's
 /// `getedgedist(face, a, b, dist)`.
+#[inline]
 fn edge_distance(pa: Vector3, pb: Vector3, normal: Vector3) -> Option<Real> {
     let ba = pb - pa;
     let n_ab = ba.cross(normal); // outward edge normal, on the triangle plane
