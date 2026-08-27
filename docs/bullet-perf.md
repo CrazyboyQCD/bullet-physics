@@ -66,9 +66,9 @@ Scene: stack_1000 (f32), bodies: 1001, frames: 600, warmup: 30, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.178 | 707.1 | 96.9 |
-| rust | 1.435 | 861.2 | 84.4 |
-| rust/bullet | 1.22x | | |
+| bullet | 1.341 | 804.8 | 98.0 |
+| rust | 1.281 | 768.6 | 100.1 |
+| rust/bullet | 0.96x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
@@ -76,8 +76,8 @@ Rust stage breakdown (cumulative over 600 frames):
 - update_aabbs: 26.3 ms (3.0%)
 - broadphase: 161.2 ms (18.4%)
 - islands: 35.5 ms (4.0%)
-- narrowphase: 245.8 ms (28.0%)
-- solve: 402.2 ms (45.9%)
+- narrowphase: 243.3 ms (30.5%)
+- solve: 292.4 ms (36.7%)
 - integrate_positions: 3.3 ms (0.4%)
 
 ## Scene: rain_500
@@ -88,19 +88,41 @@ Scene: rain_500 (f32), bodies: 501, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 3.513 | 1053.8 | 1053.8 |
-| rust | 5.906 | 1771.9 | 1771.9 |
-| rust/bullet | 1.68x | | |
+| bullet | 3.727 | 1118.1 | 1118.1 |
+| rust | 1.651 | 495.2 | 495.2 |
+| rust/bullet | 0.44x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 2.3 ms (0.1%)
-- update_aabbs: 47.5 ms (2.7%)
-- broadphase: 11.2 ms (0.6%)
-- islands: 3.8 ms (0.2%)
-- narrowphase: 1399.2 ms (78.9%)
-- solve: 306.2 ms (17.3%)
-- integrate_positions: 2.7 ms (0.2%)
+- integrate_velocities: 1.5 ms (0.3%)
+- update_aabbs: 42.4 ms (8.3%)
+- broadphase: 12.7 ms (2.5%)
+- islands: 3.8 ms (0.7%)
+- narrowphase: 237.7 ms (43.7%)
+- solve: 239.2 ms (44.0%)
+- integrate_positions: 2.7 ms (0.5%)
+
+**2026-08-27 margin-core round (Bullet's margin architecture, commit
+bab52e2).** The structural gap closed: GJK/EPA now walk the shapes'
+shrunk cores (`core_support_local`/`world`: sphere -> point, capsule ->
+segment, box/cylinder/cone -> componentwise -0.04; hulls/mesh triangles
+stay margin 0) and add the margins back at the walk's exit — resting
+pairs have separated cores, so the cheap distance walk resolves them
+(exactly, a ball-Minkowski property) and EPA only runs for overlap past
+the margin shell. This came with Bullet's `inSimplex` gate (a duplicated
+support ends the walk — without it a sphere's point core against a flat
+triangle hull cycles on duplicated supports until the iteration cap),
+the signed band distance (negative = walk-resolved overlap), and a
+closure-generic `enclosing_walk` shared by the full-shape intersect and
+the core-based EPA fallback. Measured on rain_500: narrowphase
+1067 -> ~220-240 ms (-79%), total ratio 1.22x -> **0.44x** (first time
+faster than Bullet on this scene, 2.3x margin); solve is now the top
+stage (44%). stack_1000 (SAT boxes + box-vs-triangle) 0.96x,
+mb_chains 0.70x. Parity: all scenes bit-identical except the mesh box
+row (walk-resolved box-vs-triangle contacts: bigger impact-frame peak,
+tighter settling tail). Earlier that day: the analytic
+sphere-triangle fast path (2eda695, -8% narrowphase) and the Vec3A
+migration (bbc1ba4).
 
 **2026-08-26 persistent-manifold round 2 (per-pair manifold cache + row
 pool).** Contacts cached per broad-phase pair (anchors in both local
@@ -195,8 +217,8 @@ Scene: mb_chains (f32), bodies: 20, frames: 300, warmup: 5, repeats median
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
 | bullet | 0.058 | 17.3 | 17.3 |
-| rust | 0.047 | 14.2 | 14.2 |
-| rust/bullet | 0.83x | | |
+| rust | 0.040 | 12.1 | 12.1 |
+| rust/bullet | 0.70x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
