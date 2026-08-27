@@ -64,6 +64,23 @@ pub fn support_minkowski(
         - shape_b.support_world(position_b, orientation_b, -dir)
 }
 
+/// Support point of the *core* Minkowski difference `core(A) - core(B)`:
+/// what the GJK/EPA contact pipeline queries (see [`gjk_contact`]).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn core_support_minkowski(
+    shape_a: &CollisionShape,
+    position_a: Vector3,
+    orientation_a: Quaternion,
+    shape_b: &CollisionShape,
+    position_b: Vector3,
+    orientation_b: Quaternion,
+    dir: Vector3,
+) -> Vector3 {
+    shape_a.core_support_world(position_a, orientation_a, dir)
+        - shape_b.core_support_world(position_b, orientation_b, -dir)
+}
+
 /// Run GJK. Returns the enclosing simplex if the shapes intersect, `None`
 /// otherwise.
 pub fn gjk_intersect(
@@ -93,17 +110,20 @@ pub fn gjk_intersect(
 pub enum GjkOutcome {
     /// Separated beyond the contact threshold: no contact.
     Separated,
-    /// Separated by `distance` but inside the contact band (Bullet's
-    /// positive-distance manifold point): `normal` points from A to B and
-    /// `point_on_b` is the closest-point witness on B, matching the
-    /// witness-on-B convention of the overlap path.
+    /// Inside the contact band (Bullet's positive-distance manifold point):
+    /// `distance` is the *signed* true surface separation of the full shapes
+    /// — positive while separated inside the band (a velocity-only contact
+    /// with negative penetration), negative while the full shapes overlap
+    /// within the margin shell (the walk resolved it exactly; EPA is not
+    /// needed). `normal` points from A to B and `point_on_b` is the witness
+    /// on B, matching the witness-on-B convention of the overlap path.
     Band {
         distance: Real,
         normal: Vector3,
         point_on_b: Vector3,
     },
-    /// Overlapping: an origin-enclosing simplex (four points) that seeds the
-    /// EPA penetration pass.
+    /// Overlapping past the margin shell: an origin-enclosing simplex (four
+    /// points) of the *cores* that seeds the EPA penetration pass.
     Overlap(Simplex),
 }
 
@@ -123,16 +143,23 @@ struct SupportVertex {
 /// (Bullet's `REL_ERROR2` degeneracy gate).
 const TOUCH_TOLERANCE2: Real = 1e-12;
 
-/// GJK as a *distance* walk: the closest point `v` of the Minkowski
-/// difference to the origin is refined with support queries along `-v`, and
-/// the supporting-plane certificate `v . w >= |v|^2` (with `w` the support
-/// along `-v`, i.e. the minimizer of `v . x`) proves separation with
-/// distance `|v|` exactly. Within the contact `threshold` the separation is
-/// reported as a margin-band contact instead of `Separated` — this is
-/// Bullet's `m_maximumDistanceSquared` route, which never calls EPA for
-/// separated pairs. `seed` optionally warm-starts the walk (a cached
-/// separating normal); overlapping pairs fall back to the strict enclosing
-/// walk ([`gjk_intersect_seeded`]) and return its simplex for EPA.
+/// GJK as a *distance* walk over the margin **cores** (Bullet's margin
+/// architecture, `btGjkPairDetector::getClosestPointsNonVirtual`): each
+/// shape is its [`core_support_world`](CollisionShape::core_support_world)
+/// shrink, and the margins are added back at the walk's exit. The closest
+/// point `v` of the core Minkowski difference to the origin is refined with
+/// support queries along `-v`, and the supporting-plane certificate
+/// `v . w >= |v|^2` (with `w` the support along `-v`, i.e. the minimizer of
+/// `v . x`) proves separation with core distance `|v|` exactly, so the true
+/// full-shape separation is `|v| - (marginA + marginB)`. Within the contact
+/// `threshold` the separation is reported as a margin-band contact instead
+/// of `Separated` — Bullet's `m_maximumDistanceSquared` route, which never
+/// calls EPA for separated pairs; cores separated by less than the margin
+/// sum mean the full shapes already overlap, and the walk resolves that
+/// overlap exactly too (a ball-Minkowski property), so EPA only runs for
+/// deep overlap past the margin shell. `seed` optionally warm-starts the
+/// walk (a cached separating normal); overlapping cores fall back to the
+/// strict enclosing walk and return its simplex for EPA.
 #[allow(clippy::too_many_arguments)]
 pub fn gjk_contact(
     shape_a: &CollisionShape,
@@ -144,9 +171,12 @@ pub fn gjk_contact(
     seed: Option<Vector3>,
     threshold: Real,
 ) -> GjkOutcome {
+    let margin_a = shape_a.margin();
+    let margin_b = shape_b.margin();
+    let margin_sum = margin_a + margin_b;
     let support = |dir: Vector3| -> SupportVertex {
-        let p_a = shape_a.support_world(position_a, orientation_a, dir);
-        let p_b = shape_b.support_world(position_b, orientation_b, -dir);
+        let p_a = shape_a.core_support_world(position_a, orientation_a, dir);
+        let p_b = shape_b.core_support_world(position_b, orientation_b, -dir);
         SupportVertex { w: p_a - p_b, p_b }
     };
 
@@ -181,43 +211,58 @@ pub fn gjk_contact(
             ReduceStep::Closest { v, p_b } => {
                 let v2 = v.length_squared();
                 if v2 < TOUCH_TOLERANCE2 {
-                    return overlap(
-                        shape_a,
-                        position_a,
-                        orientation_a,
-                        shape_b,
-                        position_b,
-                        orientation_b,
-                        Some(dir),
-                    );
+                    return match enclosing_walk(|d| support(d).w, fallback, Some(dir)) {
+                        Some(simplex) if simplex.points().len() == 4 => {
+                            GjkOutcome::Overlap(simplex)
+                        }
+                        _ => GjkOutcome::Separated,
+                    };
                 }
                 dir = -v;
                 let w = support(dir);
                 let delta = v.dot(w.w);
                 // Early rejection (Bullet's `delta * delta > squaredDistance
-                // * m_maximumDistanceSquared`): every Minkowski point `x`
-                // satisfies `|x| >= v_hat . x >= v_hat . w`, so a projection
-                // beyond the band proves the pair is separated past the
-                // threshold without converging the walk — the cheap exit far
-                // pairs take on their first or second support query.
-                if delta > 0.0 && delta * delta > v2 * threshold * threshold {
+                // * m_maximumDistanceSquared`): every core Minkowski point
+                // `x` satisfies `|x| >= v_hat . x >= v_hat . w`, so a
+                // projection beyond the core-space band radius (margins +
+                // threshold) proves the pair is separated past the threshold
+                // without converging the walk — the cheap exit far pairs take
+                // on their first or second support query.
+                let band = margin_sum + threshold;
+                if delta > 0.0 && delta * delta > v2 * band * band {
                     return GjkOutcome::Separated;
                 }
+                // Bullet's `inSimplex` gate: a support that duplicates a
+                // buffered vertex proves the walk cannot improve (the
+                // supporting plane already contains the closest feature), so
+                // `v` is the exact closest point. Without this, flat cores
+                // (e.g. a sphere's point core against a triangle hull)
+                // cycle on duplicated supports until the iteration cap.
+                let duplicate = (0..len).any(|i| w.w.abs_diff_eq(buf[i].w, 1e-6));
                 // Separation certificate / convergence, Bullet's combined exit:
                 // `delta = v . w` is the support projection along the closest
-                // direction, so `delta >= |v|^2` proves the whole Minkowski
-                // difference lies beyond the supporting plane at `v` (exact
-                // separation with distance `|v|`), and `delta >= |v|^2 (1 -
-                // REL_ERROR2)` is Bullet's `f0 <= f1` no-progress exit (the
-                // remaining guaranteed improvement fell below the relative
-                // tolerance).
-                if delta >= v2 * (1.0 - REL_ERROR2) {
-                    let distance = v2.sqrt();
+                // direction, so `delta >= |v|^2` proves the whole core
+                // Minkowski difference lies beyond the supporting plane at
+                // `v` (exact core separation with distance `|v|`), and
+                // `delta >= |v|^2 (1 - REL_ERROR2)` is Bullet's `f0 <= f1`
+                // no-progress exit (the remaining guaranteed improvement fell
+                // below the relative tolerance).
+                if duplicate || delta >= v2 * (1.0 - REL_ERROR2) {
+                    let core_distance = v2.sqrt();
+                    // The true full-shape separation: core distance minus the
+                    // margins added back (Bullet's `distance = 1/rlen -
+                    // margin`, sign-flipped for our separation-positive
+                    // convention).
+                    let distance = core_distance - margin_sum;
                     if distance < threshold {
+                        let normal = dir / core_distance;
+                        // B's witness moves out of the core toward A by its
+                        // margin (the closest point of the ball-inflated
+                        // full shape).
                         return GjkOutcome::Band {
                             distance,
-                            normal: dir / distance,
-                            point_on_b: p_b,
+                            normal,
+                            point_on_b: p_b - normal * margin_b,
                         };
                     }
                     return GjkOutcome::Separated;
@@ -236,31 +281,44 @@ pub fn gjk_contact(
 /// `REL_ERROR2`, single precision).
 const REL_ERROR2: Real = 1e-6;
 
-/// The overlap fallback: run the strict enclosing walk seeded with the last
-/// search direction and hand its simplex to EPA. A failed walk (degenerate
-/// input) reports separation, like `gjk_intersect_seeded` returning `None`.
-#[allow(clippy::too_many_arguments)]
-fn overlap(
-    shape_a: &CollisionShape,
-    position_a: Vector3,
-    orientation_a: Quaternion,
-    shape_b: &CollisionShape,
-    position_b: Vector3,
-    orientation_b: Quaternion,
+/// The strict origin-enclosing walk, parameterized by the support function
+/// of the Minkowski difference: full shapes for [`gjk_intersect_seeded`],
+/// shrunk cores for the contact walk's EPA fallback (the seed simplex must
+/// be consistent with the supports EPA will query). A failed walk
+/// (degenerate input) reports `None`, like `gjk_intersect_seeded`.
+fn enclosing_walk(
+    support: impl Fn(Vector3) -> Vector3,
+    fallback: Vector3,
     seed: Option<Vector3>,
-) -> GjkOutcome {
-    match gjk_intersect_seeded(
-        shape_a,
-        position_a,
-        orientation_a,
-        shape_b,
-        position_b,
-        orientation_b,
-        seed,
-    ) {
-        Some(simplex) if simplex.points().len() == 4 => GjkOutcome::Overlap(simplex),
-        _ => GjkOutcome::Separated,
+) -> Option<Simplex> {
+    let initial_dir = seed
+        .filter(|s| s.length_squared() > 1e-12)
+        .unwrap_or(fallback);
+
+    let mut simplex = Simplex::new(support(initial_dir));
+    let mut dir = -simplex.points()[0];
+
+    for _ in 0..MAX_ITERATIONS {
+        let a = support(dir);
+        if a.dot(dir) < 0.0 {
+            return None;
+        }
+        simplex.add(a);
+        if solve(&mut simplex, &mut dir) {
+            return Some(simplex);
+        }
+        // Degenerate case: the search direction collapsed (origin lies on the
+        // simplex, or numeric noise shrank it). Pick a perpendicular.
+        let reference = if simplex.len() >= 2 {
+            simplex.points()[0] - simplex.points()[simplex.len() - 1]
+        } else {
+            simplex.points()[0]
+        };
+        if dir.length_squared() < reference.length_squared() * 1e-12 {
+            dir = perpendicular(reference);
+        }
     }
+    None
 }
 
 enum ReduceStep {
@@ -491,50 +549,21 @@ pub fn gjk_intersect_seeded(
     } else {
         Vector3::X
     };
-    let initial_dir = seed
-        .filter(|s| s.length_squared() > 1e-12)
-        .unwrap_or(fallback);
-
-    let mut simplex = Simplex::new(support_minkowski(
-        shape_a,
-        position_a,
-        orientation_a,
-        shape_b,
-        position_b,
-        orientation_b,
-        initial_dir,
-    ));
-    let mut dir = -simplex.points()[0];
-
-    for _ in 0..MAX_ITERATIONS {
-        let a = support_minkowski(
-            shape_a,
-            position_a,
-            orientation_a,
-            shape_b,
-            position_b,
-            orientation_b,
-            dir,
-        );
-        if a.dot(dir) < 0.0 {
-            return None;
-        }
-        simplex.add(a);
-        if solve(&mut simplex, &mut dir) {
-            return Some(simplex);
-        }
-        // Degenerate case: the search direction collapsed (origin lies on the
-        // simplex, or numeric noise shrank it). Pick a perpendicular.
-        let reference = if simplex.len() >= 2 {
-            simplex.points()[0] - simplex.points()[simplex.len() - 1]
-        } else {
-            simplex.points()[0]
-        };
-        if dir.length_squared() < reference.length_squared() * 1e-12 {
-            dir = perpendicular(reference);
-        }
-    }
-    None
+    enclosing_walk(
+        |dir| {
+            support_minkowski(
+                shape_a,
+                position_a,
+                orientation_a,
+                shape_b,
+                position_b,
+                orientation_b,
+                dir,
+            )
+        },
+        fallback,
+        seed,
+    )
 }
 
 /// Solve the simplex for the point closest to the origin, updating the search
@@ -945,18 +974,23 @@ mod tests {
         ));
     }
 
-    /// Overlapping shapes take the Overlap branch with a four-point simplex
-    /// (the EPA seed); an axis-aligned capsule pair reports the exact gap,
+    /// Overlapping shapes within the margin shell are resolved by the walk
+    /// (signed Band distance); a sphere pair reports the exact signed gap,
     /// and a rotated pair converges to the same distance from any seed
     /// (seed invariance of the walk's fixed point).
     #[test]
     fn contact_walk_routes_overlap_and_rotated_band() {
         let a = CollisionShape::sphere(0.5);
         let b = CollisionShape::sphere(0.5);
-        assert!(matches!(
-            contact(&a, Vector3::ZERO, &b, Vector3::new(0.7, 0.0, 0.0), 0.0173),
-            GjkOutcome::Overlap(_)
-        ));
+        // Overlap 0.3 lives inside the 1.0 margin shell: the core walk
+        // resolves it exactly as a Band with negative distance (EPA stays
+        // reserved for overlap past the margin shell).
+        match contact(&a, Vector3::ZERO, &b, Vector3::new(0.7, 0.0, 0.0), 0.0173) {
+            GjkOutcome::Band { distance, .. } => {
+                assert!((distance + 0.3).abs() < 1e-4, "distance {distance}");
+            }
+            other => panic!("expected Band, got {other:?}"),
+        }
 
         let cap = CollisionShape::capsule(0.5, 1.0);
         match contact(&cap, Vector3::ZERO, &cap, Vector3::new(1.01, 0.0, 0.0), 0.5) {

@@ -19,6 +19,12 @@ impl Sphere {
         self.radius
     }
 
+    /// Core support (the whole radius is the margin): a point at the origin.
+    #[inline]
+    pub fn core_support_local(&self, _dir: Vector3) -> Vector3 {
+        Vector3::ZERO
+    }
+
     #[inline]
     pub fn local_aabb(&self) -> Aabb {
         let r = Vector3::splat(self.radius);

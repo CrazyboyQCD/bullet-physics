@@ -1,10 +1,13 @@
 //! Generic convex-convex contact generation via GJK + EPA.
 //!
-//! A GJK distance walk runs first: separated pairs inside the contact band
-//! report a margin-band contact directly (Bullet's positive-distance
-//! manifold points — EPA never runs for them), while overlapping pairs seed
-//! EPA from the enclosing simplex for the penetration normal and depth. The
-//! contact point is the witness on B in both cases.
+//! The GJK distance walk runs on the shapes' margin **cores** (Bullet's
+//! margin architecture, see [`gjk::gjk_contact`]): separated pairs inside
+//! the contact band report a margin-band contact directly (Bullet's
+//! positive-distance manifold points — EPA never runs for them), pairs
+//! overlapping within the margin shell are resolved by the walk exactly,
+//! and only deep overlap seeds EPA from the enclosing simplex of the cores
+//! for the penetration normal and depth (with the margins added back). The
+//! contact point is the witness on B in all cases.
 
 use crate::manifold::{ContactManifold, ContactPoint};
 use crate::narrowphase::{epa, gjk};
@@ -39,10 +42,12 @@ pub fn convex_convex(
     ) {
         gjk::GjkOutcome::Separated => return None,
         gjk::GjkOutcome::Band { distance, normal, point_on_b } => {
-            // Margin-band contact: `penetration` is negative (the shapes are
-            // separated by `distance`); the solver treats it as a
-            // velocity-only contact, exactly like Bullet's positive-distance
-            // manifold points.
+            // Margin-band contact: `distance` is the signed true separation
+            // (positive while separated, negative while the full shapes
+            // overlap within the margin shell), so `penetration = -distance`
+            // is negative (velocity-only) for separated pairs — exactly like
+            // Bullet's positive-distance manifold points — and positive (a
+            // real contact) when the walk resolved an overlap.
             return Some(ContactManifold::from_points(vec![ContactPoint::new(
                 point_on_b,
                 normal,
@@ -54,8 +59,11 @@ pub fn convex_convex(
     let mut seed = [Vector3::ZERO; 4];
     seed.copy_from_slice(&simplex.points()[..4]);
 
+    // EPA walks the same cores the GJK walk converged on; the margins are
+    // added back to its depth below (Bullet runs its Minkowski penetration
+    // solver on `localGetSupportVertexWithoutMargin` shapes likewise).
     let support = |dir: Vector3| {
-        gjk::support_minkowski(
+        gjk::core_support_minkowski(
             shape_a,
             position_a,
             orientation_a,
@@ -65,20 +73,23 @@ pub fn convex_convex(
             dir,
         )
     };
-    // `normal` points from A to B (EPA convention); `depth` is the overlap.
-    let (normal, depth) = epa::penetration(&seed, support);
-    if depth <= 0.0 {
+    // `normal` points from A to B (EPA convention); `core_depth` is the core
+    // overlap, the true overlap adds the margin shell back.
+    let (normal, core_depth) = epa::penetration(&seed, support);
+    if core_depth <= 0.0 {
         return None;
     }
+    let depth = core_depth + shape_a.margin() + shape_b.margin();
 
     // Contact position: the witness point on B, `pointOnB = supportA(normal) -
     // normal * depth`, matching `btGjkPairDetector::getClosestPoints`
     // (`btGjkEpa2::Penetration`'s `witnesses[1]` under our A->B normal
-    // convention). The previous midpoint-of-supports formula used B's *global*
-    // support along -normal, which for a large shape (e.g. a mesh triangle)
-    // lies far from the overlap; the resulting contact position was garbage,
-    // wrecking the solver's torque arms (found by the `mesh` parity scene:
-    // bodies neither tumbled nor rolled downhill like Bullet's).
+    // convention), computed against the full shapes. The previous
+    // midpoint-of-supports formula used B's *global* support along -normal,
+    // which for a large shape (e.g. a mesh triangle) lies far from the
+    // overlap; the resulting contact position was garbage, wrecking the
+    // solver's torque arms (found by the `mesh` parity scene: bodies neither
+    // tumbled nor rolled downhill like Bullet's).
     let point_a = shape_a.support_world(position_a, orientation_a, normal);
     let position = point_a - normal * depth;
     Some(ContactManifold::from_points(vec![ContactPoint::new(
@@ -200,5 +211,87 @@ mod tests {
         let (n, depth) = contact(&a, Vector3::ZERO, &b, Vector3::new(1.25, 0.0, 0.0)).unwrap();
         assert_relative_eq!(n.x, 1.0, epsilon = 1e-3);
         assert_relative_eq!(depth, 0.25, epsilon = 1e-3);
+    }
+
+    /// Margin-core architecture: an overlap that lives inside the margin
+    /// shell (0.54 for this box/sphere pair) is resolved by the GJK walk
+    /// itself — the contact reports the exact depth, normal, and the
+    /// witness on B moved out of the core by B's margin.
+    #[test]
+    fn margin_shell_overlap_resolved_by_walk() {
+        let a = CollisionShape::box_shape(Vector3::splat(1.0));
+        let b = CollisionShape::sphere(0.5);
+        // Sphere bottom at 0.8, box top at 1.0: overlap 0.2.
+        let m = convex_convex(
+            &a,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &b,
+            Vector3::new(0.0, 1.3, 0.0),
+            Quaternion::IDENTITY,
+            None,
+            a.contact_breaking_threshold().min(b.contact_breaking_threshold()),
+        )
+        .unwrap();
+        let p = m.points[0];
+        assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-3);
+        assert_relative_eq!(p.penetration, 0.2, epsilon = 1e-3);
+        // Witness on B: the sphere's bottom point (center minus the radius
+        // along the A->B normal).
+        assert_relative_eq!(p.position.y, 0.8, epsilon = 1e-3);
+    }
+
+    /// Deep overlap past the margin shell runs EPA on the cores and adds
+    /// the margins back: the depth is the true full-shape overlap and the
+    /// witness is computed against the full shapes.
+    #[test]
+    fn deep_overlap_runs_epa_with_margins() {
+        let a = CollisionShape::box_shape(Vector3::splat(1.0));
+        let b = CollisionShape::sphere(0.5);
+        // Sphere bottom at 0.1, box top at 1.0: overlap 0.9, well past the
+        // 0.54 margin shell — the sphere's point core sits 0.36 deep inside
+        // the box's shrunk core.
+        let m = convex_convex(
+            &a,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &b,
+            Vector3::new(0.0, 0.6, 0.0),
+            Quaternion::IDENTITY,
+            None,
+            a.contact_breaking_threshold().min(b.contact_breaking_threshold()),
+        )
+        .unwrap();
+        let p = m.points[0];
+        assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-3);
+        assert_relative_eq!(p.penetration, 0.9, epsilon = 1e-3);
+        // Witness on B against the full shapes: supportA(y) - y*depth =
+        // (0,1,0) - 0.9*y = the sphere's bottom point.
+        assert_relative_eq!(p.position.y, 0.1, epsilon = 1e-3);
+    }
+
+    /// A pair separated inside the contact band reports a velocity-only
+    /// contact with negative penetration (unchanged band semantics under
+    /// the margin-core walk).
+    #[test]
+    fn margin_shell_separation_reports_band() {
+        let a = CollisionShape::capsule(0.5, 1.0);
+        let b = CollisionShape::box_shape(Vector3::splat(1.0));
+        // Capsule surface at x = 0.5, box face at x = 0.51: full shapes
+        // separated by 0.01.
+        let m = convex_convex(
+            &a,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &b,
+            Vector3::new(1.51, 0.0, 0.0),
+            Quaternion::IDENTITY,
+            None,
+            a.contact_breaking_threshold().min(b.contact_breaking_threshold()),
+        )
+        .unwrap();
+        let p = m.points[0];
+        assert_relative_eq!(p.normal.x, 1.0, epsilon = 1e-3);
+        assert_relative_eq!(p.penetration, -0.01, epsilon = 1e-3);
     }
 }

@@ -204,6 +204,29 @@ impl CollisionShape {
         }
     }
 
+    /// Support point of the *core* in local space (Bullet's
+    /// `localGetSupportVertexWithoutMargin`): the shape shrunk by its
+    /// [`margin`](Self::margin). The full shape is the core inflated by a
+    /// ball of that radius, so the GJK/EPA contact pipeline walks the cores
+    /// and adds the margins back at the end — an exact decomposition for
+    /// spheres and capsules (ball Minkowski sums) and the standard
+    /// componentwise-shrink approximation for boxes, cylinders, and cones
+    /// (Bullet's implicit shapes store `halfExtents - margin`). Hulls, mesh
+    /// triangles, and compounds carry no margin in this engine, so their
+    /// core is the full shape.
+    #[inline]
+    pub fn core_support_local(&self, dir: Vector3) -> Vector3 {
+        match self {
+            Self::Sphere(s) => s.core_support_local(dir),
+            Self::BoxShape(b) => b.core_support_local(dir),
+            Self::Capsule(c) => c.core_support_local(dir),
+            Self::Cylinder(c) => c.core_support_local(dir),
+            Self::Cone(c) => c.core_support_local(dir),
+            // Margin-free shapes: the core is the full shape.
+            other => other.support_local(dir),
+        }
+    }
+
     /// Support point in world space, given a pose (position + orientation).
     #[inline]
     pub fn support_world(
@@ -214,6 +237,20 @@ impl CollisionShape {
     ) -> Vector3 {
         let local_dir = orientation.inverse() * dir;
         let local = self.support_local(local_dir);
+        orientation * local + position
+    }
+
+    /// Core support point in world space, given a pose
+    /// ([`core_support_local`](Self::core_support_local) transformed).
+    #[inline]
+    pub fn core_support_world(
+        &self,
+        position: Vector3,
+        orientation: Quaternion,
+        dir: Vector3,
+    ) -> Vector3 {
+        let local_dir = orientation.inverse() * dir;
+        let local = self.core_support_local(local_dir);
         orientation * local + position
     }
 

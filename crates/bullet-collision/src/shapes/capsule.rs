@@ -53,6 +53,21 @@ impl Capsule {
         }
     }
 
+    /// Core support (the whole radius is the margin): the swept segment's
+    /// endpoint along the direction.
+    #[inline]
+    pub fn core_support_local(&self, dir: Vector3) -> Vector3 {
+        Vector3::new(
+            0.0,
+            if dir.y >= 0.0 {
+                self.half_height
+            } else {
+                -self.half_height
+            },
+            0.0,
+        )
+    }
+
     /// Rotated-capsule AABB: inflate the transformed segment endpoints by
     /// `radius` (exact for a sphere-swept segment).
     #[inline]

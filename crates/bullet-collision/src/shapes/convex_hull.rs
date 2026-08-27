@@ -33,11 +33,13 @@ impl ConvexHull {
         Self { points, local_bounds }
     }
 
-    /// Bullet's default convex distance margin (informational only, not baked
-    /// into the geometry, matching the box in this MVP).
+    /// Hulls carry no margin: this engine keeps their geometry exact (the
+    /// GJK/EPA core equals the full shape). Bullet's default 0.04 hull margin
+    /// inflates the user's vertices into a rounded hull — a quirk we do not
+    /// replicate (mesh triangles go through this path too).
     #[inline]
     pub fn margin(&self) -> Real {
-        0.04
+        0.0
     }
 
     #[inline]

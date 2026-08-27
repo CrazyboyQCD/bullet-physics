@@ -172,6 +172,40 @@ fn run_stages(spec: &PerfSceneSpec, dt: Real) {
     println!("stage total_ms {:.3}", t.total().as_secs_f64() * 1000.0);
 }
 
+/// Debug probe: step from frame 0 (including warmup) and dump aggregate
+/// stack health every 5 frames (sum of dynamic-body y, sum/max speed,
+/// awake count).
+fn run_dump(spec: &PerfSceneSpec, dt: Real) {
+    let mut world = build_world(spec);
+    let frames = spec.warmup + spec.frames;
+    for f in 0..frames {
+        world.step_simulation(dt);
+        if f % 5 == 0 || f == frames - 1 {
+            let mut sum_y = 0.0f64;
+            let mut sum_v = 0.0f64;
+            let mut max_v = 0.0f64;
+            let mut awake = 0usize;
+            let mut count = 0usize;
+            for b in world.bodies() {
+                if b.is_static() {
+                    continue;
+                }
+                count += 1;
+                sum_y += b.position.y as f64;
+                let v = b.linear_velocity.length() as f64;
+                sum_v += v;
+                max_v = max_v.max(v);
+                if b.is_active() {
+                    awake += 1;
+                }
+            }
+            println!(
+                "dump frame {f} bodies {count} sum_y {sum_y:.4} sum_v {sum_v:.5} max_v {max_v:.5} awake {awake}"
+            );
+        }
+    }
+}
+
 fn main() {
     if cfg!(debug_assertions) {
         eprintln!("perf_scenes: warning: debug build; run with `cargo run --release`");
@@ -180,6 +214,7 @@ fn main() {
     let scene_name = args.first().cloned().unwrap_or_default();
     let mut repeats: u32 = 5;
     let mut stages = false;
+    let mut dump = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -188,6 +223,7 @@ fn main() {
                 repeats = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(5);
             }
             "--stages" => stages = true,
+            "--dump" => dump = true,
             other => eprintln!("perf_scenes: ignoring unknown arg {other}"),
         }
         i += 1;
@@ -205,6 +241,10 @@ fn main() {
         name, bodies, spec.frames, spec.warmup
     );
 
+    if dump {
+        run_dump(spec, dt);
+        return;
+    }
     if stages {
         run_stages(spec, dt);
         return;

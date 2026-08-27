@@ -292,7 +292,7 @@ Scene: mesh (f32), frames: 420
 | Body | Position max dev | Frame (t) | Orientation max dev | Frame | Exceedances |
 |---|---|---|---|---|---|
 | sphere | 0.155324 | 56 (0.950000) | 0.000000 rad | -1 (nan) | 10 |
-| box | 0.059654 | 56 (0.950000) | 0.141762 rad | 56 (0.950000) | 364 |
+| box | 0.155324 | 56 (0.950000) | 0.012649 rad | 81 (1.366667) | 364 |
 
 Exceedance frames (sphere):
 - frame 56 (t=0.950000): pos=0.155324 ang=0.000000
@@ -307,26 +307,26 @@ Exceedance frames (sphere):
 - frame 65 (t=1.100000): pos=0.028869 ang=0.000000
 
 Exceedance frames (box):
-- frame 56 (t=0.950000): pos=0.059654 ang=0.141762
-- frame 57 (t=0.966667): pos=0.036752 ang=0.094434
-- frame 58 (t=0.983333): pos=0.037360 ang=0.088351
-- frame 59 (t=1.000000): pos=0.036778 ang=0.081715
-- frame 60 (t=1.016667): pos=0.035818 ang=0.076393
-- frame 61 (t=1.033333): pos=0.032528 ang=0.065255
-- frame 62 (t=1.050000): pos=0.027826 ang=0.052283
-- frame 63 (t=1.066667): pos=0.025210 ang=0.043193
-- frame 64 (t=1.083333): pos=0.021232 ang=0.035102
-- frame 65 (t=1.100000): pos=0.025415 ang=0.038393
-- frame 66 (t=1.116667): pos=0.026813 ang=0.038089
-- frame 67 (t=1.133333): pos=0.026929 ang=0.031900
-- frame 68 (t=1.150000): pos=0.025237 ang=0.030710
-- frame 69 (t=1.166667): pos=0.025223 ang=0.022600
-- frame 70 (t=1.183333): pos=0.024734 ang=0.017515
-- frame 71 (t=1.200000): pos=0.024846 ang=0.022957
-- frame 72 (t=1.216667): pos=0.025320 ang=0.027432
-- frame 73 (t=1.233333): pos=0.025368 ang=0.022505
-- frame 74 (t=1.250000): pos=0.025096 ang=0.016538
-- frame 75 (t=1.266667): pos=0.025304 ang=0.018238
+- frame 56 (t=0.950000): pos=0.155324 ang=0.000000
+- frame 57 (t=0.966667): pos=0.151717 ang=0.000000
+- frame 58 (t=0.983333): pos=0.145565 ang=0.002828
+- frame 59 (t=1.000000): pos=0.137532 ang=0.000000
+- frame 60 (t=1.016667): pos=0.128115 ang=0.004000
+- frame 61 (t=1.033333): pos=0.114893 ang=0.008485
+- frame 62 (t=1.050000): pos=0.099067 ang=0.004899
+- frame 63 (t=1.066667): pos=0.082515 ang=0.006325
+- frame 64 (t=1.083333): pos=0.063415 ang=0.008000
+- frame 65 (t=1.100000): pos=0.040748 ang=0.010583
+- frame 66 (t=1.116667): pos=0.014099 ang=0.008944
+- frame 67 (t=1.133333): pos=0.018682 ang=0.004000
+- frame 68 (t=1.150000): pos=0.018118 ang=0.002828
+- frame 69 (t=1.166667): pos=0.016923 ang=0.004000
+- frame 70 (t=1.183333): pos=0.013957 ang=0.004000
+- frame 71 (t=1.200000): pos=0.015113 ang=0.006325
+- frame 72 (t=1.216667): pos=0.015021 ang=0.009381
+- frame 73 (t=1.233333): pos=0.015038 ang=0.008000
+- frame 74 (t=1.250000): pos=0.015094 ang=0.002828
+- frame 75 (t=1.266667): pos=0.017143 ang=0.007483
 - ... and 344 more
 
 Total exceedances: 374 (pos tol 0.01, ang tol 0.01)
@@ -718,7 +718,7 @@ Scene: mesh (f64), frames: 420
 | Body | Position max dev | Frame (t) | Orientation max dev | Frame | Exceedances |
 |---|---|---|---|---|---|
 | sphere | 0.155325 | 56 (0.950000) | 0.000000 rad | -1 (nan) | 10 |
-| box | 0.059655 | 56 (0.950000) | 0.141762 rad | 56 (0.950000) | 31 |
+| box | 0.155325 | 56 (0.950000) | 0.009381 rad | 61 (1.033333) | 342 |
 
 Exceedance frames (sphere):
 - frame 56 (t=0.950000): pos=0.155325 ang=0.000000
@@ -733,29 +733,29 @@ Exceedance frames (sphere):
 - frame 65 (t=1.100000): pos=0.028869 ang=0.000000
 
 Exceedance frames (box):
-- frame 56 (t=0.950000): pos=0.059655 ang=0.141762
-- frame 57 (t=0.966667): pos=0.037686 ang=0.091555
-- frame 58 (t=0.983333): pos=0.039664 ang=0.084013
-- frame 59 (t=1.000000): pos=0.040333 ang=0.080175
-- frame 60 (t=1.016667): pos=0.040932 ang=0.077480
-- frame 61 (t=1.033333): pos=0.038944 ang=0.060082
-- frame 62 (t=1.050000): pos=0.034810 ang=0.044783
-- frame 63 (t=1.066667): pos=0.030543 ang=0.049505
-- frame 64 (t=1.083333): pos=0.024518 ang=0.041035
-- frame 65 (t=1.100000): pos=0.026660 ang=0.027336
-- frame 66 (t=1.116667): pos=0.026953 ang=0.028168
-- frame 67 (t=1.133333): pos=0.026110 ang=0.030557
-- frame 68 (t=1.150000): pos=0.022819 ang=0.027591
-- frame 69 (t=1.166667): pos=0.020895 ang=0.022761
-- frame 70 (t=1.183333): pos=0.018752 ang=0.017149
-- frame 71 (t=1.200000): pos=0.017962 ang=0.016816
-- frame 72 (t=1.216667): pos=0.018091 ang=0.017005
-- frame 73 (t=1.233333): pos=0.017834 ang=0.017580
-- frame 74 (t=1.250000): pos=0.018249 ang=0.015160
-- frame 75 (t=1.266667): pos=0.018465 ang=0.014654
-- ... and 11 more
+- frame 56 (t=0.950000): pos=0.155325 ang=0.000000
+- frame 57 (t=0.966667): pos=0.151718 ang=0.005657
+- frame 58 (t=0.983333): pos=0.146583 ang=0.005657
+- frame 59 (t=1.000000): pos=0.139381 ang=0.002828
+- frame 60 (t=1.016667): pos=0.131456 ang=0.006325
+- frame 61 (t=1.033333): pos=0.119894 ang=0.009381
+- frame 62 (t=1.050000): pos=0.105379 ang=0.009381
+- frame 63 (t=1.066667): pos=0.087757 ang=0.008485
+- frame 64 (t=1.083333): pos=0.066795 ang=0.008485
+- frame 65 (t=1.100000): pos=0.042541 ang=0.008000
+- frame 66 (t=1.116667): pos=0.015793 ang=0.006325
+- frame 67 (t=1.133333): pos=0.020103 ang=0.006325
+- frame 68 (t=1.150000): pos=0.019755 ang=0.006928
+- frame 69 (t=1.166667): pos=0.017361 ang=0.006325
+- frame 70 (t=1.183333): pos=0.013974 ang=0.004000
+- frame 71 (t=1.200000): pos=0.014671 ang=0.006325
+- frame 72 (t=1.216667): pos=0.014732 ang=0.008485
+- frame 73 (t=1.233333): pos=0.012926 ang=0.006928
+- frame 74 (t=1.250000): pos=0.012721 ang=0.004899
+- frame 75 (t=1.266667): pos=0.013361 ang=0.005657
+- ... and 322 more
 
-Total exceedances: 41 (pos tol 0.01, ang tol 0.01)
+Total exceedances: 352 (pos tol 0.01, ang tol 0.01)
 
 ### Difference classification
 

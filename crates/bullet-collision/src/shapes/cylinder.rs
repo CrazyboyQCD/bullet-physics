@@ -47,6 +47,27 @@ impl Cylinder {
         Vector3::new(side.x, y, side.z)
     }
 
+    /// Core support: the cylinder shrunk by the margin in radius and
+    /// half-height (Bullet stores `halfExtents - margin` for cylinders).
+    #[inline]
+    pub fn core_support_local(&self, dir: Vector3) -> Vector3 {
+        let radius = (self.radius - self.margin()).max(0.0);
+        let half_height = (self.half_height - self.margin()).max(0.0);
+        let xy_len = dir.x * dir.x + dir.z * dir.z;
+        let side = if xy_len > 0.0 {
+            let s = radius / xy_len.sqrt();
+            Vector3::new(dir.x * s, 0.0, dir.z * s)
+        } else {
+            Vector3::new(radius, 0.0, 0.0)
+        };
+        let y = if dir.y >= 0.0 {
+            half_height
+        } else {
+            -half_height
+        };
+        Vector3::new(side.x, y, side.z)
+    }
+
     /// Rotated-cylinder AABB via support projections along the world axes
     /// (exact: the projected half-width is `r * |u.xz| + hh * |u.y|`).
     #[inline]

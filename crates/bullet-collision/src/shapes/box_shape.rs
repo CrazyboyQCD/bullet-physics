@@ -36,6 +36,22 @@ impl BoxShape {
         )
     }
 
+    /// Core support: the box shrunk componentwise by its margin
+    /// (Bullet stores `halfExtents - margin` as the implicit dimensions).
+    #[inline]
+    pub fn core_support_local(&self, dir: Vector3) -> Vector3 {
+        let h = Vector3::new(
+            (self.half_extents.x - self.margin()).max(0.0),
+            (self.half_extents.y - self.margin()).max(0.0),
+            (self.half_extents.z - self.margin()).max(0.0),
+        );
+        Vector3::new(
+            if dir.x >= 0.0 { h.x } else { -h.x },
+            if dir.y >= 0.0 { h.y } else { -h.y },
+            if dir.z >= 0.0 { h.z } else { -h.z },
+        )
+    }
+
     /// Rotated-box AABB from its 8 corners.
     #[inline]
     pub fn world_aabb(&self, position: Vector3, orientation: Quaternion) -> Aabb {

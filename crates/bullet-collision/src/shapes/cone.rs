@@ -59,6 +59,36 @@ impl Cone {
         }
     }
 
+    /// Core support: the cone shrunk by the margin in radius and half-height
+    /// (the same componentwise shrink Bullet applies to cylinders; Bullet's
+    /// own cone support keeps the full dimensions, a quirk we do not keep).
+    #[inline]
+    pub fn core_support_local(&self, dir: Vector3) -> Vector3 {
+        let radius = (self.radius - self.margin()).max(0.0);
+        let half_height = (self.half_height - self.margin()).max(0.0);
+        let len = dir.length();
+        if len > 0.0 {
+            let d = dir / len;
+            let apex = Vector3::new(0.0, half_height, 0.0);
+            let xy_len = d.x * d.x + d.z * d.z;
+            if xy_len > 0.0 {
+                let s = radius / xy_len.sqrt();
+                let rim = Vector3::new(d.x * s, -half_height, d.z * s);
+                if rim.dot(d) > apex.dot(d) {
+                    rim
+                } else {
+                    apex
+                }
+            } else if d.y >= 0.0 {
+                apex
+            } else {
+                Vector3::new(0.0, -half_height, 0.0)
+            }
+        } else {
+            Vector3::new(radius, half_height, 0.0)
+        }
+    }
+
     /// Rotated-cone AABB via support projections along the world axes.
     #[inline]
     pub fn world_aabb(&self, position: Vector3, orientation: Quaternion) -> Aabb {
