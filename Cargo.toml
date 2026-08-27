@@ -23,3 +23,8 @@ approx = "0.5"
 # the PDB alongside the optimized code, so the runtime cost is zero.
 [profile.release]
 debug = true
+# Cross-crate inlining for the hot narrow-phase/solver loops (glam calls live
+# in bullet-math but inline into bullet-collision only under LTO). No
+# floating-point reordering is involved, so numerics are unchanged.
+lto = "fat"
+codegen-units = 1
