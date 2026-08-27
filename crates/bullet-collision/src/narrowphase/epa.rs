@@ -67,7 +67,7 @@ pub fn penetration(
 struct EpaScratch {
     vertices: Vec<Vector3>,
     faces: Vec<Face>,
-    boundary: std::collections::HashSet<(usize, usize)>,
+    boundary: Vec<(usize, usize)>,
 }
 
 fn penetration_inner(
@@ -229,11 +229,15 @@ fn edge_distance(pa: Vector3, pb: Vector3, normal: Vector3) -> Option<Real> {
 fn expand(
     faces: &mut Vec<Face>,
     vertices: &[Vector3],
-    boundary: &mut std::collections::HashSet<(usize, usize)>,
+    boundary: &mut Vec<(usize, usize)>,
     new_point: Vector3,
     new_idx: usize,
 ) -> bool {
-    // Remove faces visible from the new point, tracking the boundary loop.
+    // Remove faces visible from the new point, tracking the boundary loop:
+    // a directed edge whose reverse is already tracked is interior to the
+    // visible region (cancel both); otherwise it lies on the horizon. The
+    // horizon is small (tens of edges), so linear matching beats a hash set
+    // and its SipHash cost — which dominated the profile.
     boundary.clear();
 
     faces.retain(|f| {
@@ -242,18 +246,23 @@ fn expand(
         let visible = f.normal.dot(new_point) - f.plane_distance > PLANE_EPS;
         if visible {
             for (u, v) in [(f.a, f.b), (f.b, f.c), (f.c, f.a)] {
-                if boundary.contains(&(v, u)) {
-                    boundary.remove(&(v, u));
-                } else {
-                    boundary.insert((u, v));
+                match boundary.iter().position(|&(x, y)| x == v && y == u) {
+                    Some(i) => {
+                        // Cancel the interior edge. `swap_remove` reorders the
+                        // rest, but the horizon order is already arbitrary
+                        // (face creation order never feeds back into results:
+                        // `find_best` ties aside, the closest face is unique).
+                        boundary.swap_remove(i);
+                    }
+                    None => boundary.push((u, v)),
                 }
             }
         }
         !visible
     });
 
-    // Drain keeps the pooled set's capacity for the next expansion.
-    for (u, v) in boundary.drain() {
+    // Drain keeps the pooled vec's capacity for the next expansion.
+    for (u, v) in boundary.drain(..) {
         let cross = (vertices[v] - vertices[u]).cross(new_point - vertices[u]);
         let len = cross.length();
         if len < 1e-12 {
