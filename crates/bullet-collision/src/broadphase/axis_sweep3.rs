@@ -7,7 +7,7 @@ use super::{aabb_raycast_candidates, BroadPhase};
 const MASK: u16 = 0xfffe;
 const SENTINEL_POS: u16 = 0xffff;
 /// Owner id of the two boundary sentinel edges (Bullet reserves handle 0).
-const SENTINEL_HANDLE: usize = usize::MAX;
+const SENTINEL_HANDLE: u32 = u32::MAX;
 /// Components at or beyond this magnitude (plane AABBs are ±1e30) do not
 /// constrain the auto-grown quantization frame; such proxies simply quantize
 /// to the clamped frame edges, conservative like a plane inside Bullet's
@@ -42,7 +42,15 @@ const FRAME_COMPONENT_LIMIT: f64 = 1e18;
 /// for identical inputs (lexicographic on `(i, j)`), so tests can compare
 /// directly.
 pub struct AxisSweep3 {
-    handles: Vec<Option<Handle>>,
+    aabbs: Vec<Option<Aabb>>,
+    /// Per-proxy min/max edge indices per axis, parallel to `aabbs`. Kept
+    /// out of `Option` and down to `u32` so the edge-index fixups inside a
+    /// swap-heavy `sort_*` bubble are flat array writes (the old
+    /// in-`Handle` `usize` triples cost an `Option` unwrap plus a fat
+    /// bounds-checked write per swap step — the dominant constant-factor
+    /// gap against Bullet's `updateHandle` on dense swinging scenes).
+    min_edges: Vec<[u32; 3]>,
+    max_edges: Vec<[u32; 3]>,
     edges: [Vec<Edge>; 3],
     /// Persistently maintained quantized-overlap set (Bullet's pair cache),
     /// normalized `(min, max)` proxy ids kept sorted lexicographically at all
@@ -54,18 +62,11 @@ pub struct AxisSweep3 {
     /// removed the SipHash tax but still needed the sort for output order).
     pairs: Vec<(usize, usize)>,
     /// Quantization frame (Bullet's `m_worldAabbMin/Max` + `m_quantize`),
-    /// grown from the finite proxy AABBs with 50% headroom per axis.
+    /// grown from the finite proxy AABBs with headroom per axis.
     frame_min: Vector3,
     frame_max: Vector3,
     quant: Vector3,
     has_frame: bool,
-}
-
-struct Handle {
-    aabb: Aabb,
-    /// Index of this proxy's min/max edge in each axis's edge list.
-    min_edges: [usize; 3],
-    max_edges: [usize; 3],
 }
 
 #[derive(Clone, Copy)]
@@ -73,7 +74,9 @@ struct Edge {
     /// Quantized position; the low bit marks a max edge (Bullet's
     /// `Edge::IsMax`).
     pos: u16,
-    handle: usize,
+    /// Owning proxy slot (`u32` halves the edge-table footprint against
+    /// `usize`; Bullet packs both fields into one `unsigned short` each).
+    handle: u32,
 }
 
 impl Edge {
@@ -109,7 +112,9 @@ fn frame_relevant(v: impl Into<f64>) -> bool {
 impl AxisSweep3 {
     pub fn new() -> Self {
         Self {
-            handles: Vec::new(),
+            aabbs: Vec::new(),
+            min_edges: Vec::new(),
+            max_edges: Vec::new(),
             edges: [Vec::new(), Vec::new(), Vec::new()],
             pairs: Vec::new(),
             frame_min: Vector3::ZERO,
@@ -192,17 +197,25 @@ impl AxisSweep3 {
                 }
             }
         };
-        for h in self.handles.iter().flatten() {
-            absorb(&h.aabb, &mut lo, &mut hi);
+        for aabb in self.aabbs.iter().flatten() {
+            absorb(aabb, &mut lo, &mut hi);
         }
         if let Some(aabb) = extra {
             absorb(aabb, &mut lo, &mut hi);
         }
         for k in 0..3 {
-            // 50% headroom per axis (floor for degenerate points) so normal
-            // motion stays inside the frame for a while.
+            // 100% headroom per axis (floor for degenerate points). The
+            // headroom serves two masters at once: it keeps oscillating
+            // bodies (a swinging chain's AABB peaks drift frame to frame)
+            // inside the frame so full rebuilds stay rare, and the wider
+            // frame coarsens the 16-bit quantization, which halves the
+            // edge-swap traffic per unit of motion. Both effects are
+            // output-neutral: quantization is a conservative floor/ceil
+            // mapping (the edge tables overlap-superset the exact AABBs)
+            // and `compute_pairs` reports the exact-filtered, ordered pair
+            // set regardless of the frame's granularity.
             let extent = (hi[k] - lo[k]).max(0.0);
-            let margin = (extent * 0.5).max(0.5);
+            let margin = (extent * 1.0).max(0.5);
             if !frame_relevant(lo[k]) {
                 lo[k] = -0.5;
                 hi[k] = 0.5;
@@ -217,11 +230,11 @@ impl AxisSweep3 {
         self.has_frame = true;
 
         self.pairs.clear();
-        let slots: Vec<usize> = self
-            .handles
+        let live: Vec<(usize, Aabb)> = self
+            .aabbs
             .iter()
             .enumerate()
-            .filter_map(|(i, h)| h.as_ref().map(|_| i))
+            .filter_map(|(i, h)| h.map(|aabb| (i, aabb)))
             .collect();
         for k in 0..3 {
             self.edges[k] = vec![
@@ -229,8 +242,7 @@ impl AxisSweep3 {
                 Edge { pos: SENTINEL_POS, handle: SENTINEL_HANDLE },
             ];
         }
-        for slot in slots {
-            let aabb = self.handles[slot].as_ref().unwrap().aabb;
+        for (slot, aabb) in live {
             self.insert_handle(slot, aabb);
         }
     }
@@ -245,131 +257,147 @@ impl AxisSweep3 {
         for k in 0..3 {
             let n = self.edges[k].len();
             self.edges[k].truncate(n - 1); // drop the max sentinel
-            self.edges[k].push(Edge { pos: qmin[k], handle: slot });
-            self.edges[k].push(Edge { pos: qmax[k], handle: slot });
+            self.edges[k].push(Edge { pos: qmin[k], handle: slot as u32 });
+            self.edges[k].push(Edge { pos: qmax[k], handle: slot as u32 });
             self.edges[k].push(Edge { pos: SENTINEL_POS, handle: SENTINEL_HANDLE });
-            let h = self.handles[slot].as_mut().unwrap();
-            h.min_edges[k] = n - 1;
-            h.max_edges[k] = n;
+            self.min_edges[slot][k] = (n - 1) as u32;
+            self.max_edges[slot][k] = n as u32;
         }
         for k in 0..3 {
-            let (emin, emax) = {
-                let h = self.handles[slot].as_ref().unwrap();
-                (h.min_edges[k], h.max_edges[k])
-            };
+            let (emin, emax) = (self.min_edges[slot][k] as usize, self.max_edges[slot][k] as usize);
             let update_overlaps = k == 2;
             self.sort_min_down(k, emin, update_overlaps);
             self.sort_max_down(k, emax, update_overlaps);
         }
     }
 
-    /// Swap two adjacent edges, fixing the owners' stored edge indices
-    /// (Bullet does the fixups inline in its sorts).
-    fn swap_edges(&mut self, k: usize, i: usize, j: usize) {
-        let a = self.edges[k][i];
-        let b = self.edges[k][j];
-        if a.handle != SENTINEL_HANDLE {
-            let h = self.handles[a.handle].as_mut().unwrap();
-            if a.is_max() { h.max_edges[k] = j } else { h.min_edges[k] = j }
-        }
-        if b.handle != SENTINEL_HANDLE {
-            let h = self.handles[b.handle].as_mut().unwrap();
-            if b.is_max() { h.max_edges[k] = i } else { h.min_edges[k] = i }
-        }
-        self.edges[k][i] = b;
-        self.edges[k][j] = a;
-    }
-
     /// Bullet's `testOverlap2D`: overlap on the other two axes, decided by
     /// edge-array indices (the arrays are sorted, so index order equals
     /// position order).
+    #[inline]
     fn test_overlap_2d(&self, a: usize, b: usize, axis0: usize, axis1: usize) -> bool {
-        let ha = self.handles[a].as_ref().unwrap();
-        let hb = self.handles[b].as_ref().unwrap();
-        !(ha.max_edges[axis0] < hb.min_edges[axis0]
-            || hb.max_edges[axis0] < ha.min_edges[axis0]
-            || ha.max_edges[axis1] < hb.min_edges[axis1]
-            || hb.max_edges[axis1] < ha.min_edges[axis1])
+        let (a_min, a_max) = (&self.min_edges[a], &self.max_edges[a]);
+        let (b_min, b_max) = (&self.min_edges[b], &self.max_edges[b]);
+        !(a_max[axis0] < b_min[axis0]
+            || b_max[axis0] < a_min[axis0]
+            || a_max[axis1] < b_min[axis1]
+            || b_max[axis1] < a_min[axis1])
     }
 
     /// A min edge bubbling down can only *add* overlaps (Bullet's
-    /// `sortMinDown`); stops at the min sentinel (pos 0).
+    /// `sortMinDown`); stops at the min sentinel (pos 0). The moving edge
+    /// is hoisted out of the loop — its position and handle are loop
+    /// invariants — and its own edge index is written once at the end
+    /// instead of on every swap; only the displaced neighbour needs a
+    /// per-step fixup (a flat `u32` write into `min_edges`/`max_edges`).
     fn sort_min_down(&mut self, k: usize, mut i: usize, update_overlaps: bool) {
-        while i > 0 && self.edges[k][i].pos < self.edges[k][i - 1].pos {
+        let moving = self.edges[k][i];
+        let axis1 = (k + 1) % 3;
+        let axis2 = (k + 2) % 3;
+        while i > 0 {
             let prev = self.edges[k][i - 1];
-            if prev.is_max() && update_overlaps {
-                let handle = self.edges[k][i].handle;
-                let axis1 = (k + 1) % 3;
-                let axis2 = (k + 2) % 3;
-                if self.test_overlap_2d(handle, prev.handle, axis1, axis2) {
-                    self.pair_insert(pair_key(handle, prev.handle));
-                }
+            if moving.pos >= prev.pos {
+                break;
             }
-            self.swap_edges(k, i - 1, i);
+            if prev.is_max() {
+                if update_overlaps
+                    && self.test_overlap_2d(moving.handle as usize, prev.handle as usize, axis1, axis2)
+                {
+                    self.pair_insert(pair_key(moving.handle as usize, prev.handle as usize));
+                }
+                self.max_edges[prev.handle as usize][k] = i as u32;
+            } else {
+                self.min_edges[prev.handle as usize][k] = i as u32;
+            }
+            self.edges[k][i] = prev;
+            self.edges[k][i - 1] = moving;
             i -= 1;
         }
+        self.min_edges[moving.handle as usize][k] = i as u32;
     }
 
     /// A min edge bubbling up can only *remove* overlaps (Bullet's
     /// `sortMinUp`; removal is unconditional — `USE_OVERLAP_TEST_ON_REMOVES`
     /// is off — because an axis crossing implies separation).
     fn sort_min_up(&mut self, k: usize, mut i: usize, update_overlaps: bool) {
+        let moving = self.edges[k][i];
         while self.edges[k][i + 1].handle != SENTINEL_HANDLE
-            && self.edges[k][i].pos >= self.edges[k][i + 1].pos
+            && moving.pos >= self.edges[k][i + 1].pos
         {
             let next = self.edges[k][i + 1];
             if next.is_max() && update_overlaps {
-                let handle = self.edges[k][i].handle;
-                self.pair_remove(pair_key(handle, next.handle));
+                self.pair_remove(pair_key(moving.handle as usize, next.handle as usize));
             }
-            self.swap_edges(k, i, i + 1);
+            if next.is_max() {
+                self.max_edges[next.handle as usize][k] = i as u32;
+            } else {
+                self.min_edges[next.handle as usize][k] = i as u32;
+            }
+            self.edges[k][i + 1] = moving;
+            self.edges[k][i] = next;
             i += 1;
         }
+        self.min_edges[moving.handle as usize][k] = i as u32;
     }
 
     /// A max edge bubbling down can only *remove* overlaps (Bullet's
     /// `sortMaxDown`).
     fn sort_max_down(&mut self, k: usize, mut i: usize, update_overlaps: bool) {
-        while i > 0 && self.edges[k][i].pos < self.edges[k][i - 1].pos {
+        let moving = self.edges[k][i];
+        while i > 0 {
             let prev = self.edges[k][i - 1];
-            if !prev.is_max() && update_overlaps {
-                let handle = self.edges[k][i].handle;
-                self.pair_remove(pair_key(handle, prev.handle));
+            if moving.pos >= prev.pos {
+                break;
             }
-            self.swap_edges(k, i - 1, i);
+            if !prev.is_max() && update_overlaps {
+                self.pair_remove(pair_key(moving.handle as usize, prev.handle as usize));
+            }
+            if prev.is_max() {
+                self.max_edges[prev.handle as usize][k] = i as u32;
+            } else {
+                self.min_edges[prev.handle as usize][k] = i as u32;
+            }
+            self.edges[k][i] = prev;
+            self.edges[k][i - 1] = moving;
             i -= 1;
         }
+        self.max_edges[moving.handle as usize][k] = i as u32;
     }
 
     /// A max edge bubbling up can only *add* overlaps (Bullet's `sortMaxUp`:
     /// crossing another proxy's min edge with the 2D pretest).
     fn sort_max_up(&mut self, k: usize, mut i: usize, update_overlaps: bool) {
+        let moving = self.edges[k][i];
+        let axis1 = (k + 1) % 3;
+        let axis2 = (k + 2) % 3;
         while self.edges[k][i + 1].handle != SENTINEL_HANDLE
-            && self.edges[k][i].pos >= self.edges[k][i + 1].pos
+            && moving.pos >= self.edges[k][i + 1].pos
         {
             let next = self.edges[k][i + 1];
-            if !next.is_max() && update_overlaps {
-                let handle = self.edges[k][i].handle;
-                let axis1 = (k + 1) % 3;
-                let axis2 = (k + 2) % 3;
-                if self.test_overlap_2d(handle, next.handle, axis1, axis2) {
-                    self.pair_insert(pair_key(handle, next.handle));
-                }
+            if !next.is_max() && update_overlaps
+                && self.test_overlap_2d(moving.handle as usize, next.handle as usize, axis1, axis2)
+            {
+                self.pair_insert(pair_key(moving.handle as usize, next.handle as usize));
             }
-            self.swap_edges(k, i, i + 1);
+            if next.is_max() {
+                self.max_edges[next.handle as usize][k] = i as u32;
+            } else {
+                self.min_edges[next.handle as usize][k] = i as u32;
+            }
+            self.edges[k][i + 1] = moving;
+            self.edges[k][i] = next;
             i += 1;
         }
+        self.max_edges[moving.handle as usize][k] = i as u32;
     }
 }
 
 impl BroadPhase for AxisSweep3 {
     fn create_proxy(&mut self, aabb: Aabb) -> usize {
-        if let Some(i) = self.handles.iter().position(|h| h.is_none()) {
-            self.handles[i] = Some(Handle {
-                aabb,
-                min_edges: [0; 3],
-                max_edges: [0; 3],
-            });
+        if let Some(i) = self.aabbs.iter().position(|h| h.is_none()) {
+            self.aabbs[i] = Some(aabb);
+            self.min_edges[i] = [0; 3];
+            self.max_edges[i] = [0; 3];
             if self.needs_rebuild(&aabb) {
                 self.rebuild(Some(&aabb));
             } else {
@@ -377,12 +405,10 @@ impl BroadPhase for AxisSweep3 {
             }
             i
         } else {
-            self.handles.push(Some(Handle {
-                aabb,
-                min_edges: [0; 3],
-                max_edges: [0; 3],
-            }));
-            let slot = self.handles.len() - 1;
+            self.aabbs.push(Some(aabb));
+            self.min_edges.push([0; 3]);
+            self.max_edges.push([0; 3]);
+            let slot = self.aabbs.len() - 1;
             if self.needs_rebuild(&aabb) {
                 self.rebuild(Some(&aabb));
             } else {
@@ -393,10 +419,10 @@ impl BroadPhase for AxisSweep3 {
     }
 
     fn set_aabb(&mut self, proxy: usize, aabb: Aabb) {
-        let Some(handle) = self.handles[proxy].as_mut() else {
+        let Some(slot_aabb) = self.aabbs[proxy].as_mut() else {
             return;
         };
-        handle.aabb = aabb;
+        *slot_aabb = aabb;
         if self.needs_rebuild(&aabb) {
             self.rebuild(None);
             return;
@@ -404,13 +430,9 @@ impl BroadPhase for AxisSweep3 {
         let (qmin, qmax) = (self.quantize(aabb.min, false), self.quantize(aabb.max, true));
         for k in 0..3 {
             let (emin, emax, old_min, old_max) = {
-                let h = self.handles[proxy].as_ref().unwrap();
-                (
-                    h.min_edges[k],
-                    h.max_edges[k],
-                    self.edges[k][h.min_edges[k]].pos,
-                    self.edges[k][h.max_edges[k]].pos,
-                )
+                let emin = self.min_edges[proxy][k] as usize;
+                let emax = self.max_edges[proxy][k] as usize;
+                (emin, emax, self.edges[k][emin].pos, self.edges[k][emax].pos)
             };
             // Sub-quantum jitter rewrites nothing (Bullet's resting stacks
             // do no broad-phase work).
@@ -441,28 +463,28 @@ impl BroadPhase for AxisSweep3 {
         // fine — Bullet instead swaps the dead edges to the array end).
         self.pairs.retain(|&(a, b)| a != proxy && b != proxy);
         for k in 0..3 {
-            let (imin, imax) = {
-                let h = self.handles[proxy].as_ref().unwrap();
-                (h.min_edges[k], h.max_edges[k])
-            };
+            let (imin, imax) = (
+                self.min_edges[proxy][k] as usize,
+                self.max_edges[proxy][k] as usize,
+            );
             let (lo, hi) = (imin.min(imax), imax.max(imin));
             self.edges[k].remove(hi);
             self.edges[k].remove(lo);
-            for h in self.handles.iter_mut().flatten() {
-                for idx in [&mut h.min_edges[k], &mut h.max_edges[k]] {
-                    if *idx > hi {
-                        *idx -= 2;
-                    } else if *idx > lo {
-                        *idx -= 1;
+            for edges in [&mut self.min_edges, &mut self.max_edges] {
+                for e in edges.iter_mut() {
+                    if e[k] as usize > hi {
+                        e[k] -= 2;
+                    } else if e[k] as usize > lo {
+                        e[k] -= 1;
                     }
                 }
             }
         }
-        self.handles[proxy] = None;
+        self.aabbs[proxy] = None;
     }
 
     fn proxy_aabb(&self, proxy: usize) -> Option<Aabb> {
-        self.handles[proxy].as_ref().map(|h| h.aabb)
+        self.aabbs[proxy]
     }
 
     fn compute_pairs(&mut self) -> Vec<(usize, usize)> {
@@ -474,9 +496,8 @@ impl BroadPhase for AxisSweep3 {
             .iter()
             .copied()
             .filter(|&(a, b)| {
-                let ha = self.handles[a].as_ref().unwrap();
-                let hb = self.handles[b].as_ref().unwrap();
-                ha.aabb.overlaps(&hb.aabb)
+                matches!((self.aabbs[a], self.aabbs[b]),
+                         (Some(x), Some(y)) if x.overlaps(&y))
             })
             .collect()
     }
@@ -496,7 +517,7 @@ impl BroadPhase for AxisSweep3 {
 
 impl AxisSweep3 {
     fn live_aabbs(&self) -> Vec<Option<Aabb>> {
-        self.handles.iter().map(|h| h.as_ref().map(|x| x.aabb)).collect()
+        self.aabbs.clone()
     }
 }
 
