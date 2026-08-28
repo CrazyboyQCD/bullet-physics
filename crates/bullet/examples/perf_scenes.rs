@@ -179,6 +179,12 @@ fn run_stages(spec: &PerfSceneSpec, dt: Real) {
     println!("stage total_ms {:.3}", t.total().as_secs_f64() * 1000.0);
 }
 
+/// Widening helper that stays cast-free under both precisions (same
+/// pattern as `frame_relevant` in axis_sweep3.rs).
+fn to_f64(v: impl Into<f64>) -> f64 {
+    v.into()
+}
+
 /// Debug probe: step from frame 0 (including warmup) and dump aggregate
 /// stack health every 5 frames (sum of dynamic-body y, sum/max speed,
 /// awake count).
@@ -198,8 +204,8 @@ fn run_dump(spec: &PerfSceneSpec, dt: Real) {
                     continue;
                 }
                 count += 1;
-                sum_y += b.position.y as f64;
-                let v = b.linear_velocity.length() as f64;
+                sum_y += to_f64(b.position.y);
+                let v = to_f64(b.linear_velocity.length());
                 sum_v += v;
                 max_v = max_v.max(v);
                 if b.is_active() {

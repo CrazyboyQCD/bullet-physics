@@ -213,9 +213,15 @@ def update_ledger(scene, report_md):
         print(f"note: no generated report under {scene_header}; skipping", file=sys.stderr)
         return
     sec_start = scene_pos + rep_pos
-    next_heading = text.find("\n### ", sec_start)
-    if next_heading < 0 or next_heading > end:
-        next_heading = end
+    # The generated report ends at the next hand-written analysis
+    # paragraph ("\n**"), the next heading, or the scene section's end —
+    # whichever comes first. The old end-only fallback silently ate the
+    # hand-written analysis paragraphs under the numbers (pit 5 in
+    # HANDOFF.md, three recurrences).
+    candidates = [pos for pos in (text.find("\n### ", sec_start),
+                                  text.find("\n**", sec_start))
+                   if 0 <= pos <= end]
+    next_heading = min(candidates) if candidates else end
     updated = text[:sec_start] + new_section + "\n\n" + text[next_heading + 1:]
     with open(LEDGER, "w", encoding="utf-8") as f:
         f.write(updated)

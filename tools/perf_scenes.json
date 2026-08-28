@@ -80,17 +80,17 @@
       ]
     },
     "mb_chains": {
-      "comment": "Featherstone ABA + multibody constraint stress: a 5x4 grid (20) of fixed-base 3-link revolute pendulums released from 60 degrees. Link colliders are 0.1 spheres in the DefaultFilter group (required for the C++ island solver); the chains never touch the ground, so this isolates the articulated dynamics path.",
+      "comment": "Featherstone ABA + multibody constraint stress: a 20x10 grid (200) of fixed-base 3-link revolute pendulums released from 60 degrees. Link colliders are 0.1 spheres in the DefaultFilter group (required for the C++ island solver); the chains never touch each other, so this isolates the articulated dynamics path at a realistic scale (the original 5x4/20-chain grid ran ~45us/frame, too small to separate engine cost from launch noise).",
       "dt": [1, 60],
       "frames": 300,
       "warmup": 5,
       "iterations": 10,
       "gravity": [0, -9.81, 0],
-      "broadphase_aabb": [[-20, -2, -20], [20, 12, 20]],
+      "broadphase_aabb": [[-32, -2, -32], [32, 12, 32]],
       "bodies": [],
       "chains": {
-        "count": 20,
-        "cols": 5,
+        "count": 200,
+        "cols": 20,
         "links": 3,
         "spacing": 3.0,
         "base_height": 4.0,
