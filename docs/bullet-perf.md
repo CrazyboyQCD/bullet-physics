@@ -78,19 +78,19 @@ Scene: stack_1000 (f32), bodies: 1001, frames: 600, warmup: 30, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.412 | 847.4 | 104.5 |
-| rust | 1.014 | 608.7 | 41.6 |
-| rust/bullet | 0.72x | | |
+| bullet | 1.349 | 809.6 | 102.6 |
+| rust | 0.988 | 592.9 | 51.6 |
+| rust/bullet | 0.73x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
-- integrate_velocities: 2.1 ms (0.4%)
-- update_aabbs: 18.1 ms (3.2%)
-- broadphase: 54.9 ms (9.6%)
-- islands: 37.8 ms (6.6%)
-- narrowphase: 179.8 ms (31.5%)
-- solve: 274.7 ms (48.1%)
-- integrate_positions: 4.0 ms (0.7%)
+- integrate_velocities: 2.2 ms (0.4%)
+- update_aabbs: 19.6 ms (3.4%)
+- broadphase: 49.7 ms (8.7%)
+- islands: 38.0 ms (6.6%)
+- narrowphase: 183.9 ms (32.1%)
+- solve: 275.9 ms (48.1%)
+- integrate_positions: 4.4 ms (0.8%)
 
 ## Scene: rain_500
 
@@ -100,19 +100,19 @@ Scene: rain_500 (f32), bodies: 501, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 3.798 | 1139.3 | 1139.3 |
-| rust | 1.502 | 450.5 | 450.5 |
-| rust/bullet | 0.40x | | |
+| bullet | 3.854 | 1156.1 | 1156.1 |
+| rust | 1.512 | 453.5 | 453.5 |
+| rust/bullet | 0.39x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 1.5 ms (0.3%)
-- update_aabbs: 29.3 ms (6.4%)
-- broadphase: 2.5 ms (0.5%)
-- islands: 3.6 ms (0.8%)
-- narrowphase: 191.3 ms (41.9%)
-- solve: 225.8 ms (49.5%)
-- integrate_positions: 2.4 ms (0.5%)
+- integrate_velocities: 1.6 ms (0.3%)
+- update_aabbs: 30.3 ms (6.6%)
+- broadphase: 2.2 ms (0.5%)
+- islands: 3.8 ms (0.8%)
+- narrowphase: 191.6 ms (41.8%)
+- solve: 226.1 ms (49.3%)
+- integrate_positions: 2.6 ms (0.6%)
 
 **2026-08-28 SipHash removal round (Fx-hash pair-keyed maps).** The
 post-pair-set stack_1000 profile put the `manifold_cache` lookups at
@@ -272,19 +272,19 @@ Scene: mb_chains (f32), bodies: 200, frames: 300, warmup: 5, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 0.784 | 235.1 | 235.1 |
-| rust | 0.522 | 156.7 | 156.7 |
-| rust/bullet | 0.67x | | |
+| bullet | 0.815 | 244.5 | 244.5 |
+| rust | 0.470 | 141.1 | 141.1 |
+| rust/bullet | 0.58x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 34.6 ms (22.7%)
-- update_aabbs: 76.9 ms (50.5%)
-- broadphase: 0.1 ms (0.1%)
-- islands: 0.4 ms (0.3%)
-- narrowphase: 1.1 ms (0.7%)
-- solve: 22.9 ms (15.1%)
-- integrate_positions: 16.2 ms (10.6%)
+- integrate_velocities: 28.9 ms (21.5%)
+- update_aabbs: 76.5 ms (56.9%)
+- broadphase: 0.2 ms (0.1%)
+- islands: 0.5 ms (0.3%)
+- narrowphase: 1.2 ms (0.9%)
+- solve: 14.5 ms (10.8%)
+- integrate_positions: 12.7 ms (9.4%)
 
 **2026-08-28 scene scaled 20 -> 200 chains + two waste fixes.** The
 original 5x4/20-chain grid ran ~45us/frame — too small to separate engine
@@ -366,19 +366,19 @@ Scene: dbvt_rain_2000 (f32), bodies: 2001, frames: 300, warmup: 10, repeats medi
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 20.611 | 6183.4 | 6183.4 |
-| rust | 7.138 | 2141.5 | 2141.5 |
-| rust/bullet | 0.35x | | |
+| bullet | 20.437 | 6131.2 | 6131.2 |
+| rust | 7.268 | 2180.3 | 2180.3 |
+| rust/bullet | 0.36x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 6.8 ms (0.3%)
-- update_aabbs: 206.1 ms (9.5%)
+- integrate_velocities: 6.9 ms (0.3%)
+- update_aabbs: 205.8 ms (9.4%)
 - broadphase: 8.8 ms (0.4%)
-- islands: 15.6 ms (0.7%)
-- narrowphase: 941.4 ms (43.4%)
-- solve: 980.8 ms (45.2%)
-- integrate_positions: 11.8 ms (0.5%)
+- islands: 15.5 ms (0.7%)
+- narrowphase: 942.8 ms (43.3%)
+- solve: 986.8 ms (45.3%)
+- integrate_positions: 11.9 ms (0.5%)
 
 **2026-08-28 Dbvt broad phase round.** `btDbvt`/`btDbvtBroadphase` ported
 as `broadphase::DbvtBroadPhase` (array-based trees: node slab + free list,

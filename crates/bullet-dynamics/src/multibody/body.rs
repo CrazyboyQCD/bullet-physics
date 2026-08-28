@@ -53,6 +53,22 @@ pub struct MultiBodyScratch {
     pub rot_from_world: Vec<Matrix3>,
     /// Articulated-body inertias `Îᵢᴬ` (one per link + base).
     pub spat_inertia: Vec<SymmetricSpatialDyad>,
+    /// Per-link ABA D matrices (`dof_count^2` entries, cleared per link).
+    pub aba_d: Vec<Real>,
+    /// Joint-space force vector reused by `calc_acceleration_deltas`
+    /// (`dof_count` entries).
+    pub dof_force: Vec<Real>,
+    /// Chain walked by `fill_constraint_jacobian` (link indices, base
+    /// excluded).
+    pub jac_chain: Vec<usize>,
+    /// Per-link local positions/normals reused by `fill_constraint_jacobian`
+    /// (`num_links + 1` entries each).
+    pub jac_p_local: Vec<Vector3>,
+    pub jac_n_lin: Vec<Vector3>,
+    pub jac_n_ang: Vec<Vector3>,
+    /// Unit-impulse responses reused by `fill_constraint_jacobian`
+    /// (`dof_count` entries).
+    pub jac_results: Vec<Real>,
 }
 
 impl MultiBodyScratch {
@@ -80,6 +96,27 @@ impl MultiBodyScratch {
         }
         if self.spat_inertia.len() < n {
             self.spat_inertia.resize(n, SymmetricSpatialDyad::zero());
+        }
+        if self.aba_d.len() < dof_count * dof_count {
+            self.aba_d.resize(dof_count * dof_count, 0.0);
+        }
+        if self.dof_force.len() < dof_count {
+            self.dof_force.resize(dof_count, 0.0);
+        }
+        if self.jac_chain.len() < num_links {
+            self.jac_chain.resize(num_links, 0);
+        }
+        if self.jac_p_local.len() < n {
+            self.jac_p_local.resize(n, Vector3::ZERO);
+        }
+        if self.jac_n_lin.len() < n {
+            self.jac_n_lin.resize(n, Vector3::ZERO);
+        }
+        if self.jac_n_ang.len() < n {
+            self.jac_n_ang.resize(n, Vector3::ZERO);
+        }
+        if self.jac_results.len() < dof_count {
+            self.jac_results.resize(dof_count, 0.0);
         }
     }
 }
@@ -811,14 +848,18 @@ impl MultiBody {
 
     /// `addSplitV`: apply the accumulated split delta to the velocities.
     pub fn add_split_v(&mut self) {
-        let split = self.split_v.clone();
-        self.apply_delta_vee(&split, 1.0);
+        for i in 0..self.velocities.len() {
+            let d = self.split_v[i];
+            self.apply_delta_vee_component(i, d, 1.0);
+        }
     }
 
     /// `substractSplitV`: remove the split delta and clear it.
     pub fn subtract_split_v(&mut self) {
-        let split = self.split_v.clone();
-        self.apply_delta_vee(&split, -1.0);
+        for i in 0..self.velocities.len() {
+            let d = self.split_v[i];
+            self.apply_delta_vee_component(i, d, -1.0);
+        }
         self.split_v.fill(0.0);
     }
 
@@ -831,9 +872,20 @@ impl MultiBody {
     /// `processDeltaVeeMultiDof2`: apply the accumulated `delta_v` and clear
     /// it.
     pub fn process_delta_vee_2(&mut self) {
-        let delta = self.delta_v.clone();
-        self.apply_delta_vee(&delta, 1.0);
+        for i in 0..self.velocities.len() {
+            let d = self.delta_v[i];
+            self.apply_delta_vee_component(i, d, 1.0);
+        }
         self.delta_v.fill(0.0);
+    }
+
+    /// One component of `applyDeltaVeeMultiDof` (clamped); split out so the
+    /// split-impulse helpers can mix reads of one field with writes of
+    /// another without cloning.
+    fn apply_delta_vee_component(&mut self, i: usize, d: Real, multiplier: Real) {
+        let v = &mut self.velocities[i];
+        *v += d * multiplier;
+        *v = (*v).clamp(-self.max_coordinate_velocity, self.max_coordinate_velocity);
     }
 
     fn mul_matrix(p_a: &[Real], p_b: &[Real], rows_a: usize, cols_a: usize, rows_b: usize, cols_b: usize, p_c: &mut [Real]) {
@@ -1019,8 +1071,12 @@ impl MultiBody {
                     - self.links[i].axes[dof].dot_force(&scratch.zero_acc[i + 1])
                     - scratch.coriolis[i].dot_force(&h_dof);
             }
-            // D matrix (dof_count x dof_count).
-            let mut d = vec![0.0; dof_count * dof_count];
+            // D matrix (dof_count x dof_count) — pooled in the scratch so
+            // the ABA does not allocate per link per step.
+            let d_len = dof_count * dof_count;
+            scratch.aba_d.clear();
+            scratch.aba_d.resize(d_len, 0.0);
+            let d = &mut scratch.aba_d[..];
             for dof in 0..dof_count {
                 for dof2 in 0..dof_count {
                     d[dof * dof_count + dof2] = self.links[i]
@@ -1244,13 +1300,15 @@ impl MultiBody {
     ) {
         let num_links = self.num_links();
         scratch.ensure(num_links, self.dof_count);
+        // Pooled joint-space force vector (cleared per call, no alloc).
+        scratch.dof_force.clear();
+        scratch.dof_force.resize(self.dof_count, 0.0);
+        let y = &mut scratch.dof_force[..];
         // zero_acc uses the first num_links+1 slots, spat_acc the next
         // (Bullet reuses one scratch block; we use separate buffers).
         let rot_from_parent = &self.rot_from_parent;
         let inv_d = &self.inv_d;
         let h = &self.h;
-
-        let mut y = vec![0.0; self.dof_count];
 
         // ẑᵢᴬ: the applied force on the base, zero elsewhere.
         if self.is_base_static_or_kinematic() {
@@ -1451,22 +1509,28 @@ impl MultiBody {
         scratch: &mut MultiBodyScratch,
     ) {
         let num_links = self.num_links();
-        // Walk the chain from the constrained link to the base.
-        let mut chain: Vec<usize> = Vec::with_capacity(num_links);
+        // Walk the chain from the constrained link to the base — buffers
+        // pooled in the scratch (this runs per contact row per side).
+        scratch.ensure(num_links, self.dof_count);
         let mut l = link;
+        scratch.jac_chain.clear();
         while l != -1 {
-            chain.push(l as usize);
+            scratch.jac_chain.push(l as usize);
             l = self.links[l as usize].parent.map_or(-1, |p| p as i32);
         }
+        let chain = &scratch.jac_chain[..];
         // Local-frame positions and normals, one per link + base.
         let n = num_links + 1;
-        if scratch.rot_from_world.len() < n {
-            scratch.rot_from_world.resize(n, Matrix3::IDENTITY);
+        for buf in [&mut scratch.jac_p_local, &mut scratch.jac_n_lin, &mut scratch.jac_n_ang] {
+            buf.clear();
+            buf.resize(n, Vector3::ZERO);
         }
-        let mut p_minus_com_local = vec![Vector3::ZERO; n];
-        let mut n_local_lin = vec![Vector3::ZERO; n];
-        let mut n_local_ang = vec![Vector3::ZERO; n];
-        let mut results = vec![0.0; self.dof_count];
+        scratch.jac_results.clear();
+        scratch.jac_results.resize(self.dof_count, 0.0);
+        let p_minus_com_local = &mut scratch.jac_p_local[..];
+        let n_local_lin = &mut scratch.jac_n_lin[..];
+        let n_local_ang = &mut scratch.jac_n_ang[..];
+        let results = &mut scratch.jac_results[..];
 
         scratch.rot_from_world[0] = Matrix3::from_quat(self.base_quat);
 
