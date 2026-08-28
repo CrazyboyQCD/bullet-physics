@@ -6,7 +6,7 @@
 //! queries are `O(log n + k)` for the candidates (plus the exact triangle
 //! tests by the caller).
 
-use bullet_math::{Aabb, Real, Vector3};
+use bullet_math::{Aabb, Quaternion, Real, Vector3};
 
 /// Leaves hold at most this many triangles.
 const LEAF_MAX_TRIANGLES: usize = 4;
@@ -57,6 +57,64 @@ impl Bvh {
                     for k in start as usize..(start + count) as usize {
                         out.push(self.tri_order[k]);
                     }
+                }
+            }
+        }
+    }
+
+    /// Append triangle-index pairs `(this, other)` whose node boxes overlap
+    /// when `other`'s tree is mapped into this tree's frame by
+    /// `rotation`/`translation`. Mirrors Bullet's
+    /// `_find_quantized_collision_pairs_recursive`: node pairs are tested by
+    /// transforming `other`'s node box corners into this frame (the
+    /// `BT_BOX_BOX_TRANSFORM_CACHE` conservative overlap), leaf/leaf pairs
+    /// emit their triangle cross products, and mixed pairs split the internal
+    /// side. `margin` inflates the transformed box — the pair contact band
+    /// (Bullet's GImpact primitive boxes carry their own 0.1 margin for the
+    /// same purpose: zero-thickness parallel plates otherwise never overlap
+    /// their boxes until fully past each other).
+    pub(crate) fn triangles_overlapping(
+        &self,
+        other: &Bvh,
+        rotation: Quaternion,
+        translation: Vector3,
+        margin: Real,
+        out: &mut Vec<(u32, u32)>,
+    ) {
+        let mut stack = vec![(0usize, 0usize)];
+        while let Some((ia, ib)) = stack.pop() {
+            let a = &self.nodes[ia];
+            let b = &other.nodes[ib];
+            if !overlaps_transformed(&a.aabb, &b.aabb, rotation, translation, margin) {
+                continue;
+            }
+            match (&a.kind, &b.kind) {
+                (
+                    BvhNodeKind::Leaf { start: sa, count: ca },
+                    BvhNodeKind::Leaf { start: sb, count: cb },
+                ) => {
+                    for ka in *sa as usize..(*sa + *ca) as usize {
+                        for kb in *sb as usize..(*sb + *cb) as usize {
+                            out.push((self.tri_order[ka], other.tri_order[kb]));
+                        }
+                    }
+                }
+                (BvhNodeKind::Leaf { .. }, BvhNodeKind::Internal { left, right }) => {
+                    stack.push((ia, *left as usize));
+                    stack.push((ia, *right as usize));
+                }
+                (BvhNodeKind::Internal { left, right }, BvhNodeKind::Leaf { .. }) => {
+                    stack.push((*left as usize, ib));
+                    stack.push((*right as usize, ib));
+                }
+                (
+                    BvhNodeKind::Internal { left: la, right: ra },
+                    BvhNodeKind::Internal { left: lb, right: rb },
+                ) => {
+                    stack.push((*la as usize, *lb as usize));
+                    stack.push((*la as usize, *rb as usize));
+                    stack.push((*ra as usize, *lb as usize));
+                    stack.push((*ra as usize, *rb as usize));
                 }
             }
         }
@@ -159,6 +217,34 @@ fn slice_aabb(
         }
     }
     aabb.unwrap_or_else(|| Aabb::new(Vector3::ZERO, Vector3::ZERO))
+}
+
+/// Conservative overlap of `b`'s box with `a`'s box after mapping `b` by
+/// `rotation`/`translation` into `a`'s frame and inflating by `margin`: the
+/// transformed corners are re-wrapped in an axis-aligned box (Bullet's
+/// `btAABB::overlapping_trans_cache` without the full primitive test). The
+/// wrap is a superset of the rotated box, so a miss here is a true miss and
+/// a hit defers to the exact triangle tests.
+fn overlaps_transformed(
+    a: &Aabb,
+    b: &Aabb,
+    rotation: Quaternion,
+    translation: Vector3,
+    margin: Real,
+) -> bool {
+    let mut min = Vector3::splat(Real::INFINITY);
+    let mut max = Vector3::splat(Real::NEG_INFINITY);
+    for i in 0..8 {
+        let corner = Vector3::new(
+            if i & 1 == 0 { b.max.x } else { b.min.x },
+            if i & 2 == 0 { b.max.y } else { b.min.y },
+            if i & 4 == 0 { b.max.z } else { b.min.z },
+        );
+        let p = rotation * corner + translation;
+        min = min.min(p);
+        max = max.max(p);
+    }
+    Aabb::new(min - Vector3::splat(margin), max + Vector3::splat(margin)).overlaps(a)
 }
 
 fn triangle_center(vertices: &[Vector3], indices: &[[u32; 3]], t: u32) -> Vector3 {

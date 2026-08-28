@@ -61,9 +61,12 @@ behavior per feature.
 the equivalent of sharing one `btCollisionShape`): sphere, box, capsule,
 cylinder, cone (all `radius + half_height` along Y), convex hull, compound,
 plane, triangle mesh (internal BVH), heightfield (materialized as a triangle
-mesh). Mesh/heightfield bodies are static-only. Inertia: exact analytic
-formulas for the primitives, AABB-box approximation for hull/compound
-(matching Bullet).
+mesh). A mesh on a static body is Bullet's `btBvhTriangleMeshShape`; on a
+dynamic body it becomes the GImpact case (vertex point-mass inertia,
+mesh-vs-mesh and plane-vs-mesh contact paths — the local-frame BVH is carried
+by the pose and never rebuilt). Heightfields stay static-only. Inertia: exact
+analytic formulas for the primitives, AABB-box approximation for
+hull/compound, vertex point masses for meshes (matching Bullet).
 
 ## 5. Collision pipeline
 
@@ -95,7 +98,14 @@ formulas for the primitives, AABB-box approximation for hull/compound
    - `convex-mesh`: convex AABB → mesh local space → BVH candidate triangles →
      per-triangle GJK+EPA, merged into one manifold and reduced to 4 points
      (deepest point + greedy most-spread selection, Bullet's manifold
-     reduction). Concave-concave and plane-concave pairs return no contacts.
+     reduction). Works for moving meshes too (the query accepts any mesh pose).
+   - `mesh-mesh` (the GImpact case): tree-vs-tree traversal mapping one tree's
+     node boxes into the other's local frame (band-inflated conservative
+     overlap) → per-triangle-pair GJK with margin-shell contacts
+     (`penetration = band − separation`, Bullet's GImpact triangle-margin
+     semantics); heightfields join through their internal mesh.
+   - `plane-mesh`: per-vertex plane distances, single-sided like Bullet's
+     GImpact-plane path, reduced to 4 points.
    - compound shapes recurse into children.
 3. **Manifold**: `ContactPoint { position, normal, penetration, impulses }`
    collected into a `ContactManifold`. Unlike Bullet's persistent manifolds,
@@ -274,6 +284,7 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
 | `btCollisionShape`                       | `bullet_collision::shapes::CollisionShape`  |
 | `btBoxShape` / `btSphereShape` / …       | `CollisionShape::Box` / `::Sphere` / …      |
 | `btBvhTriangleMeshShape` / `btHeightfieldTerrainShape` | `CollisionShape::TriangleMesh` / `::Heightfield` |
+| `btGImpactMeshShape` (dynamic concave mesh) | `CollisionShape::TriangleMesh` on a dynamic body (`RigidBody::new_dynamic`) |
 | `btAxisSweep3`                           | `broadphase::AxisSweep3` (default)          |
 | `btDbvtBroadphase`                       | `broadphase::DbvtBroadPhase` (opt-in via `BroadPhaseBackend`) |
 | `btGjkPairDetector` + `btVoronoiSimplexSolver` | `narrowphase::gjk`                    |

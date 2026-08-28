@@ -1038,3 +1038,24 @@ velocities before the solve, the recorded rigid-solver deviation), so the
 locked rows cancel the full gravity step each frame and hold the weld exactly
 — physically the stiffer and correct behavior, kept as a deviation.
 
+
+## GImpact probes (2026-08-28)
+
+Dynamic triangle-mesh bodies (our `TriangleMesh` on a dynamic body vs Bullet's
+`btGImpactMeshShape`): `tools/gimpact_probe.cpp` + `examples/gimpact_probe.rs`,
+four scenes, f32, 300 frames, gravity −10, `SOLVER_RANDMIZE_ORDER` cleared,
+`btGImpactCollisionAlgorithm::registerAlgorithm` on the C++ side. The dynamic
+body is a closed 2×2×0.4 box shell (top + bottom faces, dropped slowly so the
+per-step travel stays inside the mesh-vs-mesh band — the known tunneling guard
+of the GJK route, deviations §1).
+
+| Scene | First divergent frame | Divergence | Final Bullet | Final Rust | Classification |
+|---|---|---|---|---|---|
+| inertia | — | — | 2.080000 4.000000 2.080000 | identical | **Bit-identical** (same `CALC_EXACT_INERTIA` vertex point-mass formula) |
+| sphere_on_shell | 27 (0.082 m) | one-frame impact transient | y = 0.900000 | y = 0.902733 | convex-vs-mesh path (existing); 2.7 mm rest offset = the known slop dead-zone class (same family as `falling_box` resting offsets) |
+| shell_on_plane | 13 (0.031 m) | one-frame impact transient + band width | y = 0.209984 | y = 0.202778 | plane-vs-mesh per-vertex path; effective band differs (our pair threshold vs Bullet's margin sum), rest offset 7 mm |
+| shell_on_bvh | 13 (0.057 m) | one-frame impact transient + band width | y = 0.209909 | y = 0.253838 | mesh-vs-mesh margin-shell semantics: the shell hovers `band − slop` above the BVH ground (44 mm) where Bullet settles near the surface — the structural cost of the anti-tunneling shell (deviations §1); trajectories match until first touch, no instability, both settle flat |
+
+Build: `tools/build_recorder.py`'s `msvc_env` + `cl /Irefs/bullet3/src
+/Irefs/bullet3/src/BulletCollision/Gimpact tools/gimpact_probe.cpp /Fe:tools/gimpact_probe.exe
+/link <f32 libs>`; compare with `python tools/mbdiff.py <bullet.txt> <rust.txt>`.

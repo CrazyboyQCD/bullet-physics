@@ -10,6 +10,7 @@ mod convex_mesh;
 mod convex_sweep;
 pub mod epa;
 pub mod gjk;
+mod mesh_mesh;
 mod plane;
 mod sphere;
 
@@ -90,6 +91,72 @@ pub fn collide_seeded(
 
     match (shape_a, shape_b) {
         (CollisionShape::Plane(_), CollisionShape::Plane(_)) => None,
+        // Mesh-vs-mesh (Bullet's `gimpact_vs_gimpact`): tree-vs-tree
+        // candidate pairs plus per-triangle GJK. Covers dynamic-vs-dynamic
+        // and dynamic-vs-static-mesh pairs; heightfields join through their
+        // internal mesh. Two static heightfields never move and stay `None`.
+        (CollisionShape::TriangleMesh(ma), CollisionShape::TriangleMesh(mb)) => {
+            mesh_mesh::mesh_mesh(
+                ma, position_a, orientation_a, mb, position_b, orientation_b, seed, threshold,
+            )
+        }
+        (CollisionShape::TriangleMesh(ma), CollisionShape::Heightfield(hb)) => {
+            mesh_mesh::mesh_mesh(
+                ma,
+                position_a,
+                orientation_a,
+                hb.as_mesh(),
+                position_b,
+                orientation_b,
+                seed,
+                threshold,
+            )
+        }
+        (CollisionShape::Heightfield(ha), CollisionShape::TriangleMesh(mb)) => mesh_mesh::mesh_mesh(
+            ha.as_mesh(),
+            position_a,
+            orientation_a,
+            mb,
+            position_b,
+            orientation_b,
+            seed,
+            threshold,
+        ),
+        // Plane-vs-mesh (Bullet's `gimpacttrimeshpart_vs_plane_collision`):
+        // per-vertex plane distances. These must precede the generic
+        // plane-convex arm — a mesh has no support point to offer it.
+        (CollisionShape::Plane(pa), CollisionShape::TriangleMesh(mb)) => plane::plane_mesh(
+            pa, position_a, orientation_a, mb, position_b, orientation_b, threshold,
+        ),
+        (CollisionShape::Plane(pa), CollisionShape::Heightfield(hb)) => plane::plane_mesh(
+            pa,
+            position_a,
+            orientation_a,
+            hb.as_mesh(),
+            position_b,
+            orientation_b,
+            threshold,
+        ),
+        (CollisionShape::TriangleMesh(mb), CollisionShape::Plane(pa)) => plane::plane_mesh(
+            pa,
+            position_b,
+            orientation_b,
+            mb,
+            position_a,
+            orientation_a,
+            threshold,
+        )
+        .map(|m| m.flipped()),
+        (CollisionShape::Heightfield(hb), CollisionShape::Plane(pa)) => plane::plane_mesh(
+            pa,
+            position_b,
+            orientation_b,
+            hb.as_mesh(),
+            position_a,
+            orientation_a,
+            threshold,
+        )
+        .map(|m| m.flipped()),
         // Concave meshes/heightfields collide only with convex shapes (the
         // compound case was expanded above). Concave-concave and plane-concave
         // pairs are unsupported and report no contacts.
@@ -357,6 +424,64 @@ mod tests {
         let p = m.points[0];
         assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-3);
         assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-3);
+    }
+
+    fn unit_plate() -> CollisionShape {
+        CollisionShape::triangle_mesh(
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 1.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ],
+            vec![[0, 1, 2], [0, 2, 3]],
+        )
+    }
+
+    /// Mesh-vs-mesh reaches the tree traversal through `collide` and reports
+    /// the A-to-B normal with the margin-shell penetration.
+    #[test]
+    fn mesh_vs_mesh_through_collide() {
+        let a = unit_plate();
+        let b = unit_plate();
+        let m = collide_pair(&a, Vector3::ZERO, &b, Vector3::new(0.0, 0.01, 0.0)).unwrap();
+        let p = m.points[0];
+        assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-3);
+        // Margin-shell: band (0.1) minus the 0.01 separation.
+        assert_relative_eq!(p.penetration, 0.09, epsilon = 1e-3);
+    }
+
+    /// Plane-vs-mesh reaches the per-vertex path through `collide` from both
+    /// argument orders. The single-sided plane normal stays the plane's own
+    /// (the solver pushes the mesh out of the plane along it), so the
+    /// mesh-first order reports the flipped normal.
+    #[test]
+    fn plane_vs_mesh_through_collide() {
+        let mesh = unit_plate();
+        let plane = CollisionShape::plane(Vector3::Y, 0.0);
+        let m = collide_pair(&plane, Vector3::ZERO, &mesh, Vector3::new(0.0, -0.1, 0.0)).unwrap();
+        let p = m.points[0];
+        assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-6);
+        assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-6);
+        // Mesh first: flipped normal.
+        let m = collide_pair(&mesh, Vector3::new(0.0, -0.1, 0.0), &plane, Vector3::ZERO).unwrap();
+        let p = m.points[0];
+        assert_relative_eq!(p.normal.y, -1.0, epsilon = 1e-6);
+        assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-6);
+    }
+
+    /// A dynamic mesh body over a static heightfield reaches the mesh-vs-mesh
+    /// path through the heightfield's internal mesh.
+    #[test]
+    fn mesh_vs_heightfield_through_collide() {
+        let hf = CollisionShape::heightfield(vec![0.0; 9], 3, 3, Vector3::ONE);
+        let mesh = unit_plate();
+        let m = collide_pair(&mesh, Vector3::new(1.0, 0.01, 1.0), &hf, Vector3::ZERO).unwrap();
+        let p = m.points[0];
+        // A-to-B normal: from the mesh (above) toward the heightfield, -Y;
+        // margin-shell penetration 0.1 - 0.01.
+        assert_relative_eq!(p.normal.y, -1.0, epsilon = 1e-3);
+        assert_relative_eq!(p.penetration, 0.09, epsilon = 1e-2);
     }
 
     /// A GJK seed only changes where the simplex walk starts; the detected

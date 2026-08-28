@@ -5,7 +5,7 @@
 //! points from the plane to the convex shape.
 
 use crate::manifold::{ContactManifold, ContactPoint};
-use crate::shapes::{CollisionShape, Plane};
+use crate::shapes::{CollisionShape, Plane, TriangleMesh};
 use bullet_math::{Quaternion, Real, Vector3};
 
 /// Contact between a static plane and a convex shape.
@@ -53,9 +53,53 @@ pub fn plane_convex(
     )]))
 }
 
+/// Contact between a plane and a (typically dynamic) triangle mesh, a port
+/// of Bullet's `gimpacttrimeshpart_vs_plane_collision`: every mesh vertex
+/// below the plane surface reports a contact at its world position with the
+/// plane normal.
+///
+/// Like Bullet's GImpact-plane path this is a *single-sided* test against
+/// the fixed plane normal (no toward-mesh reorientation, which for a
+/// zero-thickness mesh would flip the normal right as the body crosses the
+/// plane and drop the support). Bullet gates contacts on its shape margins;
+/// this engine uniformly uses the pair contact band instead (negative
+/// penetration while separated inside it, like [`plane_convex`]).
+pub fn plane_mesh(
+    plane: &Plane,
+    plane_position: Vector3,
+    plane_orientation: Quaternion,
+    mesh: &TriangleMesh,
+    mesh_position: Vector3,
+    mesh_orientation: Quaternion,
+    threshold: Real,
+) -> Option<ContactManifold> {
+    // World-space plane: `n . x = c` (rotated local normal, shifted constant).
+    let n = plane_orientation * plane.normal;
+    let c = plane.constant + n.dot(plane_position);
+
+    let mut manifold = ContactManifold::new();
+    for v in &mesh.vertices {
+        let p = mesh_orientation * *v + mesh_position;
+        let depth = c - n.dot(p);
+        if depth < -threshold {
+            continue;
+        }
+        manifold.points.push(ContactPoint::new(p, n, depth));
+    }
+    if manifold.is_empty() {
+        None
+    } else {
+        // A large mesh can contribute thousands of vertices; reduce to four
+        // well-separated points before handing the set to the solver.
+        manifold.reduce(4);
+        Some(manifold)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shapes::TriangleMesh;
     use approx::assert_relative_eq;
 
     /// The sphere's contact band: `0.5 * sqrt(3) * 0.02`.
@@ -177,5 +221,63 @@ mod tests {
         let p = m.points[0];
         assert_relative_eq!(p.normal.x, 1.0);
         assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-6);
+    }
+
+    /// A flat quad sunk 0.1 below the plane reports the surviving reduced
+    /// vertex set, all at plane depth 0.1 with the fixed upward plane normal
+    /// (the single-sided GImpact semantics).
+    #[test]
+    fn mesh_sunk_into_plane_reports_vertex_contacts() {
+        let plane = Plane::new(Vector3::Y, 0.0);
+        let mesh = TriangleMesh::new(
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 1.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ],
+            vec![[0, 1, 2], [0, 2, 3]],
+        );
+        let m = plane_mesh(
+            &plane,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &mesh,
+            Vector3::new(0.0, -0.1, 0.0),
+            Quaternion::IDENTITY,
+            T,
+        )
+        .unwrap();
+        assert!(!m.points.is_empty());
+        assert!(m.points.len() <= 4);
+        for p in &m.points {
+            assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-6);
+            assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-6);
+            assert_relative_eq!(p.position.y, -0.1, epsilon = 1e-6);
+        }
+    }
+
+    #[test]
+    fn mesh_above_the_plane_reports_nothing() {
+        let plane = Plane::new(Vector3::Y, 0.0);
+        let mesh = TriangleMesh::new(
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 1.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ],
+            vec![[0, 1, 2], [0, 2, 3]],
+        );
+        assert!(plane_mesh(
+            &plane,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &mesh,
+            Vector3::new(0.0, 5.0, 0.0),
+            Quaternion::IDENTITY,
+            T,
+        )
+        .is_none());
     }
 }

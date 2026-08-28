@@ -3,12 +3,19 @@ use bullet_math::{Aabb, Quaternion, Real, Vector3};
 use super::bvh::Bvh;
 use super::CollisionShape;
 
-/// A static triangle mesh collision shape, equivalent to Bullet's
-/// `btBvhTriangleMeshShape` (a `btTriangleMesh` plus a built BVH).
+/// A triangle mesh collision shape, equivalent to Bullet's
+/// `btBvhTriangleMeshShape` when used statically and to its
+/// `btGImpactMeshShape` when used dynamically (a `btTriangleMesh` plus a
+/// built BVH either way — the tree lives in the mesh's local frame and the
+/// body pose carries it, so dynamic meshes never rebuild it).
 ///
-/// Meshes are concave and intended for static bodies: they cannot be used
-/// with GJK, have zero margin, and report zero inertia. The local-space BVH
-/// accelerates narrow-phase candidate lookup and ray casting.
+/// Meshes are concave: they cannot be used with GJK as a whole, carry zero
+/// margin, and collide with convex shapes through per-triangle tests (the
+/// local-space BVH accelerates candidate lookup, ray casting, and the
+/// mesh-vs-mesh tree traversal). With a static body the mesh behaves exactly
+/// like Bullet's BVH triangle mesh; with a dynamic body it becomes Bullet's
+/// GImpact case — vertex-point-mass inertia, mesh-vs-mesh and plane-vs-mesh
+/// contact paths included.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TriangleMesh {
     pub vertices: Vec<Vector3>,
@@ -87,6 +94,25 @@ impl TriangleMesh {
         out
     }
 
+    /// Append triangle-index pairs `(this, other)` whose node boxes may
+    /// overlap when `other`'s tree is mapped into this tree's frame by
+    /// `rotation`/`translation` (the B-to-A local pose product, Bullet's
+    /// `trans1to0` between GImpact box trees), with the transformed boxes
+    /// inflated by `margin` (the pair contact band). Conservative: the
+    /// candidate pairs are exact-tested by the narrow-phase caller.
+    #[inline]
+    pub(crate) fn triangles_overlapping(
+        &self,
+        other: &TriangleMesh,
+        rotation: Quaternion,
+        translation: Vector3,
+        margin: Real,
+        out: &mut Vec<(u32, u32)>,
+    ) {
+        self.bvh
+            .triangles_overlapping(&other.bvh, rotation, translation, margin, out);
+    }
+
     /// Local-space ray cast (same semantics as the shape-level ray cast).
     #[inline]
     pub(crate) fn raycast(&self, from: Vector3, to: Vector3) -> Option<(Real, Vector3)> {
@@ -103,10 +129,25 @@ impl TriangleMesh {
         self.local_aabb().transformed(position, orientation)
     }
 
-    /// Static meshes have no mass properties.
+    /// Mesh inertia as vertex point masses (Bullet's
+    /// `btGImpactMeshShape::calculateLocalInertia` with `CALC_EXACT_INERTIA`,
+    /// the default build): every vertex carries `mass / vertex_count` and
+    /// contributes its origin-frame point-mass tensor. Static bodies never
+    /// read this (`RigidBody::new_static` ignores inertia); a dynamic mesh
+    /// body is Bullet's GImpact use case.
     #[inline]
-    pub fn local_inertia(&self, _mass: Real) -> Vector3 {
-        Vector3::ZERO
+    pub fn local_inertia(&self, mass: Real) -> Vector3 {
+        if self.vertices.is_empty() {
+            return Vector3::ZERO;
+        }
+        let point_mass = mass / self.vertices.len() as Real;
+        let mut inertia = Vector3::ZERO;
+        for v in &self.vertices {
+            inertia.x += point_mass * (v.y * v.y + v.z * v.z);
+            inertia.y += point_mass * (v.x * v.x + v.z * v.z);
+            inertia.z += point_mass * (v.x * v.x + v.y * v.y);
+        }
+        inertia
     }
 }
 
@@ -166,5 +207,25 @@ mod tests {
         assert!(m
             .raycast(Vector3::new(5.0, 5.0, 5.0), Vector3::new(5.0, -1.0, 5.0))
             .is_none());
+    }
+
+    /// Vertex point-mass inertia (Bullet's `CALC_EXACT_INERTIA`): four unit
+    /// masses at the corners of a unit square in XZ at y=0.
+    #[test]
+    fn local_inertia_matches_vertex_point_masses() {
+        let m = flat_ground();
+        let i = m.local_inertia(4.0);
+        // point_mass = 1; x-extent 1, z-extent 1, y-extent 0.
+        // Ixx = sum m*(y^2+z^2) = 4*(0+0.5^2..) -- corners at (0/1, 0, 0/1):
+        // z^2 in {0,1}, two vertices each -> sum z^2 = 2, same for x^2.
+        assert_relative_eq!(i.x, 2.0, epsilon = 1e-6); // sum(y^2+z^2) = 2
+        assert_relative_eq!(i.y, 4.0, epsilon = 1e-6); // sum(x^2+z^2) = 4
+        assert_relative_eq!(i.z, 2.0, epsilon = 1e-6); // sum(x^2+y^2) = 2
+    }
+
+    #[test]
+    fn empty_mesh_inertia_is_zero() {
+        let m = TriangleMesh::new(Vec::new(), Vec::new());
+        assert_eq!(m.local_inertia(1.0), Vector3::ZERO);
     }
 }

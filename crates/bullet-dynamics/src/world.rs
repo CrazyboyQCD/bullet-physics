@@ -3022,4 +3022,147 @@ mod tests {
         world.remove_body(body);
         let _ = world.body(body);
     }
+
+    /// A closed 2x2x0.4 box shell as a dynamic mesh body (top and bottom
+    /// plates; a single-sided zero-thickness plate would be the known
+    /// tunneling degenerate).
+    fn box_shell_mesh() -> bullet_collision::shapes::CollisionShape {
+        let (hx, hy, hz) = (1.0 as Real, 0.2 as Real, 1.0 as Real);
+        bullet_collision::shapes::CollisionShape::triangle_mesh(
+            vec![
+                // Top face.
+                Vector3::new(-hx, hy, -hz),
+                Vector3::new(hx, hy, -hz),
+                Vector3::new(hx, hy, hz),
+                Vector3::new(-hx, hy, hz),
+                // Bottom face.
+                Vector3::new(-hx, -hy, -hz),
+                Vector3::new(hx, -hy, -hz),
+                Vector3::new(hx, -hy, hz),
+                Vector3::new(-hx, -hy, hz),
+            ],
+            vec![[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6]],
+        )
+    }
+
+    /// A dynamic mesh body falls onto a static plane, rests on it, and goes
+    /// to sleep — the GImpact use case end to end.
+    #[test]
+    fn dynamic_mesh_rests_on_plane_and_sleeps() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mesh = world.add_body(RigidBody::new_dynamic(
+            box_shell_mesh(),
+            Vector3::new(0.0, 2.0, 0.0),
+            2.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            world.step_simulation(dt);
+        }
+        let b = world.body(mesh);
+        // Bottom face at y = -0.2 relative to the body origin: rest height.
+        assert!(
+            (0.175..0.23).contains(&b.position.y),
+            "mesh should rest with its bottom face on the plane, got {}",
+            b.position.y
+        );
+        assert!(b.linear_velocity.length() < 0.1);
+        assert!(matches!(
+            b.activation_state(),
+            ActivationState::IslandSleeping
+        ));
+    }
+
+    /// A dynamic mesh body rests on a static mesh (the mesh-vs-mesh tree
+    /// traversal driving real support). Dropped from just above the margin
+    /// shell — a single step deeper than the band would tunnel the
+    /// zero-thickness shell past the surface (known deviation of the GJK
+    /// route; Bullet's clip method resolves signed back-side distances).
+    #[test]
+    fn dynamic_mesh_rests_on_static_mesh() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        let ground = bullet_collision::shapes::CollisionShape::triangle_mesh(
+            (0..8)
+                .flat_map(|z| (0..8).map(move |x| (x, z)))
+                .flat_map(|(x, z)| {
+                    let (x, z) = (x as Real, z as Real);
+                    vec![
+                        Vector3::new(x, 0.0, z),
+                        Vector3::new(x + 1.0, 0.0, z),
+                        Vector3::new(x + 1.0, 0.0, z + 1.0),
+                        Vector3::new(x, 0.0, z + 1.0),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+            (0..64)
+                .flat_map(|i| {
+                    let b = (i * 4) as u32;
+                    [[b, b + 2, b + 1], [b, b + 3, b + 2]]
+                })
+                .collect::<Vec<_>>(),
+        );
+        world.add_body(RigidBody::new_static(
+            ground,
+            Vector3::new(-4.0, 0.0, -4.0),
+        ));
+        let mesh = world.add_body(RigidBody::new_dynamic(
+            box_shell_mesh(),
+            Vector3::new(0.0, 0.5, 0.0),
+            2.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            world.step_simulation(dt);
+        }
+        let b = world.body(mesh);
+        // The shell rests with its bottom face held `band - slop` above the
+        // ground by the margin shell (the GImpact hover, like Bullet).
+        assert!(
+            (0.24..0.36).contains(&b.position.y),
+            "mesh should rest on the static mesh ground, got {}",
+            b.position.y
+        );
+        assert!(b.linear_velocity.length() < 0.1);
+    }
+
+    /// A dynamic sphere resting on a dynamic mesh plate: the mesh-vs-convex
+    /// path with a *moving* mesh (both sides dynamic, island-merged).
+    #[test]
+    fn sphere_rests_on_dynamic_mesh() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mesh = world.add_body(RigidBody::new_dynamic(
+            box_shell_mesh(),
+            Vector3::new(0.0, 0.2, 0.0),
+            5.0,
+        ));
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            world.step_simulation(dt);
+        }
+        // The heavy shell barely moves; the ball rests on its top face
+        // (y = 0.2 + 0.2 + 0.5 = 0.9 in the ideal, allow solver slop).
+        let top = world.body(mesh).position.y + 0.2;
+        let y = world.body(ball).position.y;
+        assert!(
+            ((top + 0.5 - 0.05)..=(top + 0.5 + 0.05)).contains(&y),
+            "ball should rest on the dynamic mesh top face, got {y}"
+        );
+        assert!(world.body(ball).linear_velocity.length() < 0.1);
+    }
 }
