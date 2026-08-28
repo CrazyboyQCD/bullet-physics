@@ -1,50 +1,6 @@
-use std::collections::HashSet;
-use std::hash::{BuildHasherDefault, Hasher};
-
 use bullet_math::{Aabb, Real, Vector3};
 
 use super::{aabb_raycast_candidates, BroadPhase};
-
-/// FxHash-style hasher for the pair cache: the keys are `(usize, usize)` pairs
-/// touched on every edge swap, where SipHash's diffusion is pure overhead —
-/// a multiply-xor-rotate mix is collision-safe enough for index pairs and
-/// several times cheaper (the default `RandomState` showed up in the
-/// profile at a few percent of a full step).
-#[derive(Default)]
-struct FxHasher {
-    hash: u64,
-}
-
-const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-
-impl Hasher for FxHasher {
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        // Byte-wise fallback; never hit by the usize-only pair keys.
-        for &b in bytes {
-            self.add_to_hash(b as u64);
-        }
-    }
-
-    #[inline]
-    fn write_usize(&mut self, i: usize) {
-        self.add_to_hash(i as u64);
-    }
-
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-}
-
-impl FxHasher {
-    #[inline]
-    fn add_to_hash(&mut self, i: u64) {
-        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(FX_SEED);
-    }
-}
-
-type FxBuild = BuildHasherDefault<FxHasher>;
 
 /// Quantized position mask and sentinel (Bullet's 16-bit `btAxisSweep3`:
 /// `m_bpHandleMask = 0xfffe`, `m_handleSentinel = 0xffff`).
@@ -89,8 +45,14 @@ pub struct AxisSweep3 {
     handles: Vec<Option<Handle>>,
     edges: [Vec<Edge>; 3],
     /// Persistently maintained quantized-overlap set (Bullet's pair cache),
-    /// normalized `(min, max)` proxy ids (Fx-hash keyed — see `FxHasher`).
-    pairs: HashSet<(usize, usize), FxBuild>,
+    /// normalized `(min, max)` proxy ids kept sorted lexicographically at all
+    /// times: edge swaps touch a handful of pairs per step, so binary-search
+    /// insert/remove is cheap while [`compute_pairs`](BroadPhase::compute_pairs)
+    /// gets its output order for free — resting stacks re-sorted the whole set
+    /// every frame despite it never changing (a double-digit slice of a full
+    /// step on the 1000-body stack profile; an earlier Fx-hash `HashSet`
+    /// removed the SipHash tax but still needed the sort for output order).
+    pairs: Vec<(usize, usize)>,
     /// Quantization frame (Bullet's `m_worldAabbMin/Max` + `m_quantize`),
     /// grown from the finite proxy AABBs with 50% headroom per axis.
     frame_min: Vector3,
@@ -143,11 +105,30 @@ impl AxisSweep3 {
         Self {
             handles: Vec::new(),
             edges: [Vec::new(), Vec::new(), Vec::new()],
-            pairs: HashSet::with_hasher(FxBuild::default()),
+            pairs: Vec::new(),
             frame_min: Vector3::ZERO,
             frame_max: Vector3::ZERO,
             quant: Vector3::ZERO,
             has_frame: false,
+        }
+    }
+
+    /// Insert into the sorted pair set. Edge swaps touch a handful of pairs
+    /// per step, so the `O(log n)` search plus a short shift beats any
+    /// re-sorting in `compute_pairs`.
+    #[inline]
+    fn pair_insert(&mut self, key: (usize, usize)) {
+        if let Err(i) = self.pairs.binary_search(&key) {
+            self.pairs.insert(i, key);
+        }
+    }
+
+    /// Remove from the sorted pair set (missing keys are a no-op, matching
+    /// the `HashSet::remove` semantics of the previous pair cache).
+    #[inline]
+    fn pair_remove(&mut self, key: (usize, usize)) {
+        if let Ok(i) = self.pairs.binary_search(&key) {
+            self.pairs.remove(i);
         }
     }
 
@@ -315,7 +296,7 @@ impl AxisSweep3 {
                 let axis1 = (k + 1) % 3;
                 let axis2 = (k + 2) % 3;
                 if self.test_overlap_2d(handle, prev.handle, axis1, axis2) {
-                    self.pairs.insert(pair_key(handle, prev.handle));
+                    self.pair_insert(pair_key(handle, prev.handle));
                 }
             }
             self.swap_edges(k, i - 1, i);
@@ -333,7 +314,7 @@ impl AxisSweep3 {
             let next = self.edges[k][i + 1];
             if next.is_max() && update_overlaps {
                 let handle = self.edges[k][i].handle;
-                self.pairs.remove(&pair_key(handle, next.handle));
+                self.pair_remove(pair_key(handle, next.handle));
             }
             self.swap_edges(k, i, i + 1);
             i += 1;
@@ -347,7 +328,7 @@ impl AxisSweep3 {
             let prev = self.edges[k][i - 1];
             if !prev.is_max() && update_overlaps {
                 let handle = self.edges[k][i].handle;
-                self.pairs.remove(&pair_key(handle, prev.handle));
+                self.pair_remove(pair_key(handle, prev.handle));
             }
             self.swap_edges(k, i - 1, i);
             i -= 1;
@@ -366,7 +347,7 @@ impl AxisSweep3 {
                 let axis1 = (k + 1) % 3;
                 let axis2 = (k + 2) % 3;
                 if self.test_overlap_2d(handle, next.handle, axis1, axis2) {
-                    self.pairs.insert(pair_key(handle, next.handle));
+                    self.pair_insert(pair_key(handle, next.handle));
                 }
             }
             self.swap_edges(k, i, i + 1);
@@ -480,9 +461,10 @@ impl BroadPhase for AxisSweep3 {
 
     fn compute_pairs(&self) -> Vec<(usize, usize)> {
         // The cached set is quantized-conservative; the exact stored AABBs
-        // bring the output back to brute-force-exact semantics.
-        let mut pairs: Vec<(usize, usize)> = self
-            .pairs
+        // bring the output back to brute-force-exact semantics. The set is
+        // maintained in sorted order by the edge-swap pair updates, so this
+        // is a single ordered walk — no per-step sort.
+        self.pairs
             .iter()
             .copied()
             .filter(|&(a, b)| {
@@ -490,9 +472,7 @@ impl BroadPhase for AxisSweep3 {
                 let hb = self.handles[b].as_ref().unwrap();
                 ha.aabb.overlaps(&hb.aabb)
             })
-            .collect();
-        pairs.sort_unstable();
-        pairs
+            .collect()
     }
 
     fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize> {
