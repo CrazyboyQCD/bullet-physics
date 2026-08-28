@@ -39,6 +39,11 @@ pub struct RigidBody {
     is_static: bool,
     activation_state: ActivationState,
     deactivation_time: Real,
+    /// Whether the body has been removed from its world
+    /// ([`PhysicsWorld::remove_body`]). A removed body keeps its slot (body
+    /// indices are stable), but the world treats it as if it never existed:
+    /// no broad-phase proxy, no contacts, no queries, no integration.
+    removed: bool,
     /// Speed below which the body counts as resting (Bullet's defaults
     /// `m_linearSleepingThreshold = 0.8` / `m_angularSleepingThreshold = 1.0`).
     pub linear_sleeping_threshold: Real,
@@ -82,6 +87,7 @@ impl RigidBody {
             is_static: false,
             activation_state: ActivationState::Active,
             deactivation_time: 0.0,
+            removed: false,
             linear_sleeping_threshold: 0.8,
             angular_sleeping_threshold: 1.0,
             ccd_motion_threshold: 0.0,
@@ -111,6 +117,7 @@ impl RigidBody {
             is_static: true,
             activation_state: ActivationState::IslandSleeping,
             deactivation_time: 0.0,
+            removed: false,
             linear_sleeping_threshold: 0.8,
             angular_sleeping_threshold: 1.0,
             ccd_motion_threshold: 0.0,
@@ -129,12 +136,33 @@ impl RigidBody {
     /// `isActive()`: everything but sleeping/disabled bodies).
     #[inline]
     pub fn is_active(&self) -> bool {
-        matches!(
-            self.activation_state,
-            ActivationState::Active
-                | ActivationState::WantsDeactivation
-                | ActivationState::DisableDeactivation
-        )
+        !self.removed
+            && matches!(
+                self.activation_state,
+                ActivationState::Active
+                    | ActivationState::WantsDeactivation
+                    | ActivationState::DisableDeactivation
+            )
+    }
+
+    /// Whether the body has been removed from its world
+    /// ([`PhysicsWorld::remove_body`]); removed bodies are inert data.
+    #[inline]
+    pub fn is_removed(&self) -> bool {
+        self.removed
+    }
+
+    /// Mark the body as removed and neutralize its dynamic state (called by
+    /// [`PhysicsWorld::remove_body`], which also destroys the broad-phase
+    /// proxy and cascades over everything referencing the body).
+    pub(crate) fn mark_removed(&mut self) {
+        self.removed = true;
+        self.linear_velocity = Vector3::ZERO;
+        self.angular_velocity = Vector3::ZERO;
+        self.force = Vector3::ZERO;
+        self.torque = Vector3::ZERO;
+        self.push_linear = Vector3::ZERO;
+        self.push_angular = Vector3::ZERO;
     }
 
     #[inline]
@@ -146,7 +174,8 @@ impl RigidBody {
     /// restart the deactivation timer. Static and simulation-disabled bodies
     /// cannot be activated; `DisableDeactivation` bodies stay as they are.
     pub fn activate(&mut self) {
-        if self.is_static
+        if self.removed
+            || self.is_static
             || matches!(
                 self.activation_state,
                 ActivationState::DisableSimulation | ActivationState::DisableDeactivation
@@ -170,17 +199,20 @@ impl RigidBody {
     /// static bodies and `DisableSimulation` bodies do not (they are never
     /// simulated and must not be forced into `IslandSleeping`).
     pub(crate) fn participates_in_islands(&self) -> bool {
-        !self.is_static && self.activation_state != ActivationState::DisableSimulation
+        !self.removed
+            && !self.is_static
+            && self.activation_state != ActivationState::DisableSimulation
     }
 
     /// Whether this body keeps its island awake (the `buildIslands`
     /// activation pass: `ACTIVE_TAG` and `DISABLE_DEACTIVATION` count as
     /// awake; `WANTS_DEACTIVATION`/`ISLAND_SLEEPING` are sleep-ready).
     pub(crate) fn is_island_awake(&self) -> bool {
-        matches!(
-            self.activation_state,
-            ActivationState::Active | ActivationState::DisableDeactivation
-        )
+        !self.removed
+            && matches!(
+                self.activation_state,
+                ActivationState::Active | ActivationState::DisableDeactivation
+            )
     }
 
     /// Wake a body whose island is not sleeping (Bullet's `buildIslands`:
@@ -189,7 +221,10 @@ impl RigidBody {
     /// simulates again but immediately re-qualifies for sleeping). Only
     /// sleeping bodies transition — active members keep their timers.
     pub(crate) fn island_wake(&mut self) {
-        if self.is_static || self.activation_state != ActivationState::IslandSleeping {
+        if self.removed
+            || self.is_static
+            || self.activation_state != ActivationState::IslandSleeping
+        {
             return;
         }
         self.activation_state = ActivationState::WantsDeactivation;

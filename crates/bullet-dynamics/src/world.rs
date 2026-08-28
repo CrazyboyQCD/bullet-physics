@@ -196,6 +196,10 @@ struct ColliderEntry {
 enum ProxyOwner {
     Body(usize),
     Collider(usize),
+    /// A destroyed proxy slot (see [`PhysicsWorld::remove_body`]). The
+    /// broad phases recycle freed slots, so the entry is cleared until
+    /// `create_proxy` hands the slot out again.
+    Free,
 }
 
 /// A discrete rigid-body simulation world, mirroring `btDiscreteDynamicsWorld`
@@ -357,8 +361,9 @@ impl PhysicsWorld {
     /// Add a body and return its index.
     ///
     /// Broad-phase proxy ids are shared with multibody link colliders, so
-    /// they are tracked in [`PhysicsWorld::body_proxies`] (visible to tests);
-    /// body removal is not yet supported.
+    /// they are tracked in [`PhysicsWorld::body_proxies`] (visible to tests).
+    /// Indices are stable: removing a body never renumbers the others (see
+    /// [`PhysicsWorld::remove_body`]).
     pub fn add_body(&mut self, body: RigidBody) -> usize {
         let aabb = body
             .shape
@@ -367,22 +372,83 @@ impl PhysicsWorld {
         let proxy = self.broadphase.create_proxy(aabb);
         let index = self.bodies.len();
         self.bodies.push(body);
-        debug_assert_eq!(proxy, self.proxy_owners.len());
-        self.proxy_owners.push(ProxyOwner::Body(index));
+        // Broad-phase slots are recycled after `remove_body`, so this covers
+        // both a fresh push and a reused slot.
+        if proxy == self.proxy_owners.len() {
+            self.proxy_owners.push(ProxyOwner::Body(index));
+        } else {
+            debug_assert_eq!(self.proxy_owners[proxy], ProxyOwner::Free);
+            self.proxy_owners[proxy] = ProxyOwner::Body(index);
+        }
         self.body_proxies.push(proxy);
         index
     }
 
+    /// The body at `index`. Panics if the body was removed
+    /// ([`PhysicsWorld::remove_body`]) — the slot itself stays readable
+    /// through [`PhysicsWorld::bodies`] for bookkeeping, but a removed body
+    /// no longer takes part in anything.
     pub fn body(&self, index: usize) -> &RigidBody {
+        assert!(
+            !self.bodies[index].is_removed(),
+            "body {index} has been removed"
+        );
         &self.bodies[index]
     }
 
+    /// Mutable access to the body at `index` (panics if removed, see
+    /// [`PhysicsWorld::body`]).
     pub fn body_mut(&mut self, index: usize) -> &mut RigidBody {
+        assert!(
+            !self.bodies[index].is_removed(),
+            "body {index} has been removed"
+        );
         &mut self.bodies[index]
     }
 
     pub fn bodies(&self) -> &[RigidBody] {
         &self.bodies
+    }
+
+    /// Remove a body from the world (Bullet's `removeRigidBody`): destroys
+    /// its broad-phase proxy, drops its cached contact manifolds (Bullet's
+    /// `cleanProxyFromPairs` + `destroyProxy`) and neutralizes the body.
+    ///
+    /// Constraints referencing the body are removed automatically — joints,
+    /// multibody-vs-rigidbody constraints and the collision suppression the
+    /// joints contributed (Bullet leaves that to the caller and dangles
+    /// otherwise; recorded deviation). Body indices are stable: the other
+    /// bodies keep their indices and the removed slot is never reused, so a
+    /// stale index reads inert data instead of a different body. External
+    /// users of the index (a vehicle's chassis, a character controller) must
+    /// stop using it, exactly like Bullet's pointer holders.
+    pub fn remove_body(&mut self, index: usize) {
+        assert!(
+            !self.bodies[index].is_removed(),
+            "body {index} has already been removed"
+        );
+        // Destroy the broad-phase proxy first: its pairs die with it, so no
+        // future step can pair or query the body.
+        let proxy = self.body_proxies[index];
+        self.broadphase.destroy_proxy(proxy);
+        self.proxy_owners[proxy] = ProxyOwner::Free;
+        // Poison the proxy back-reference so any stray set_aabb on the dead
+        // body panics instead of writing a recycled proxy.
+        self.body_proxies[index] = usize::MAX;
+        self.bodies[index].mark_removed();
+        self.manifold_cache
+            .retain(|&(i, j), _| i != index && j != index);
+        self.constraints
+            .retain(|c| c.body_a() != index && c.body_b() != index);
+        self.mb_constraints
+            .retain(|c| c.rigid_body_b() != Some(index));
+        self.no_collision_pairs.clear();
+        for c in &self.constraints {
+            if c.disable_collisions() {
+                let (a, b) = (c.body_a(), c.body_b());
+                self.no_collision_pairs.insert((a.min(b), a.max(b)));
+            }
+        }
     }
 
     /// Inner iterations for the multibody non-contact (joint) rows per outer
@@ -517,8 +583,13 @@ impl PhysicsWorld {
             .expanded(BROADPHASE_AABB_MARGIN);
             let proxy = self.broadphase.create_proxy(aabb);
             self.collider_entries[i].proxy = Some(proxy);
-            debug_assert_eq!(proxy, self.proxy_owners.len());
-            self.proxy_owners.push(ProxyOwner::Collider(i));
+            // See `add_body`: the slot may be a recycled one.
+            if proxy == self.proxy_owners.len() {
+                self.proxy_owners.push(ProxyOwner::Collider(i));
+            } else {
+                debug_assert_eq!(self.proxy_owners[proxy], ProxyOwner::Free);
+                self.proxy_owners[proxy] = ProxyOwner::Collider(i);
+            }
         }
     }
 
@@ -581,7 +652,7 @@ impl PhysicsWorld {
             .into_iter()
             .filter_map(|p| match self.proxy_owners[p] {
                 ProxyOwner::Body(i) => Some(i),
-                ProxyOwner::Collider(_) => None,
+                ProxyOwner::Collider(_) | ProxyOwner::Free => None,
             })
             .collect()
     }
@@ -667,6 +738,10 @@ impl PhysicsWorld {
     /// the character controller to move its kinematic body; the solver still
     /// treats the body as immovable (static bodies are never integrated).
     pub fn set_body_transform(&mut self, index: usize, position: Vector3, orientation: Quaternion) {
+        assert!(
+            !self.bodies[index].is_removed(),
+            "body {index} has been removed"
+        );
         let body = &mut self.bodies[index];
         body.position = position;
         body.orientation = orientation;
@@ -873,6 +948,7 @@ impl PhysicsWorld {
                                 col.restitution,
                             ))
                         }
+                        ProxyOwner::Free => None,
                     }
                 };
                 let Some((side_a, shape_a, pa, qa, fa, ra)) = resolve(owner_a) else {
@@ -1112,6 +1188,11 @@ impl PhysicsWorld {
                         continue;
                     }
                     let other = &self.bodies[j];
+                    // Removed bodies are gone from every collision path,
+                    // including the CCD sweeps (their proxy is destroyed).
+                    if other.is_removed() {
+                        continue;
+                    }
                     if let Some(hit) = narrowphase::swept_sphere_cast(
                         from,
                         to,
@@ -1209,6 +1290,7 @@ impl PhysicsWorld {
         let node_of = |world: &Self, owner: ProxyOwner| match owner {
             ProxyOwner::Body(i) => world.bodies[i].participates_in_islands().then_some(i),
             ProxyOwner::Collider(e) => Some(num_bodies + world.collider_entries[e].mb),
+            ProxyOwner::Free => None,
         };
         for &(pi, pj) in pairs {
             if let (Some(a), Some(b)) = (
@@ -2688,5 +2770,256 @@ mod tests {
             world.body(b).is_active(),
             "joint-linked partner of a moving body must stay awake"
         );
+    }
+
+    // ---- body removal -----------------------------------------------
+
+    /// A removed body stops colliding (its broad-phase proxy is gone, its
+    /// cached manifolds are dropped) and freezes in place; the bodies that
+    /// were resting on it fall.
+    #[test]
+    fn removed_body_stops_colliding_and_falls() {
+        let mut world = PhysicsWorld::new();
+        let ground = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.5, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        // Settle into contact (the manifold cache now holds the pair).
+        for _ in 0..10 {
+            world.step_simulation(dt);
+        }
+        assert!(world.body(ball).position.y > 0.4);
+        let ground_y = world.bodies()[ground].position.y;
+        world.remove_body(ground);
+        // With the ground gone the ball falls freely through the old plane.
+        for _ in 0..30 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(ball).position.y < -0.5,
+            "ball must fall through the removed ground"
+        );
+        // The removed body itself is inert data.
+        assert_eq!(world.bodies()[ground].position.y, ground_y);
+        assert!(world.bodies()[ground].is_removed());
+        assert!(!world.bodies()[ground].is_active());
+    }
+
+    /// Removed bodies disappear from every world query (ray casts, sweeps,
+    /// contact tests all run through the broad phase).
+    #[test]
+    fn removed_body_is_invisible_to_queries() {
+        let mut world = PhysicsWorld::new();
+        let sphere = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(1.0, 0.0, 0.0),
+        ));
+        assert!(
+            world
+                .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+                .is_some()
+        );
+        world.remove_body(sphere);
+        assert!(
+            world
+                .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+                .is_none()
+        );
+    }
+
+    /// Body slots are never reused (indices stay valid) while the freed
+    /// broad-phase slot is recycled for the next registration; the owner
+    /// table stays consistent.
+    #[test]
+    fn remove_then_add_recycles_the_proxy_slot() {
+        let mut world = PhysicsWorld::new();
+        let first = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(1.0, 0.0, 0.0),
+        ));
+        let second = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(3.0, 0.0, 0.0),
+        ));
+        let freed = world.body_proxies[first];
+        world.remove_body(first);
+        // The new body reuses the freed proxy slot and gets a fresh body slot.
+        let third = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(1.0, 2.0, 0.0),
+        ));
+        assert_eq!(third, 2);
+        assert_eq!(world.body_proxies[third], freed);
+        // Queries resolve to the right owners afterwards.
+        let (index, _) = world
+            .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+            .unwrap();
+        assert_eq!(index, second);
+        let (index, _) = world
+            .raycast_closest(Vector3::new(1.0, 5.0, 0.0), Vector3::new(1.0, -5.0, 0.0))
+            .unwrap();
+        assert_eq!(index, third);
+    }
+
+    /// Joints referencing a removed body go with it; the remaining joints
+    /// keep working (their collision suppression survives the rebuild).
+    #[test]
+    fn remove_body_cascades_joints() {
+        let mut world = PhysicsWorld::new();
+        let a = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(-1.0, 5.0, 0.0),
+            1.0,
+        ));
+        let b = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(1.0, 5.0, 0.0),
+            1.0,
+        ));
+        world.add_constraint(crate::constraint::Constraint::point2point(
+            a,
+            b,
+            Vector3::X,
+            -Vector3::X,
+        ));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        assert_eq!(world.constraints().len(), 1);
+        world.remove_body(a);
+        assert_eq!(world.constraints().len(), 0);
+        // Nothing holds B up anymore: it falls the whole way down to the
+        // ground (a surviving joint would keep it near its release height).
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(b).position.y < 1.0,
+            "released body must fall freely, got {:?}",
+            world.body(b).position
+        );
+    }
+
+    /// Multibody-vs-rigidbody constraints cascade with the rigid side too.
+    #[test]
+    fn remove_body_cascades_multibody_constraints() {
+        let mut world = PhysicsWorld::new();
+        let mut mb = MultiBody::new(0, 1.0, Vector3::ONE, false, false);
+        mb.finalize_multidof();
+        let ia = world.add_multibody(mb);
+        let rb = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 1.0, 0.0),
+            1.0,
+        ));
+        let snapshot = world.multibodies().to_vec();
+        let constraint = MultiBodyConstraint::point2point_to_rigid(
+            ia,
+            None,
+            rb,
+            Vector3::ZERO,
+            Vector3::new(0.0, 1.0, 0.0),
+            &snapshot,
+        );
+        world.add_multibody_constraint(constraint);
+        assert_eq!(world.num_multibody_constraints(), 1);
+        world.remove_body(rb);
+        assert_eq!(world.num_multibody_constraints(), 0);
+        // The multibody itself keeps simulating.
+        for _ in 0..10 {
+            world.step_simulation(1.0 / 60.0);
+        }
+    }
+
+    /// A removed body no longer blocks the CCD swept-sphere clamps (the
+    /// candidate sweep skips inert slots; its proxy is destroyed).
+    #[test]
+    fn removed_body_does_not_block_ccd() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        // Thin static wall spanning y in [0.4, 0.6] — same scene as
+        // `ccd_clamps_fast_bodies_at_the_impact`.
+        let wall = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        world.remove_body(wall);
+        world.step_simulation(1.0 / 60.0);
+        assert!(
+            world.body(ball).position.y < -0.5,
+            "CCD clamp must ignore the removed wall"
+        );
+    }
+
+    /// The remaining bodies keep their indices and simulate normally after
+    /// a removal (no renumbering, no swap).
+    #[test]
+    fn removed_body_keeps_remaining_indices_stable() {
+        let mut world = PhysicsWorld::new();
+        let ground = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let a = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 5.0, 0.0),
+            1.0,
+        ));
+        let b = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(2.0, 8.0, 0.0),
+            1.0,
+        ));
+        world.remove_body(a);
+        assert_eq!(world.bodies().len(), 3);
+        let dt = 1.0 / 60.0;
+        for _ in 0..240 {
+            world.step_simulation(dt);
+        }
+        // B landed on the still-present ground; the indices never moved.
+        assert_relative_eq!(world.body(b).position.y, 0.5, epsilon = 0.05);
+        assert_eq!(ground, 0);
+        assert!(world.bodies()[a].is_removed());
+    }
+
+    #[test]
+    #[should_panic(expected = "already been removed")]
+    fn removing_a_body_twice_panics() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        ));
+        world.remove_body(body);
+        world.remove_body(body);
+    }
+
+    #[test]
+    #[should_panic(expected = "has been removed")]
+    fn accessing_a_removed_body_panics() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        ));
+        world.remove_body(body);
+        let _ = world.body(body);
     }
 }
