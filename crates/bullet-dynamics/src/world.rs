@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::time::{Duration, Instant};
 
 use bullet_collision::broadphase::{AxisSweep3, BroadPhase};
@@ -14,6 +15,50 @@ use crate::multibody::contact::{self, ContactSide, MbContactRow, PendingContact}
 use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
 use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, SLOP, SPLIT_TURN_ERP};
+
+/// FxHash-style hasher (rustc's `FxHashMap` recipe) for the pair-keyed maps
+/// below: the keys are `(usize, usize)` proxy pairs looked up several times
+/// per broad-phase pair per step (mark/refresh/seed/writeback — ~24k lookups
+/// on the 1000-body stack), where SipHash's collision-resistance is pure
+/// overhead (the SipHash of `RandomState` measured ~12% of the step
+/// inclusive; a multiply-xor-rotate mix is collision-safe enough for index
+/// pairs and several times cheaper). The hash only picks the bucket — every
+/// consumer keys its access, so lookups stay semantically identical.
+#[derive(Default)]
+struct FxHasher {
+    hash: u64,
+}
+
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Byte-wise fallback; never hit by the usize-only pair keys.
+        for &b in bytes {
+            self.add_to_hash(b as u64);
+        }
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add_to_hash(i as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+impl FxHasher {
+    #[inline]
+    fn add_to_hash(&mut self, i: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(FX_SEED);
+    }
+}
+
+type FxBuild = BuildHasherDefault<FxHasher>;
 
 /// Every broad-phase AABB is padded by the global contact-breaking
 /// threshold (Bullet's `btCollisionWorld::updateSingleAabb` — "need to
@@ -169,7 +214,7 @@ pub struct PhysicsWorld {
     /// pairs that drifted past the redetect thresholds re-run the narrow
     /// phase. Entries whose broad-phase pair disappeared are dropped at the
     /// end of the step (Bullet destroys the manifold with the pair).
-    manifold_cache: HashMap<(usize, usize), PersistentManifold>,
+    manifold_cache: HashMap<(usize, usize), PersistentManifold, FxBuild>,
     /// Solver contact rows of the current step, pooled across steps (the
     /// capacity survives `clear`, so the steady state allocates nothing).
     contact_rows: Vec<ContactConstraint>,
@@ -196,7 +241,7 @@ pub struct PhysicsWorld {
     /// Body pairs whose collision response is suppressed by a joint
     /// (`disableCollisionsBetweenLinkedBodies`, Bullet's
     /// `checkCollideWithOverride`), sorted `(min, max)`.
-    no_collision_pairs: HashSet<(usize, usize)>,
+    no_collision_pairs: HashSet<(usize, usize), FxBuild>,
     /// Broad-phase proxy id for each rigid body (proxy ids are shared with
     /// the multibody link colliders, so they no longer coincide with body
     /// indices).
@@ -247,7 +292,7 @@ impl PhysicsWorld {
             broadphase: AxisSweep3::new(),
             gravity: Vector3::new(0.0, -9.81, 0.0),
             iterations: 10,
-            manifold_cache: HashMap::new(),
+            manifold_cache: HashMap::with_hasher(FxBuild::default()),
             contact_rows: Vec::new(),
             joint_rows: Vec::new(),
             predicted_poses: Vec::new(),
@@ -256,7 +301,7 @@ impl PhysicsWorld {
             refresh_out: Vec::new(),
             prev_simulate: false,
             constraints: Vec::new(),
-            no_collision_pairs: HashSet::new(),
+            no_collision_pairs: HashSet::with_hasher(FxBuild::default()),
             body_proxies: Vec::new(),
             collider_entries: Vec::new(),
             proxy_owners: Vec::new(),

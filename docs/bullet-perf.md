@@ -66,19 +66,19 @@ Scene: stack_1000 (f32), bodies: 1001, frames: 600, warmup: 30, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.462 | 877.4 | 104.7 |
-| rust | 1.259 | 755.3 | 61.6 |
-| rust/bullet | 0.86x | | |
+| bullet | 1.285 | 770.8 | 98.9 |
+| rust | 0.968 | 580.9 | 51.6 |
+| rust/bullet | 0.75x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
-- integrate_velocities: 2.2 ms (0.3%)
-- update_aabbs: 30.4 ms (4.4%)
-- broadphase: 88.6 ms (13.0%)
-- islands: 39.0 ms (5.7%)
-- narrowphase: 234.3 ms (34.3%)
-- solve: 284.6 ms (41.7%)
-- integrate_positions: 3.9 ms (0.6%)
+- integrate_velocities: 2.1 ms (0.3%)
+- update_aabbs: 29.2 ms (4.8%)
+- broadphase: 71.7 ms (11.9%)
+- islands: 35.6 ms (5.9%)
+- narrowphase: 184.5 ms (30.6%)
+- solve: 275.6 ms (45.8%)
+- integrate_positions: 3.7 ms (0.6%)
 
 ## Scene: rain_500
 
@@ -88,19 +88,38 @@ Scene: rain_500 (f32), bodies: 501, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 3.663 | 1098.9 | 1098.9 |
-| rust | 1.708 | 512.3 | 512.3 |
-| rust/bullet | 0.47x | | |
+| bullet | 3.653 | 1095.8 | 1095.8 |
+| rust | 1.607 | 482.2 | 482.2 |
+| rust/bullet | 0.44x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 1.7 ms (0.3%)
-- update_aabbs: 55.0 ms (10.5%)
+- integrate_velocities: 1.5 ms (0.3%)
+- update_aabbs: 54.7 ms (11.3%)
 - broadphase: 4.5 ms (0.9%)
-- islands: 3.9 ms (0.7%)
-- narrowphase: 220.1 ms (42.2%)
-- solve: 234.2 ms (44.9%)
-- integrate_positions: 2.4 ms (0.5%)
+- islands: 3.7 ms (0.8%)
+- narrowphase: 194.3 ms (40.0%)
+- solve: 225.1 ms (46.3%)
+- integrate_positions: 2.5 ms (0.5%)
+
+**2026-08-28 SipHash removal round (Fx-hash pair-keyed maps).** The
+post-pair-set stack_1000 profile put the `manifold_cache` lookups at
+~12.6% inclusive (`find_inner` + SipHash `hash_one` ~9% self): the map is
+queried per broad-phase pair (mark/refresh/seed/entry/remove) plus once
+per contact-point row in the impulse writeback — ~24k lookups per step on
+the 1000-body stack. Both pair-keyed containers in `PhysicsWorld`
+(`manifold_cache`, `no_collision_pairs`) now build with the same
+FxHash-style multiply-rotate hasher the sweep pair cache used before it
+became a sorted Vec (rustc's `FxHashMap` recipe; the keys are our own
+`(usize, usize)` pairs, so SipHash's collision-resistance buys nothing).
+The hash only picks the bucket and every consumer keys its access:
+all six parity scenes' rust CSVs (f32/f64) and all 48 multibody probe
+outputs are byte-identical. Measured: stack_1000 0.86x -> **0.68-0.75x**
+(rust total 755 -> ~574 ms, narrowphase stage 234 -> 203 ms — the
+lookups bill into the narrow-phase stage; Bullet-side variance moves the
+ratio), rain_500 0.44x (rust 512 -> 476 ms, narrowphase 220 -> 172 ms),
+mb_chains ~0.7x (unchanged, few pairs). Combined with the morning's
+sorted pair set, stack_1000 is now at 0.96x -> ~0.7x on the day.
 
 **2026-08-28 broadphase pair-set round (sorted pair set).** A fresh
 stack_1000 flamegraph showed `compute_pairs` rebuilding its output every
@@ -241,17 +260,17 @@ Scene: mb_chains (f32), bodies: 20, frames: 300, warmup: 5, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 0.061 | 18.3 | 18.3 |
-| rust | 0.042 | 12.6 | 12.6 |
-| rust/bullet | 0.69x | | |
+| bullet | 0.058 | 17.5 | 17.5 |
+| rust | 0.045 | 13.5 | 13.5 |
+| rust/bullet | 0.77x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 3.4 ms (26.9%)
-- update_aabbs: 3.8 ms (30.0%)
-- broadphase: 0.0 ms (0.3%)
-- islands: 0.1 ms (1.1%)
-- narrowphase: 0.1 ms (1.0%)
-- solve: 3.5 ms (27.5%)
-- integrate_positions: 1.7 ms (13.2%)
+- integrate_velocities: 3.5 ms (26.7%)
+- update_aabbs: 3.9 ms (29.9%)
+- broadphase: 0.0 ms (0.4%)
+- islands: 0.2 ms (1.2%)
+- narrowphase: 0.1 ms (0.9%)
+- solve: 3.6 ms (27.9%)
+- integrate_positions: 1.7 ms (13.0%)
 
