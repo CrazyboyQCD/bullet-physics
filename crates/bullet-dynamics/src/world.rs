@@ -274,6 +274,9 @@ pub struct PhysicsWorld {
     mb_pending_contacts: Vec<PendingContact>,
     /// Flattened multibody contact rows for the current step.
     mb_contact_rows: Vec<MbContactRow>,
+    /// Reused per-sweep buffer for the contact rows' normal-impulse
+    /// snapshot (kept across steps so the solve sweeps do not allocate).
+    mb_row_scratch: Vec<Real>,
     /// Cumulative per-stage step timings; zero until enabled (see
     /// [`PhysicsWorld::enable_step_timing`]).
     step_timings: StepTimings,
@@ -320,6 +323,7 @@ impl PhysicsWorld {
             mb_rows: Vec::new(),
             mb_pending_contacts: Vec::new(),
             mb_contact_rows: Vec::new(),
+            mb_row_scratch: Vec::new(),
             step_timings: StepTimings::default(),
         }
     }
@@ -1439,7 +1443,12 @@ impl PhysicsWorld {
                 joint_rows,
                 inv_dt,
             );
-            contact::solve_contact_rows(&mut self.mb_contact_rows, &mut self.mb_data, &mut self.bodies);
+            contact::solve_contact_rows(
+                &mut self.mb_contact_rows,
+                &mut self.mb_data,
+                &mut self.bodies,
+                &mut self.mb_row_scratch,
+            );
             for _ in 0..inner {
                 self.mb_rows_sweep(iteration);
             }
@@ -1511,11 +1520,12 @@ impl PhysicsWorld {
         }
         for row in &self.mb_rows {
             let imp = row.applied_impulse;
-            let unit_a = self.mb_data.delta_velocities_unit_impulse
-                [row.jac_a_index..row.jac_a_index + row.ndof_a]
-                .to_vec();
             let mb = &mut self.multibodies[row.multi_body_a];
-            mb.apply_delta_vee(&unit_a, imp);
+            mb.apply_delta_vee(
+                &self.mb_data.delta_velocities_unit_impulse
+                    [row.jac_a_index..row.jac_a_index + row.ndof_a],
+                imp,
+            );
             // Accumulate the row impulse as a constraint force for the joint
             // feedback (Bullet's `writeBackSolverBodyToMultiBody`).
             let force_a = row.contact_normal1 * (imp / dt);
@@ -1533,11 +1543,12 @@ impl PhysicsWorld {
             if row.rigid_b.is_some() {
                 continue; // the rigid side applied its impulses in-solve
             }
-            let unit_b = self.mb_data.delta_velocities_unit_impulse
-                [row.jac_b_index..row.jac_b_index + row.ndof_b]
-                .to_vec();
             let mb = &mut self.multibodies[row.multi_body_b];
-            mb.apply_delta_vee(&unit_b, imp);
+            mb.apply_delta_vee(
+                &self.mb_data.delta_velocities_unit_impulse
+                    [row.jac_b_index..row.jac_b_index + row.ndof_b],
+                imp,
+            );
             let force_b = row.contact_normal2 * (imp / dt);
             let torque_b = row.rel_pos2_cross_normal * (imp / dt);
             match row.link_b {

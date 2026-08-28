@@ -1184,9 +1184,9 @@ impl MultiBodyConstraint {
         data.delta_velocities_unit_impulse
             .resize(delta_start + ndof_a, 0.0);
         {
-            let jac = data.jacobians[jac_a_start..jac_a_start + ndof_a].to_vec();
+            let jac = &data.jacobians[jac_a_start..jac_a_start + ndof_a];
             let delta = &mut data.delta_velocities_unit_impulse[delta_start..delta_start + ndof_a];
-            bodies[multi_body_a].calc_acceleration_deltas(&jac, delta, scratch);
+            bodies[multi_body_a].calc_acceleration_deltas(jac, delta, scratch);
         }
         let torque_axis0 = if ang_constraint {
             constraint_normal_ang
@@ -1256,9 +1256,9 @@ impl MultiBodyConstraint {
                 data.delta_velocities_unit_impulse
                     .resize(delta_b_start + ndof_b, 0.0);
                 {
-                    let jac = data.jacobians[jac_b_start..jac_b_start + ndof_b].to_vec();
+                    let jac = &data.jacobians[jac_b_start..jac_b_start + ndof_b];
                     let delta = &mut data.delta_velocities_unit_impulse[delta_b_start..delta_b_start + ndof_b];
-                    bodies[multi_body_b].calc_acceleration_deltas(&jac, delta, scratch);
+                    bodies[multi_body_b].calc_acceleration_deltas(jac, delta, scratch);
                 }
                 let torque_axis1 = if ang_constraint {
                     constraint_normal_ang
@@ -1715,16 +1715,14 @@ impl MultiBodyConstraint {
         let mut rhs = kp * position_stabilization_term + current_velocity + kd * velocity_error;
         rhs = rhs.clamp(-rhs_clamp, rhs_clamp);
 
-        let jac_a = self.jacobian_a(0).to_vec();
-        let jac_b = self.jacobian_b(0).to_vec();
         self.fill_row(
             &mut row,
             data,
             scratch,
             bodies,
             &[],
-            Some(&jac_a),
-            Some(&jac_b),
+            Some(self.jacobian_a(0)),
+            Some(self.jacobian_b(0)),
             Vector3::ZERO,
             Vector3::ZERO,
             Vector3::ZERO,
@@ -1811,16 +1809,14 @@ impl MultiBodyConstraint {
         }
         let desired_relative_velocity = aux_vel;
 
-        let jac_a = self.jacobian_a(0).to_vec();
-        let jac_b = self.jacobian_b(0).to_vec();
         self.fill_row(
             &mut row,
             data,
             scratch,
             bodies,
             &[],
-            Some(&jac_a),
-            Some(&jac_b),
+            Some(self.jacobian_a(0)),
+            Some(self.jacobian_b(0)),
             Vector3::ZERO,
             Vector3::ZERO,
             Vector3::ZERO,
@@ -1905,16 +1901,14 @@ impl MultiBodyConstraint {
             r.ndof_a = 6 + bodies[self.body_a].num_dofs();
             r.ndof_b = 6 + bodies[self.body_b].num_dofs();
 
-            let jac_a = self.jacobian_a(row).to_vec();
-            let jac_b = self.jacobian_b(row).to_vec();
             let rel_vel = self.fill_row(
                 &mut r,
                 data,
                 scratch,
                 bodies,
                 &[],
-                Some(&jac_a),
-                Some(&jac_b),
+                Some(self.jacobian_a(row)),
+                Some(self.jacobian_b(row)),
                 Vector3::ZERO,
                 Vector3::ZERO,
                 Vector3::ZERO,

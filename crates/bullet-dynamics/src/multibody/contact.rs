@@ -167,10 +167,10 @@ fn setup_contact_row(
                 body.fill_constraint_jacobian(link, pos, Vector3::ZERO, -dir, jac, scratch);
             }
             {
-                let jac = data.jacobians[jac_index..jac_index + ndof].to_vec();
+                let jac = &data.jacobians[jac_index..jac_index + ndof];
                 let delta =
                     &mut data.delta_velocities_unit_impulse[jac_index..jac_index + ndof];
-                body.calc_acceleration_deltas(&jac, delta, scratch);
+                body.calc_acceleration_deltas(jac, delta, scratch);
             }
             let rel = pos - side_com(side_a, multibodies);
             (
@@ -222,10 +222,10 @@ fn setup_contact_row(
                 body.fill_constraint_jacobian(link, pos, Vector3::ZERO, dir, jac, scratch);
             }
             {
-                let jac = data.jacobians[jac_index..jac_index + ndof].to_vec();
+                let jac = &data.jacobians[jac_index..jac_index + ndof];
                 let delta =
                     &mut data.delta_velocities_unit_impulse[jac_index..jac_index + ndof];
-                body.calc_acceleration_deltas(&jac, delta, scratch);
+                body.calc_acceleration_deltas(jac, delta, scratch);
             }
             let rel = pos - side_com(side_b, multibodies);
             (
@@ -533,9 +533,9 @@ fn apply_side(
     match (data, side) {
         (SideData::MultiBody { jac_index, delta_vel_index, ndof }, _) => {
             let unit =
-                solver.delta_velocities_unit_impulse[*jac_index..*jac_index + *ndof].to_vec();
+                &solver.delta_velocities_unit_impulse[*jac_index..*jac_index + *ndof];
             let dv = &mut solver.delta_velocities[*delta_vel_index..*delta_vel_index + *ndof];
-            for (v, u) in dv.iter_mut().zip(&unit) {
+            for (v, &u) in dv.iter_mut().zip(unit) {
                 *v += u * delta_impulse;
             }
         }
@@ -553,11 +553,14 @@ fn apply_side(
 
 /// One PGS sweep over the contact rows: the normal rows first, then the
 /// friction rows with their bounds refreshed from the same-sweep normal
-/// impulses (Bullet's `solveSingleIteration` pool order).
+/// impulses (Bullet's `solveSingleIteration` pool order). `scratch` holds
+/// the per-sweep normal-impulse snapshot (caller-owned so sweeps do not
+/// allocate).
 pub(crate) fn solve_contact_rows(
     rows: &mut [MbContactRow],
     data: &mut SolverData,
     bodies: &mut [RigidBody],
+    scratch: &mut Vec<Real>,
 ) {
     for row in rows.iter_mut() {
         if row.normal_row.is_none() {
@@ -566,12 +569,13 @@ pub(crate) fn solve_contact_rows(
     }
     // Snapshot the normal impulses for the friction bounds (a friction row
     // reads its paired normal row while holding a `&mut` over `rows`).
-    let normal_impulses: Vec<Real> = rows.iter().map(|r| r.applied_impulse).collect();
+    scratch.clear();
+    scratch.extend(rows.iter().map(|r| r.applied_impulse));
     for row in rows.iter_mut() {
         if let Some(n) = row.normal_row {
             // Coulomb bound from the paired normal row's accumulated impulse;
             // unsolved normals (zero impulse) disable the friction row.
-            let total = normal_impulses[n];
+            let total = scratch[n];
             if total > 0.0 {
                 let bound = row.friction * total;
                 row.lower_limit = -bound;
@@ -627,8 +631,10 @@ fn apply_side_writeback(
         return; // rigid sides live in the rigid solver's writeback
     };
     let body = &mut multibodies[mb];
-    let unit = solver.delta_velocities_unit_impulse[*jac_index..*jac_index + *ndof].to_vec();
-    body.apply_delta_vee(&unit, impulse);
+    body.apply_delta_vee(
+        &solver.delta_velocities_unit_impulse[*jac_index..*jac_index + *ndof],
+        impulse,
+    );
     let force = normal * (impulse / dt);
     let torque = relpos_cross_normal * (impulse / dt);
     if link < 0 {
