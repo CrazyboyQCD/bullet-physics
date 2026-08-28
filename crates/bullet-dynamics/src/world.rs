@@ -450,6 +450,20 @@ impl PhysicsWorld {
     /// `btMultiBodyLinkCollider` is added). Forward kinematics must have run
     /// this step so the world transforms are fresh.
     fn register_pending_colliders(&mut self) {
+        // Fast path: colliders are only ever attached (never detached) and
+        // entries are only pushed here, so an unchanged attached-collider
+        // count means there is nothing to register. One O(n) count pass
+        // replaces the per-step wanted-list rebuild + quadratic duplicate
+        // scan below (the steady state of e.g. a 200-chain scene).
+        let attached = self.multibodies.iter().map(|mb| {
+            mb.base_collider().is_some() as usize
+                + (0..mb.num_links())
+                    .filter(|&l| mb.link_collider(l).is_some())
+                    .count()
+        });
+        if attached.sum::<usize>() == self.collider_entries.len() {
+            return;
+        }
         let mut wanted: Vec<(usize, i32)> = Vec::new();
         for (mb_i, mb) in self.multibodies.iter().enumerate() {
             if mb.base_collider().is_some() {
