@@ -4,9 +4,78 @@ use bullet_math::{Aabb, Real, Vector3};
 
 mod axis_sweep3;
 mod brute_force;
+mod dbvt;
 
 pub use axis_sweep3::AxisSweep3;
 pub use brute_force::BruteForceBroadPhase;
+pub use dbvt::DbvtBroadPhase;
+
+/// Selectable broad-phase backend: an enum dispatch (no `dyn` on the hot
+/// path) so a world can be built with either structure. `AxisSweep3` is the
+/// default; `Dbvt` scales to very large dynamic scenes and unrestricted
+/// world extents (Bullet's default broad phase).
+#[derive(Debug)]
+pub enum BroadPhaseBackend {
+    AxisSweep3(AxisSweep3),
+    Dbvt(DbvtBroadPhase),
+}
+
+impl Default for BroadPhaseBackend {
+    fn default() -> Self {
+        Self::AxisSweep3(AxisSweep3::new())
+    }
+}
+
+impl BroadPhase for BroadPhaseBackend {
+    fn create_proxy(&mut self, aabb: Aabb) -> usize {
+        match self {
+            Self::AxisSweep3(bp) => bp.create_proxy(aabb),
+            Self::Dbvt(bp) => bp.create_proxy(aabb),
+        }
+    }
+
+    fn set_aabb(&mut self, proxy: usize, aabb: Aabb) {
+        match self {
+            Self::AxisSweep3(bp) => bp.set_aabb(proxy, aabb),
+            Self::Dbvt(bp) => bp.set_aabb(proxy, aabb),
+        }
+    }
+
+    fn destroy_proxy(&mut self, proxy: usize) {
+        match self {
+            Self::AxisSweep3(bp) => bp.destroy_proxy(proxy),
+            Self::Dbvt(bp) => bp.destroy_proxy(proxy),
+        }
+    }
+
+    fn proxy_aabb(&self, proxy: usize) -> Option<Aabb> {
+        match self {
+            Self::AxisSweep3(bp) => bp.proxy_aabb(proxy),
+            Self::Dbvt(bp) => bp.proxy_aabb(proxy),
+        }
+    }
+
+    fn compute_pairs(&mut self) -> Vec<(usize, usize)> {
+        match self {
+            Self::AxisSweep3(bp) => bp.compute_pairs(),
+            Self::Dbvt(bp) => bp.compute_pairs(),
+        }
+    }
+
+    fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize> {
+        match self {
+            Self::AxisSweep3(bp) => bp.raycast_candidates(ray_from, ray_to),
+            Self::Dbvt(bp) => bp.raycast_candidates(ray_from, ray_to),
+        }
+    }
+
+    fn aabb_candidates(&self, aabb: Aabb) -> Vec<usize> {
+        match self {
+            Self::AxisSweep3(bp) => bp.aabb_candidates(aabb),
+            Self::Dbvt(bp) => bp.aabb_candidates(aabb),
+        }
+    }
+}
 
 /// A broad-phase structure producing candidate overlapping pairs.
 ///
@@ -23,7 +92,13 @@ pub trait BroadPhase {
     /// The current AABB of a proxy, if the slot is live.
     fn proxy_aabb(&self, proxy: usize) -> Option<Aabb>;
     /// Compute all currently overlapping `(proxy_a, proxy_b)` pairs.
-    fn compute_pairs(&self) -> Vec<(usize, usize)>;
+    ///
+    /// Takes `&mut self`: implementations may advance internal state on this
+    /// once-per-step query (the AxisSweep3 pair set only reads; the Dbvt
+    /// broadphase runs its per-step tree optimization, stage rotation and
+    /// separated-pair pruning here, mirroring Bullet's
+    /// `calculateOverlappingPairs`).
+    fn compute_pairs(&mut self) -> Vec<(usize, usize)>;
     /// Indices of proxies whose AABB the segment `ray_from -> ray_to` crosses.
     ///
     /// Conservative: never misses a proxy a shape hit could come from, but may

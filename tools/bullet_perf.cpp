@@ -12,9 +12,9 @@
 //     repeat <i> total_ms <x> last300_ms <y>
 //
 // Fairness notes (documented in docs/bullet-perf.md):
-//   - the broad phase is btAxisSweep3 (the same 3-axis sweep-and-prune
-//     algorithm as this crate's AxisSweep3; btDbvtBroadphase would compare a
-//     different algorithm), scoped with the scene's broadphase_aabb hint;
+//   - the broad phase follows the scene spec: btAxisSweep3 (matching this
+//     crate's default AxisSweep3, scoped with the broadphase_aabb hint) or
+//     btDbvtBroadphase (matching DbvtBroadPhase) for the dbvt_* scenes;
 //   - SOLVER_RANDMIZE_ORDER is cleared (same reproducibility precondition as
 //     the parity recorder);
 //   - multibody scenes use btMultiBodyDynamicsWorld with link colliders in
@@ -31,6 +31,7 @@
 
 #include "btBulletDynamicsCommon.h"
 #include <BulletCollision/BroadphaseCollision/btAxisSweep3.h>
+#include <BulletCollision/BroadphaseCollision/btDbvtBroadphase.h>
 
 #include <BulletDynamics/Featherstone/btMultiBody.h>
 #include <BulletDynamics/Featherstone/btMultiBodyDynamicsWorld.h>
@@ -77,7 +78,7 @@ btCollisionShape* make_shape(const PerfBodySpec& b,
 struct SceneRun {
   btDefaultCollisionConfiguration config;
   btCollisionDispatcher dispatcher;
-  btAxisSweep3 broadphase;
+  std::unique_ptr<btBroadphaseInterface> broadphase;  // per-scene: AxisSweep3 or Dbvt
   btMultiBodyConstraintSolver solver;   // plain scenes: solves rigid rows too
   std::vector<std::unique_ptr<btCollisionShape>> shapes;
   std::vector<std::unique_ptr<btTriangleMesh>> mesh_storage;
@@ -91,10 +92,12 @@ struct SceneRun {
   SceneRun(const PerfSceneSpec& spec)
       : config(),
         dispatcher(&config),
-        broadphase(btVector3(spec.bp_min[0], spec.bp_min[1], spec.bp_min[2]),
-                   btVector3(spec.bp_max[0], spec.bp_max[1], spec.bp_max[2])),
+        broadphase(spec.bp_kind ? static_cast<btBroadphaseInterface*>(new btDbvtBroadphase())
+                                : static_cast<btBroadphaseInterface*>(new btAxisSweep3(
+                                      btVector3(spec.bp_min[0], spec.bp_min[1], spec.bp_min[2]),
+                                      btVector3(spec.bp_max[0], spec.bp_max[1], spec.bp_max[2])))),
         solver(),
-        world(&dispatcher, &broadphase, &solver, &config) {
+        world(&dispatcher, broadphase.get(), &solver, &config) {
     world.setGravity(btVector3(spec.gravity[0], spec.gravity[1], spec.gravity[2]));
     // Reproducibility precondition (docs/parity-harness.md).
     btContactSolverInfo& info = world.getSolverInfo();

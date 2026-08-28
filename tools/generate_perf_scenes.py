@@ -152,6 +152,7 @@ def gen_c(scenes):
         "  int dt_num, dt_den, frames, warmup, iterations;",
         "  btScalar gravity[3];",
         "  btScalar bp_min[3], bp_max[3];  // btAxisSweep3 world extent hint",
+        "  int bp_kind;                   // 0: btAxisSweep3, 1: btDbvtBroadphase",
         "  int num_bodies;",
         "  const PerfBodySpec* bodies;",
         "  PerfChainSpec chains;",
@@ -210,7 +211,7 @@ def gen_c(scenes):
         hi = ", ".join(fmt(x) for x in sc["broadphase_aabb"][1])
         lines.append(f"static const PerfSceneSpec k{name} = {{\"{name}\", {dt_num}, {dt_den}, "
                      f"{sc['frames']}, {sc['warmup']}, {sc['iterations']}, {{{g}}}, "
-                     f"{{{lo}}}, {{{hi}}}, {len(bodies)}, k{name}_bodies, {chains}}};")
+                     f"{{{lo}}}, {{{hi}}}, {1 if sc['broadphase'] == 'dbvt' else 0}, {len(bodies)}, k{name}_bodies, {chains}}};")
         lines.append("")
     lines.append("static const PerfSceneSpec* kPerfScenes[] = {")
     for name in scenes:
@@ -264,6 +265,7 @@ def gen_rs(scenes):
         "    pub warmup: u32,",
         "    pub iterations: u32,",
         "    pub gravity: [f32; 3],",
+        "    pub broadphase_dbvt: bool,",
         "    pub bodies: &'static [PerfBodySpec],",
         "    pub chains: Option<PerfChainSpec>,",
         "}",
@@ -315,8 +317,8 @@ def gen_rs(scenes):
         g = ", ".join(fmt(x) for x in sc["gravity"])
         lines.append(f"        dt_num: {dt_num}, dt_den: {dt_den},")
         lines.append(f"        frames: {sc['frames']}, warmup: {sc['warmup']}, "
-                     f"iterations: {sc['iterations']},")
-        lines.append(f"        gravity: [{g}],")
+                     f"iterations: {sc['iterations']}, gravity: [{g}],")
+        lines.append(f"        broadphase_dbvt: {'true' if sc['broadphase'] == 'dbvt' else 'false'},")
         lines.append("    }),")
     lines.append("];")
     lines.append("")
@@ -332,7 +334,12 @@ def validate(scenes):
         sc.setdefault("iterations", 10)
         sc.setdefault("bodies", [])
         sc.setdefault("generators", [])
+        sc.setdefault("broadphase", "sweep")
         sc.setdefault("broadphase_aabb", [[-50, -50, -50], [50, 50, 50]])
+        if sc["broadphase"] not in ("sweep", "dbvt"):
+            print(f"error: {name}: bad broadphase {sc['broadphase']!r} (want 'sweep' or 'dbvt')",
+                  file=sys.stderr)
+            return False
         for b in sc["bodies"]:
             if b["shape"]["type"] not in SHAPE_TYPES:
                 print(f"error: {name}/{b['name']}: bad shape type {b['shape']['type']!r}",

@@ -89,6 +89,12 @@ impl Default for AxisSweep3 {
     }
 }
 
+impl std::fmt::Debug for AxisSweep3 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AxisSweep3").finish_non_exhaustive()
+    }
+}
+
 #[inline]
 fn pair_key(a: usize, b: usize) -> (usize, usize) {
     if a < b { (a, b) } else { (b, a) }
@@ -459,7 +465,7 @@ impl BroadPhase for AxisSweep3 {
         self.handles[proxy].as_ref().map(|h| h.aabb)
     }
 
-    fn compute_pairs(&self) -> Vec<(usize, usize)> {
+    fn compute_pairs(&mut self) -> Vec<(usize, usize)> {
         // The cached set is quantized-conservative; the exact stored AABBs
         // bring the output back to brute-force-exact semantics. The set is
         // maintained in sorted order by the edge-swap pair updates, so this

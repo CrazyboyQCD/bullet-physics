@@ -29,6 +29,7 @@ use std::time::Instant;
 use bullet::dynamics::{MultiBody, PhysicsWorld, RigidBody, StepStage, STEP_STAGES};
 use bullet::math::{Quaternion, Real, Vector3};
 use bullet::shapes::CollisionShape;
+use bullet::collision::broadphase::{BroadPhaseBackend, DbvtBroadPhase};
 
 // Included via #[path] from src/perf_scenes_table.rs (auto-generated from
 // tools/perf_scenes.json).
@@ -38,7 +39,13 @@ mod perf_scenes_table;
 use perf_scenes_table::{PerfChainSpec, PerfSceneSpec, PerfShapeSpec, PERF_SCENES};
 
 fn build_world(spec: &PerfSceneSpec) -> PhysicsWorld {
-    let mut world = PhysicsWorld::new();
+    // The backend mirrors the C++ runner's per-scene broad phase choice
+    // (btDbvtBroadphase vs btAxisSweep3).
+    let mut world = PhysicsWorld::with_broadphase(if spec.broadphase_dbvt {
+        BroadPhaseBackend::Dbvt(DbvtBroadPhase::new())
+    } else {
+        BroadPhaseBackend::default()
+    });
     world.set_gravity(Vector3::new(
         spec.gravity[0] as Real,
         spec.gravity[1] as Real,

@@ -54,6 +54,51 @@ impl Aabb {
         Aabb::new(self.min - pad, self.max + pad)
     }
 
+    /// True if `other` lies entirely inside this box (closed bounds; Bullet's
+    /// `btDbvtAabbMm::Contain`). The Dbvt broad phase keeps leaf volumes fat
+    /// and skips tree updates while the exact AABB stays contained.
+    #[inline]
+    pub fn contains(&self, other: &Aabb) -> bool {
+        self.min.x <= other.min.x
+            && self.min.y <= other.min.y
+            && self.min.z <= other.min.z
+            && other.max.x <= self.max.x
+            && other.max.y <= self.max.y
+            && other.max.z <= self.max.z
+    }
+
+    /// The box grown by `e` on every side, per axis (Bullet's
+    /// `btDbvtAabbMm::Expand` with a vector).
+    #[inline]
+    pub fn expanded_vec(&self, e: Vector3) -> Aabb {
+        Aabb::new(self.min - e, self.max + e)
+    }
+
+    /// The box grown only along the direction of each component of `e`
+    /// (Bullet's `btDbvtAabbMm::SignedExpand`): positive components push the
+    /// max side, negative ones the min side. Used to pre-inflate Dbvt leaf
+    /// volumes along an object's motion.
+    #[inline]
+    pub fn signed_expanded(&self, e: Vector3) -> Aabb {
+        let mut out = *self;
+        if e.x > 0.0 {
+            out.max.x += e.x;
+        } else {
+            out.min.x += e.x;
+        }
+        if e.y > 0.0 {
+            out.max.y += e.y;
+        } else {
+            out.min.y += e.y;
+        }
+        if e.z > 0.0 {
+            out.max.z += e.z;
+        } else {
+            out.min.z += e.z;
+        }
+        out
+    }
+
     /// Transform the AABB by a rigid pose (rotation + translation), sweeping
     /// its eight corners. Exact for a box shape; conservative for any shape
     /// contained in the box. Equivalent to Bullet's `btTransformAabb`.

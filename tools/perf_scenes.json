@@ -100,6 +100,51 @@
         "initial_angle_deg": 60.0,
         "collider_radius": 0.1
       }
+    },
+    "dbvt_rain_2000": {
+      "comment": "Large-scale dynamic scene for the Dbvt broad phase: 2000 mixed convex bodies (20x20 grid x 5 layers) raining onto a wavy 40x40 height mesh. Both sides run their dynamic-BVH broad phase (Bullet's default btDbvtBroadphase vs this crate's DbvtBroadPhase via BroadPhaseBackend::Dbvt) - the sweep scenes above compare the other algorithm.",
+      "dt": [1, 60],
+      "frames": 300,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase": "dbvt",
+      "broadphase_aabb": [[-25, -2, -25], [25, 20, 25]],
+      "bodies": [
+        {
+          "name": "terrain",
+          "shape": {
+            "type": "mesh",
+            "grid": [40, 40],
+            "origin": [-19.5, -19.5],
+            "cell": [1.0, 1.0],
+            "heights_expr": {
+              "amp": 0.2,
+              "ax": 0.7,
+              "az": 0.6
+            }
+          },
+          "position": [0, 0, 0],
+          "mass": 0
+        }
+      ],
+      "generators": [
+        {
+          "type": "mixed_rain",
+          "nx": 20,
+          "nz": 20,
+          "layers": 5,
+          "spacing": [1.4, 2.0, 1.4],
+          "base": [-13.3, 4.0, -13.3],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "box_half": 0.35,
+          "sphere_radius": 0.35,
+          "capsule_radius": 0.3,
+          "capsule_half_height": 0.5
+        }
+      ]
     }
   }
 }

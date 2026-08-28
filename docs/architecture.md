@@ -67,13 +67,24 @@ formulas for the primitives, AABB-box approximation for hull/compound
 
 ## 5. Collision pipeline
 
-1. **Broad phase**: `AxisSweep3` — three-axis sweep-and-prune over
-   incrementally maintained sorted lists (`O(n + k)` per step; static bodies
-   with unchanged AABBs cost nothing). `compute_pairs` intersects the three
-   axes' overlap sets (exact AABB pairs); `raycast_candidates` /
-   `aabb_candidates` prune ray and AABB queries via the slab method
-   (equivalent to `btAxisSweep3::rayTest`). A `DbvtBroadphase` port is a
-   roadmap item for very large scenes.
+1. **Broad phase**: selectable via `BroadPhaseBackend` (an enum dispatch, no
+   `dyn` on the hot path; `PhysicsWorld::new()` defaults to `AxisSweep3`,
+   `with_broadphase` opts into `Dbvt`).
+   - `AxisSweep3` — three-axis sweep-and-prune over incrementally maintained
+     sorted edge lists (`O(n + k)` per step; static bodies with unchanged
+     AABBs cost nothing); the cached pair set is kept sorted so
+     `compute_pairs` is a single exact-filtered walk.
+     `raycast_candidates` / `aabb_candidates` prune via the slab method
+     (equivalent to `btAxisSweep3::rayTest`).
+   - `Dbvt` — two dynamic AABB trees (moving / resting-for-two-steps) with
+     lazily maintained fat leaf volumes (Bullet's `btDbvt` +
+     `btDbvtBroadphase`): a proxy whose exact AABB stays contained in its
+     fat volume touches the tree not at all; insertion descends greedily
+     by center proximity and a per-step rotation pass counteracts
+     degradation. `compute_pairs` doubles as the per-step tick (rotation,
+     stage rotation, dynamic→fixed migration, separated-pair pruning). No
+     object-count ceiling, no world-extent frame — the structure for very
+     large dynamic scenes.
 2. **Narrow phase**, dispatched on the `CollisionShape` enum (no `dyn` in the
    hot path):
    - `sphere-sphere`, `sphere-box`, `plane-convex` closed forms;
@@ -250,8 +261,7 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
   phase 5b added the joint-limit / spherical limit / spherical motor
   constraints.
 - **Next**: multibody collision integration (`btMultiBodyLinkCollider` in a
-  unified world). Later candidates: DBVT broadphase, simulation islands,
-  serialization.
+  unified world). Later candidates: serialization.
 
 ## 15. Bullet → Rust mapping
 
@@ -265,7 +275,7 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
 | `btBoxShape` / `btSphereShape` / …       | `CollisionShape::Box` / `::Sphere` / …      |
 | `btBvhTriangleMeshShape` / `btHeightfieldTerrainShape` | `CollisionShape::TriangleMesh` / `::Heightfield` |
 | `btAxisSweep3`                           | `broadphase::AxisSweep3` (default)          |
-| `btDbvtBroadphase`                       | not ported (roadmap)                        |
+| `btDbvtBroadphase`                       | `broadphase::DbvtBroadPhase` (opt-in via `BroadPhaseBackend`) |
 | `btGjkPairDetector` + `btVoronoiSimplexSolver` | `narrowphase::gjk`                    |
 | `btGjkEpa2`                              | `narrowphase::epa`                          |
 | `btCollisionWorld::rayTest` / `convexSweep` | `raycast::raycast`, `PhysicsWorld::raycast_closest` / `narrowphase::convex_cast` |

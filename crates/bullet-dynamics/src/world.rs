@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::time::{Duration, Instant};
 
-use bullet_collision::broadphase::{AxisSweep3, BroadPhase};
+use bullet_collision::broadphase::{BroadPhase, BroadPhaseBackend};
 use bullet_collision::manifold::{ContactManifold, PersistentManifold, CONTACT_BREAKING_THRESHOLD};
 use bullet_collision::narrowphase::{self, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
@@ -205,7 +205,7 @@ enum ProxyOwner {
 /// phases — see `docs/multibody-collision.md`).
 pub struct PhysicsWorld {
     bodies: Vec<RigidBody>,
-    broadphase: AxisSweep3,
+    broadphase: BroadPhaseBackend,
     gravity: Vector3,
     iterations: u32,
     /// Contact manifolds cached across steps, keyed by body pair in
@@ -287,9 +287,15 @@ impl Default for PhysicsWorld {
 
 impl PhysicsWorld {
     pub fn new() -> Self {
+        Self::with_broadphase(BroadPhaseBackend::default())
+    }
+
+    /// Build a world over a specific broad-phase backend (Bullet's
+    /// `btBroadphaseInterface` selection; `new()` uses `AxisSweep3`).
+    pub fn with_broadphase(broadphase: BroadPhaseBackend) -> Self {
         Self {
             bodies: Vec::new(),
-            broadphase: AxisSweep3::new(),
+            broadphase,
             gravity: Vector3::new(0.0, -9.81, 0.0),
             iterations: 10,
             manifold_cache: HashMap::with_hasher(FxBuild::default()),
