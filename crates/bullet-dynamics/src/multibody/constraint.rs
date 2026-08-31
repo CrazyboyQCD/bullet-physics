@@ -1,4 +1,4 @@
-//! Multibody constraints 鈥?port of `BulletDynamics/Featherstone`'s
+//! Multibody constraints — port of `BulletDynamics/Featherstone`'s
 //! `btMultiBodyConstraint` subclasses (`btMultiBodyPoint2Point`,
 //! `btMultiBodyFixedConstraint`, `btMultiBodySliderConstraint`,
 //! `btMultiBodyJointMotor`, `btMultiBodyGearConstraint`,
@@ -80,13 +80,13 @@ pub struct SolverRow {
     /// Number of DOFs (6 + joints) of each body (0 for a rigid side B).
     pub ndof_a: usize,
     pub ndof_b: usize,
-    /// Lever-arm 脳 normal / angular normal used for feedback writeback
+    /// Lever-arm × normal / angular normal used for feedback writeback
     /// (Bullet's `m_relpos1CrossNormal` / `m_contactNormal1`).
     pub rel_pos1_cross_normal: Vector3,
     pub contact_normal1: Vector3,
     pub rel_pos2_cross_normal: Vector3,
     pub contact_normal2: Vector3,
-    /// Inverse effective mass `1/(J路M鈦宦孤稪岬€)` along the row (0 disables the
+    /// Inverse effective mass `1/(J·M⁻¹·Jᵀ)` along the row (0 disables the
     /// row on singularities, Bullet's `m_jacDiagABInv`).
     pub jac_diag_ab_inv: Real,
     /// Velocity target (`m_rhs`).
@@ -176,7 +176,7 @@ pub struct MultiBodySliderConstraint {
 /// Parameter block of a 1-DOF joint motor (Bullet's
 /// `btMultiBodyJointMotor`): drives the joint velocity of a link toward
 /// `desired_velocity` (with an optional PD position term), clamped to
-/// `卤max_motor_impulse`.
+/// `±max_motor_impulse`.
 #[derive(Debug, Clone)]
 pub struct MultiBodyJointMotor {
     /// Which DOF of the link's joint is driven.
@@ -196,7 +196,7 @@ pub struct MultiBodyJointMotor {
 
 /// Parameter block of a gear constraint (Bullet's
 /// `btMultiBodyGearConstraint`): couples the joint of link A on body A to
-/// the joint of link B on body B with `q虈_a + ratio路q虈_b = 0` (plus the
+/// the joint of link B on body B with `q̇_a + ratio·q̇_b = 0` (plus the
 /// optional auxiliary-link velocity).
 #[derive(Debug, Clone)]
 pub struct MultiBodyGearConstraint {
@@ -254,7 +254,7 @@ pub struct MultiBodySphericalJointLimit {
 /// `btMultiBodySphericalJointMotor`): drives a spherical joint's orientation
 /// toward `desired_position` with three bilateral rows along the link frame's
 /// world columns, each damped by `damping[i]` and clamped to
-/// `卤max_applied_impulse`.
+/// `±max_applied_impulse`.
 #[derive(Debug, Clone)]
 pub struct MultiBodySphericalJointMotor {
     /// Per-axis velocity target (Bullet's `m_desiredVelocity`; the current
@@ -310,7 +310,7 @@ pub struct MultiBodyConstraint {
     pub(crate) is_unilateral: bool,
     /// Per-row impulse clamp (Bullet's `m_maxAppliedImpulse`, default 100).
     pub(crate) max_applied_impulse: Real,
-    /// Data block: `num_rows` accumulated impulses, then `num_rows 路
+    /// Data block: `num_rows` accumulated impulses, then `num_rows ·
     /// jac_size_both` jacobian entries, then `num_rows` positions.
     pub(crate) data: Vec<Real>,
     pub(crate) pos_offset: usize,
@@ -391,7 +391,7 @@ impl MultiBodyConstraint {
         &mut self.data[start..start + len]
     }
 
-    /// Bullet's `internalSetAppliedImpulse` 鈥?write the accumulated impulse
+    /// Bullet's `internalSetAppliedImpulse` — write the accumulated impulse
     /// of `dof` back (used for warm starting; multibody rows are not
     /// warm-started by default, but the writeback keeps the API faithful).
     pub fn set_applied_impulse(&mut self, dof: usize, impulse: Real) {
@@ -457,7 +457,7 @@ impl MultiBodyConstraint {
     // ------------------------------------------------------------------
 
     /// A point-to-point constraint keeping `pivot_in_a` (link A's frame)
-    /// coincident with `pivot_in_b` (link B's frame) 鈥?three bilateral rows
+    /// coincident with `pivot_in_b` (link B's frame) — three bilateral rows
     /// (Bullet's `btMultiBodyPoint2Point`).
     pub fn point2point(
         body_a: usize,
@@ -482,7 +482,7 @@ impl MultiBodyConstraint {
     }
 
     /// A fixed constraint welding link A to link B (pivots coincident and
-    /// frames aligned) 鈥?six bilateral rows (Bullet's
+    /// frames aligned) — six bilateral rows (Bullet's
     /// `btMultiBodyFixedConstraint`).
     #[allow(clippy::too_many_arguments)]
     pub fn fixed(
@@ -515,7 +515,7 @@ impl MultiBodyConstraint {
     }
 
     /// A slider constraint allowing translation along `joint_axis` (link A's
-    /// frame) 鈥?five bilateral rows (Bullet's `btMultiBodySliderConstraint`).
+    /// frame) — five bilateral rows (Bullet's `btMultiBodySliderConstraint`).
     #[allow(clippy::too_many_arguments)]
     pub fn slider(
         body_a: usize,
@@ -648,7 +648,7 @@ impl MultiBodyConstraint {
     }
 
     /// A joint motor driving link `link`'s joint DOF `link_dof` toward
-    /// `desired_velocity` with a maximum impulse `max_motor_impulse` 鈥?one
+    /// `desired_velocity` with a maximum impulse `max_motor_impulse` — one
     /// unilateral row. The motor acts on body `body` alone (Bullet's
     /// `btMultiBodyJointMotor`; `body_b` is the same body).
     pub fn joint_motor(
@@ -683,7 +683,7 @@ impl MultiBodyConstraint {
     }
 
     /// A gear constraint coupling link A's joint to link B's joint with the
-    /// ratio `q虈_a + ratio路q虈_b = 0` 鈥?one bilateral row (Bullet's
+    /// ratio `q̇_a + ratio·q̇_b = 0` — one bilateral row (Bullet's
     /// `btMultiBodyGearConstraint`).
     pub fn gear(
         body_a: usize,
@@ -715,7 +715,7 @@ impl MultiBodyConstraint {
     }
 
     /// A 1-DOF joint limit clamping a revolute or prismatic joint to
-    /// `[lower, upper]` 鈥?two unilateral rows on the joint's single DOF
+    /// `[lower, upper]` — two unilateral rows on the joint's single DOF
     /// (Bullet's `btMultiBodyJointLimitConstraint`; `body_b` is the same
     /// body, `link_b` its parent).
     pub fn joint_limit(
@@ -742,7 +742,7 @@ impl MultiBodyConstraint {
     }
 
     /// A spherical joint limit keeping the joint's swing angles within
-    /// `swingx_range`/`swingy_range` and its twist within `twist_range` 鈥?up
+    /// `swingx_range`/`swingy_range` and its twist within `twist_range` — up
     /// to three unilateral angular rows along the link frame's world columns
     /// (Bullet's `btMultiBodySphericalJointLimit`).
     #[allow(clippy::too_many_arguments)]
@@ -783,7 +783,7 @@ impl MultiBodyConstraint {
     }
 
     /// A spherical joint motor driving the joint orientation toward
-    /// `desired_position` 鈥?three bilateral angular rows along the link
+    /// `desired_position` — three bilateral angular rows along the link
     /// frame's world columns (Bullet's `btMultiBodySphericalJointMotor`).
     pub fn spherical_joint_motor(
         body: usize,

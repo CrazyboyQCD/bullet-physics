@@ -516,7 +516,7 @@ pub struct HingeConstraint {
 impl HingeConstraint {
     /// Build the constraint frames from pivots and axes in each body's frame
     /// (Bullet's pivot/axis constructor). The perpendicular basis is chosen
-    /// deterministically: `t1` perpendicular to `axis_a`, `t2 = axis_a 脳 t1`,
+    /// deterministically: `t1` perpendicular to `axis_a`, `t2 = axis_a × t1`,
     /// and frame B's basis is frame A's rotated by the shortest arc from
     /// `axis_a` to `axis_b`.
     pub fn new(
@@ -602,7 +602,7 @@ impl HingeConstraint {
         let ax2 = tr_b.col(2);
         let k = inv_dt * erp;
 
-        // Linear pivot rows (Bullet's `m_J1linearAxis` = 卤e_j), unless the
+        // Linear pivot rows (Bullet's `m_J1linearAxis` = ±e_j), unless the
         // joint is angular-only.
         if !self.angular_only {
             for axis in 0..3 {
@@ -625,7 +625,7 @@ impl HingeConstraint {
 
         // Two angular rows keeping the hinge axes parallel: drive the
         // relative spin around p and q to zero, with a bias proportional to
-        // the misalignment u = ax1 脳 ax2 (Bullet's rows 3-4).
+        // the misalignment u = ax1 × ax2 (Bullet's rows 3-4).
         let u = ax1.cross(ax2);
         out.push(ConstraintRow::prepare(
             body_a,
@@ -2525,7 +2525,7 @@ pub fn prepare_rows(
                 RowLimits::Unbounded
             };
             // Three orthogonal rows along the world axes (Bullet's
-            // `m_J1linearAxis` = 卤e_j with the skew-symmetric angular
+            // `m_J1linearAxis` = ±e_j with the skew-symmetric angular
             // jacobians built from the lever arms).
             for axis in 0..3 {
                 let mut normal = Vector3::ZERO;
