@@ -101,6 +101,17 @@ pub fn area_of(x0: Vector3, x1: Vector3, x2: Vector3) -> Real {
     (x1 - x0).cross(x2 - x0).length()
 }
 
+/// Six times the signed tetrahedron volume (Bullet's `VolumeOf`: the triple
+/// product of the three edges leaving `x0`; `append_tetra` stores it raw and
+/// the mass helpers take its absolute value).
+#[inline]
+pub fn volume_of(x0: Vector3, x1: Vector3, x2: Vector3, x3: Vector3) -> Real {
+    let a = x1 - x0;
+    let b = x2 - x0;
+    let c = x3 - x0;
+    a.dot(b.cross(c))
+}
+
 /// Bullet's `ApplyClampedForce`: apply `f` to node `im` unless it would
 /// reverse the node's velocity within dt, in which case only cancel the
 /// velocity along the force direction.

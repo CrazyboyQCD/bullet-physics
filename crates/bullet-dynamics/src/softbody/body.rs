@@ -113,6 +113,141 @@ impl Face {
     }
 }
 
+/// A tetrahedron of a volumetric soft body (Bullet's `btSoftBody::Tetra`).
+/// In the classic system tetras drive the volume-weighted mass distribution
+/// and the per-tetra cluster fallback; the deformation-gradient fields
+/// (`m_Dm_inverse`/`m_F`/`m_P_inv`) belong to the NeoHookean system and are
+/// not ported, so neither are the gradient coefficients `c0`/`c1`/`c2`
+/// (they feed only that solver).
+#[derive(Clone, Copy, Debug)]
+pub struct Tetra {
+    /// Node indices.
+    pub n: [usize; 4],
+    /// Material index.
+    pub mat: usize,
+    /// Rest volume (six times the true volume — Bullet stores the raw triple
+    /// product; the mass helpers take its absolute value).
+    pub rv: Real,
+}
+
+/// A rigid volume-preserving group of nodes (Bullet's `btSoftBody::Cluster`):
+/// point-mass inertia, a matching frame and an impulse accumulator that the
+/// contact joints (`CL_RS`/`CL_SS`/`CL_SELF`) push impulses through.
+#[derive(Clone, Debug)]
+pub struct Cluster {
+    /// Per-node mass (`BT_LARGE_FLOAT` for anchored nodes).
+    pub masses: Vec<Real>,
+    /// Node indices.
+    pub nodes: Vec<usize>,
+    /// Rest offsets from the frame origin.
+    pub framerefs: Vec<Vector3>,
+    /// Frame origin (the cluster COM).
+    pub framepos: Vector3,
+    /// Frame rotation (Bullet's `m_framexform` basis).
+    pub framerot: Matrix3,
+    /// `1 / sum(masses)`.
+    pub imass: Real,
+    /// Inverse inertia in the rest frame (point-mass approximation).
+    pub locii: Matrix3,
+    /// Inverse inertia in world frame (`R * locii * R^T`).
+    pub invwi: Matrix3,
+    /// Cluster center of mass.
+    pub com: Vector3,
+    /// Accumulated velocity impulses `[linear, angular]`.
+    pub vimpulses: [Vector3; 2],
+    /// Accumulated drift impulses `[linear, angular]`.
+    pub dimpulses: [Vector3; 2],
+    /// Number of velocity impulses this step.
+    pub nvimpulses: u32,
+    /// Number of drift impulses this step.
+    pub ndimpulses: u32,
+    /// Linear velocity.
+    pub lv: Vector3,
+    /// Angular velocity.
+    pub av: Vector3,
+    /// Cluster-tree leaf handle (`DbvtTree::NONE` until inserted).
+    pub leaf: u32,
+    /// Node damping coefficient (Bullet's `m_ndamping`).
+    pub ndamping: Real,
+    /// Linear damping coefficient.
+    pub ldamping: Real,
+    /// Angular damping coefficient.
+    pub adamping: Real,
+    /// Pose-matching coefficient.
+    pub matching: Real,
+    /// Whether the cluster contains an anchored node.
+    pub contains_anchor: bool,
+    /// Whether the cluster takes part in collision (the master cluster does
+    /// not).
+    pub collide: bool,
+}
+
+impl Default for Cluster {
+    fn default() -> Self {
+        Self {
+            masses: Vec::new(),
+            nodes: Vec::new(),
+            framerefs: Vec::new(),
+            framepos: Vector3::ZERO,
+            framerot: Matrix3::IDENTITY,
+            imass: 0.0,
+            locii: Matrix3::ZERO,
+            invwi: Matrix3::ZERO,
+            com: Vector3::ZERO,
+            vimpulses: [Vector3::ZERO; 2],
+            dimpulses: [Vector3::ZERO; 2],
+            nvimpulses: 0,
+            ndimpulses: 0,
+            lv: Vector3::ZERO,
+            av: Vector3::ZERO,
+            leaf: DbvtTree::NONE,
+            ndamping: 0.0,
+            ldamping: 0.0,
+            adamping: 0.0,
+            matching: 0.0,
+            contains_anchor: false,
+            collide: true,
+        }
+    }
+}
+
+/// A combined velocity + drift impulse (Bullet's `btSoftBody::Impulse`):
+/// `as_velocity`/`as_drift` pick which halves a joint application moves.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Impulse {
+    /// Velocity-half.
+    pub velocity: Vector3,
+    /// Drift-half.
+    pub drift: Vector3,
+    /// Whether `velocity` is active.
+    pub as_velocity: bool,
+    /// Whether `drift` is active.
+    pub as_drift: bool,
+}
+
+impl std::ops::Neg for Impulse {
+    type Output = Impulse;
+    fn neg(self) -> Impulse {
+        Impulse {
+            velocity: -self.velocity,
+            drift: -self.drift,
+            as_velocity: self.as_velocity,
+            as_drift: self.as_drift,
+        }
+    }
+}
+
+/// One side of a soft-body joint (Bullet's `btSoftBody::Body` tagged union):
+/// either a cluster of a soft body or a rigid body, both addressed by index
+/// (Bullet stores pointers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// A cluster: `(soft body index, cluster index)`.
+    Cluster { soft: usize, cluster: usize },
+    /// A rigid body index.
+    Rigid(usize),
+}
+
 /// Rest-pose bookkeeping (Bullet's `btSoftBody::Pose`): mass weights,
 /// rest offsets from the COM and the rest volume captured by `set_pose`.
 /// The rotation/scale fields only advance when a frame pose is enabled
@@ -182,6 +317,8 @@ pub struct SoftBody {
     pub links: Vec<Link>,
     /// Surface triangles (empty for ropes).
     pub faces: Vec<Face>,
+    /// Tetrahedra (empty unless built by a volumetric helper).
+    pub tetras: Vec<Tetra>,
     /// Materials.
     pub materials: Vec<Material>,
     /// Node AABB tree (Bullet's `m_ndbvt`): leaves keyed by node index,
@@ -190,6 +327,23 @@ pub struct SoftBody {
     /// Face AABB tree (Bullet's `m_fdbvt`), built lazily on the first face
     /// insert and kept fat like the node tree.
     pub fdbvt: DbvtTree,
+    /// Cluster AABB tree (Bullet's `m_cdbvt`), maintained by
+    /// `update_clusters` for the `CL_RS`/`CL_SS` broad-phase pairing.
+    pub cdbvt: DbvtTree,
+    /// Rigid volume-preserving node groups (Bullet's `m_clusters`).
+    pub clusters: Vec<Cluster>,
+    /// Cluster adjacency for self-collision filtering (Bullet's
+    /// `m_clusterConnectivity`, row-major `c0 + c1 * clusters.len()`).
+    pub cluster_connectivity: Vec<bool>,
+    /// Contact joints created by the cluster colliders this step (Bullet's
+    /// `m_joints`); prepared/solved/terminated by the cluster solver.
+    pub joints: Vec<super::joints::CJoint>,
+    /// Impulse cap for self-collision contacts (Bullet's
+    /// `m_maxSelfCollisionImpulse`, default 100).
+    pub max_self_collision_impulse: Real,
+    /// Scale applied to self-collision impulses above the cap (Bullet's
+    /// `m_selfCollisionImpulseFactor`, default 0.01).
+    pub self_collision_impulse_factor: Real,
     /// Rest pose (Bullet's `m_pose`).
     pub pose: Pose,
     /// Wind velocity for the aero forces (Bullet's `m_windVelocity`, which
@@ -236,9 +390,16 @@ impl SoftBody {
             nodes: Vec::with_capacity(positions.len()),
             links: Vec::new(),
             faces: Vec::new(),
+            tetras: Vec::new(),
             materials: vec![Material::default()],
             ndbvt: DbvtTree::new(),
             fdbvt: DbvtTree::new(),
+            cdbvt: DbvtTree::new(),
+            clusters: Vec::new(),
+            cluster_connectivity: Vec::new(),
+            joints: Vec::new(),
+            max_self_collision_impulse: 100.0,
+            self_collision_impulse_factor: 0.01,
             pose: Pose::default(),
             wind_velocity: Vector3::ZERO,
             air_density: 1.2,
@@ -338,6 +499,130 @@ impl SoftBody {
         }
     }
 
+    /// Append a tetrahedron (Bullet's `appendTetra(n0..n3, mat)`); the rest
+    /// volume is the raw triple product, sign included.
+    pub fn append_tetra(&mut self, node0: usize, node1: usize, node2: usize, node3: usize, mat: Option<usize>) {
+        let rv = super::geometry::volume_of(
+            self.nodes[node0].x,
+            self.nodes[node1].x,
+            self.nodes[node2].x,
+            self.nodes[node3].x,
+        );
+        self.tetras.push(Tetra { n: [node0, node1, node2, node3], mat: mat.unwrap_or(0), rv });
+        self.update_rt_cst = true;
+    }
+
+    /// Redistribute `mass` over the nodes weighted by their incident
+    /// tetrahedra volumes (Bullet's `setVolumeMass`): each node's share is
+    /// `rank / sum(|rv|)` with `rank` the number of incident tetras, then
+    /// `setTotalMass` normalizes the total. Nodes covered by no tetra keep
+    /// mass zero.
+    pub fn set_volume_mass(&mut self, mass: Real) {
+        let mut ranks = vec![0u32; self.nodes.len()];
+        for n in &mut self.nodes {
+            n.im = 0.0;
+        }
+        for t in &self.tetras {
+            for &ni in &t.n {
+                self.nodes[ni].im += t.rv.abs();
+                ranks[ni] += 1;
+            }
+        }
+        for (n, rank) in self.nodes.iter_mut().zip(ranks) {
+            if n.im > 0.0 {
+                n.im = rank as Real / n.im;
+            }
+        }
+        self.set_total_mass(mass);
+    }
+
+    /// Distribute `density` over the tetrahedra (Bullet's `setVolumeDensity`:
+    /// the total is `sum(|rv| over node incidents) * density / 6`).
+    pub fn set_volume_density(&mut self, density: Real) {
+        let mut volume = 0.0;
+        for t in &self.tetras {
+            for _ in 0..4 {
+                volume += t.rv.abs();
+            }
+        }
+        self.set_volume_mass(volume * density / 6.0);
+    }
+
+    /// Generate bending links between nodes graph-distance `distance` apart
+    /// (Bullet's `generateBendingConstraints`): shortest paths over the
+    /// structural links (the `distance == 2` fast path over adjacency lists,
+    /// Floyd-Warshall otherwise — the classic system has no volume kernel,
+    /// so `distance` beyond the graph diameter simply matches nothing).
+    /// Returns the number of links appended.
+    pub fn generate_bending_constraints(&mut self, distance: usize, mat: Option<usize>) -> usize {
+        if distance <= 1 {
+            return 0;
+        }
+        let n = self.nodes.len();
+        let inf = u32::MAX / 2;
+        let idx = |x: usize, y: usize| y * n + x;
+        let mut adj = vec![inf; n * n];
+        for i in 0..n {
+            adj[idx(i, i)] = 0;
+        }
+        let link_ends: Vec<[usize; 2]> = self.links.iter().map(|l| l.n).collect();
+        for &[ia, ib] in &link_ends {
+            adj[idx(ia, ib)] = 1;
+            adj[idx(ib, ia)] = 1;
+        }
+        if distance == 2 {
+            // Adjacency-list fast path (Bullet's special case): node ii's
+            // distance-2 set is the union of its neighbors' neighbors.
+            let mut node_links: Vec<Vec<usize>> = vec![Vec::new(); n];
+            for &[ia, ib] in &link_ends {
+                if !node_links[ia].contains(&ib) {
+                    node_links[ia].push(ib);
+                }
+                if !node_links[ib].contains(&ia) {
+                    node_links[ib].push(ia);
+                }
+            }
+            for ii in 0..n {
+                for &k in &node_links[ii] {
+                    for &j in &node_links[k] {
+                        if ii != j {
+                            let sum = adj[idx(ii, k)] + adj[idx(k, j)];
+                            if adj[idx(ii, j)] > sum {
+                                adj[idx(ii, j)] = sum;
+                                adj[idx(j, ii)] = sum;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Generic Floyd-Warshall over the upper triangle.
+            for k in 0..n {
+                for j in 0..n {
+                    for i in (j + 1)..n {
+                        let sum = adj[idx(i, k)] + adj[idx(k, j)];
+                        if adj[idx(i, j)] > sum {
+                            adj[idx(i, j)] = sum;
+                            adj[idx(j, i)] = sum;
+                        }
+                    }
+                }
+            }
+        }
+        let mut nlinks = 0;
+        for j in 0..n {
+            for i in (j + 1)..n {
+                if adj[idx(i, j)] == distance as u32
+                    && let Some(li) = self.append_link(i, j, mat, false)
+                {
+                    self.links[li].bending = true;
+                    nlinks += 1;
+                }
+            }
+        }
+        nlinks
+    }
+
     /// Refresh face and node normals (Bullet's `updateNormals`: accumulate
     /// the unnormalized cross products, then normalize — node normals stay
     /// zero for zero-area fans).
@@ -408,21 +693,13 @@ impl SoftBody {
         self.pose.rot = Matrix3::IDENTITY;
         self.pose.scl = Matrix3::IDENTITY;
 
-        // Inverse rest covariance (assembled per row like Bullet:
-        // `aqq[row] += mq[row] * q`).
+        // Inverse rest covariance (the outer-product accumulation
+        // `aqq += (q*w) outer q`, symmetric by construction).
         let mut aqq = Matrix3::ZERO;
         for i in 0..self.nodes.len() {
             let q = self.pose.pos[i];
             let mq = q * self.pose.wgh[i];
-            aqq.x_axis.x += mq.x * q.x;
-            aqq.x_axis.y += mq.x * q.y;
-            aqq.x_axis.z += mq.x * q.z;
-            aqq.y_axis.x += mq.y * q.x;
-            aqq.y_axis.y += mq.y * q.y;
-            aqq.y_axis.z += mq.y * q.z;
-            aqq.z_axis.x += mq.z * q.x;
-            aqq.z_axis.y += mq.z * q.y;
-            aqq.z_axis.z += mq.z * q.z;
+            aqq += Matrix3::from_cols(mq * q.x, mq * q.y, mq * q.z);
         }
         self.pose.aqq = aqq.inverse();
 
@@ -454,6 +731,27 @@ impl SoftBody {
             n.im /= scale;
         }
         self.update_rt_cst = true;
+    }
+
+    /// Redistribute the total mass over the nodes, weighted by their
+    /// incident faces' doubled areas (Bullet's `setTotalMass(mass,
+    /// fromauthors = true)` — the mass model of surface-built bodies like
+    /// the ellipsoid, whose tetra set is empty).
+    pub fn set_total_mass_from_faces(&mut self, mass: Real) {
+        for n in &mut self.nodes {
+            n.im = 0.0;
+        }
+        for f in &self.faces {
+            for &ni in &f.n {
+                self.nodes[ni].im += f.ra;
+            }
+        }
+        for n in &mut self.nodes {
+            if n.im != 0.0 {
+                n.im = 1.0 / n.im;
+            }
+        }
+        self.set_total_mass(mass);
     }
 
     /// Mass-weighted center of mass (Bullet's `getCenterOfMass`).

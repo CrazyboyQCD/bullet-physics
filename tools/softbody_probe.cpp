@@ -183,11 +183,82 @@ static void scene_soft_soft_vf(int frames)
 	}
 }
 
+// Scene 6: a volumetric ellipsoid (Hammersley hull, CL_RS clusters) dropped
+// from y=4 onto the ground plane — the cluster collider + CJoint path.
+// Both sides enable matching on every cluster and soften the structural
+// material (kLST = 0.5) so the squash/recover character is visible.
+static void scene_ellipsoid_ground(int frames)
+{
+	btSoftRigidDynamicsWorld* world = makeWorld();
+	addGround(world);
+	btSoftBody* ball = btSoftBodyHelpers::CreateEllipsoid(world->getWorldInfo(),
+	                                                      btVector3(0, 4, 0),
+	                                                      btVector3(1, 1, 1), 96);
+	ball->m_cfg.piterations = 4;
+	ball->m_cfg.collisions = btSoftBody::fCollision::CL_RS;
+	ball->setTotalMass(30, true);
+	ball->generateBendingConstraints(2);
+	ball->generateClusters(16, 32);
+	ball->m_materials[0]->m_kLST = btScalar(0.5);
+	for (int i = 0; i < ball->m_clusters.size(); ++i)
+	{
+		ball->m_clusters[i]->m_matching = btScalar(0.35);
+	}
+	world->addSoftBody(ball);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3 com = centerOfMass(ball);
+		btScalar half = 0;
+		for (int i = 0; i < ball->m_nodes.size(); ++i)
+		{
+			half = btMax<btScalar>(half, btFabs(ball->m_nodes[i].m_x.y() - com.y()));
+		}
+		printf("%d %.6f %.6f %.6f\n", f, minY(ball), com.y(), half);
+	}
+}
+
+// Scene 7: two cluster ellipsoids resting side by side push apart through
+// CL_SS (the CJoint drift/impulse path), then settle on the ground.
+static void scene_cluster_pair(int frames)
+{
+	btSoftRigidDynamicsWorld* world = makeWorld();
+	addGround(world);
+	btSoftBody* a = btSoftBodyHelpers::CreateEllipsoid(world->getWorldInfo(),
+	                                                   btVector3(-0.9, 1.5, 0),
+	                                                   btVector3(1, 0.8, 1), 64);
+	btSoftBody* b = btSoftBodyHelpers::CreateEllipsoid(world->getWorldInfo(),
+	                                                   btVector3(0.9, 1.5, 0),
+	                                                   btVector3(1, 0.8, 1), 64);
+	for (btSoftBody* psb : {a, b})
+	{
+		psb->m_cfg.piterations = 4;
+		psb->m_cfg.collisions = btSoftBody::fCollision::CL_RS | btSoftBody::fCollision::CL_SS;
+		psb->setTotalMass(20, true);
+		psb->generateBendingConstraints(2);
+		psb->generateClusters(16, 32);
+		psb->m_materials[0]->m_kLST = btScalar(0.5);
+		for (int i = 0; i < psb->m_clusters.size(); ++i)
+		{
+			psb->m_clusters[i]->m_matching = btScalar(0.35);
+		}
+		world->addSoftBody(psb);
+	}
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3 ca = centerOfMass(a);
+		const btVector3 cb = centerOfMass(b);
+		printf("%d %.6f %.6f %.6f\n", f, (ca - cb).length(),
+		       btMin(minY(a), minY(b)), ca.x());
+	}
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s <rope_pendulum|rope_ground|cloth_plane|patch_catenary|soft_soft_vf> [frames]\n", argv[0]);
+		fprintf(stderr, "usage: %s <rope_pendulum|rope_ground|cloth_plane|patch_catenary|soft_soft_vf|ellipsoid_ground|cluster_pair> [frames]\n", argv[0]);
 		return 1;
 	}
 	const char* scene = argv[1];
@@ -202,6 +273,10 @@ int main(int argc, char** argv)
 		scene_patch_catenary(frames);
 	else if (!strcmp(scene, "soft_soft_vf"))
 		scene_soft_soft_vf(frames);
+	else if (!strcmp(scene, "ellipsoid_ground"))
+		scene_ellipsoid_ground(frames);
+	else if (!strcmp(scene, "cluster_pair"))
+		scene_cluster_pair(frames);
 	else
 	{
 		fprintf(stderr, "unknown scene %s\n", scene);

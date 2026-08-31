@@ -32,10 +32,10 @@ impl SoftBody {
     }
 
     /// Advance the rest pose to the current configuration (Bullet's
-    /// `updatePose`). Only a frame pose recomputes the COM/covariance; the
-    /// rotation/scale extraction (`PolarDecompose`) belongs to the cluster
-    /// phase, so until then the pose tracks nothing per step (the volume
-    /// conservation reads the rest volume captured by `set_pose`).
+    /// `updatePose`): the frame pose recomputes the COM and the covariance
+    /// `Apq`, polar-decomposes it into the rotation `rot` and derives the
+    /// scale `scl = aqq * rot^T * Apq` (volume-clamped when `maxvolume >
+    /// 1`). The pose match (`k_mt`) and the cluster frames read `rot`.
     pub fn update_pose(&mut self) {
         if self.pose.bframe {
             let com = self.evaluate_com();
@@ -48,13 +48,23 @@ impl SoftBody {
             for i in 0..self.nodes.len() {
                 let a = (self.nodes[i].x - com) * self.pose.wgh[i];
                 let b = self.pose.pos[i];
-                apq.x_axis += Vector3::new(a.x * b.x, a.x * b.y, a.x * b.z);
-                apq.y_axis += Vector3::new(a.y * b.x, a.y * b.y, a.y * b.z);
-                apq.z_axis += Vector3::new(a.z * b.x, a.z * b.y, a.z * b.z);
+                // Covariance `sum(a outer b)` (Bullet accumulates by row,
+                // `Apq[r] += a[r] * b`; glam is column-major so the outer
+                // product lands as `Mat3::from_cols`-style accumulation —
+                // storing rows into columns would hand the polar
+                // decomposition the transposed rotation).
+                apq += Matrix3::from_cols(a * b.x, a * b.y, a * b.z);
             }
-            // Phase D: PolarDecompose(apq) -> rot/scl and the maxvolume
-            // clamp; the identity pose keeps kMT matching exact-noop.
-            let _ = apq;
+            let (r, _s) = super::cluster::polar_decompose(&apq);
+            self.pose.rot = r;
+            self.pose.scl = self.pose.aqq * r.transpose() * apq;
+            if self.cfg.maxvolume > 1.0 {
+                let det = self.pose.scl.determinant();
+                if det != 0.0 {
+                    let idet = (1.0 / det).clamp(1.0, self.cfg.maxvolume);
+                    self.pose.scl *= idet;
+                }
+            }
         }
     }
 

@@ -236,11 +236,30 @@ Bullet HullLibrary 可能不同 → links 生成顺序不同 → PBD 求解顺�
   逐字移植不修；④collideTV/collideTT 的 Bullet 栈序是 **childs[1] 先弹**——DbvtTree::walk_overlapping 已
   对齐（softbody rcontacts 顺序），collideTT 新增同 push 序；⑤CreatePatch 的 rand 消费不设门
   （perturbation 只当系数），perturbation=0 时几何确定 ✓。
-- **Phase D：Tetra + Cluster 体积软体**（~1200 行）
-  tetras/体积梯度（kVST 行）、setVolumeMass/Density；pose（bvolume/bframe/m_aqq/matching kMT）；
-  K-mean generate_clusters + cluster 惯量/求解/阻尼/apply；quickhull；CL_RS/CL_SS/CL_SELF（cluster 连通性）；
-  CJoint；create_ellipsoid/from_tri_mesh/from_convex_hull；generateBendingConstraints。
-  demo：`softbody_ellipsoid`（体积软球落地压扁回弹）。probe：ellipsoid_ground、cluster_pair。
+- **Phase D：Tetra + Cluster 体积软体** ✅ 完成（2026-08-31 深夜六）
+  tetras（`append_tetra`/`set_volume_mass`/`set_volume_density`——**经典系统无 kVST 求解内核**，tetra 只驱动
+  质量分布与 `generate_clusters(0)` 的 per-tetra fallback，变形梯度字段是 NeoHookean 专用不移植）；
+  `set_total_mass_from_faces`（`setTotalMass(mass, true)` 面积加权——体积软体必需）；
+  pose 完整化（`update_pose` 的 PolarDecompose + `scl = aqq·rᵀ·Apq` + maxvolume 钳制——kMT matching 生效）；
+  K-mean `generate_clusters`（(i·29873)%k 种子/w=slope 松弛/面 merge/master swap 到 0/fallback 无 master——逐字）+
+  cluster 惯量/求解/阻尼/apply；quickhull（自实现：初始单纯形→最远点扩张→horizon 重建，顶点=输入索引升序——
+  与 HullLibrary 顶点序差已记 deviations）；CL_RS/CL_SS/CL_SELF（cluster 隐式凸包=节点点集 support，无需 quickhull；
+  GJK Band/EPA vs 刚体凸形，plane 走极值顶点解析=精确等价）；CJoint（Prepare/Solve/Terminate 逐字，
+  求解拆 `compute`（只读）+ side_apply（逐侧写）两段解借用——关节两侧可在任意 soft body）；
+  `generate_bending_constraints`（distance==2 邻接表特化 + Floyd 通用）。
+  demo：`softbody_ellipsoid`（第 13 个 check.py demo：体积球落地压扁回弹 min_y 0.18 settle/形态半高 0.95；
+  CL_SS 并排推开——**CJoint 摩擦仅 rvac<0 施加是 Bullet 逐字行为**，推开后滑行不减速）。probe：ellipsoid_ground
+  （前 21 帧 1e-4 内，settle 差 122mm=Bullet plane 三角化带 vs 解析带——rope_ground 同类簇版；f32=f64 结构性）、
+  cluster_pair（**Bullet 自身 CL_SS 大重叠首触数值爆炸穿地 −223m**，我侧稳定推开 settle——gimpact_stack 同类
+  "Bullet 自身弱项"，行为分叉记 deviations）。测试 +6（quickhull 3 + ellipsoid 拓扑/体积、面面积/tetra 体积质量、
+  bending 计数、cluster master/connectivity、per-face fallback、polar 旋转恢复、pose 旋转跟踪、CL_RS settle、
+  CL_SS 分离、hull 内点剔除）双 feature。
+  **实现要点/勘误（本轮最重要）**：①**glam 列主序外积陷阱**——Bullet `Apq[row] += a[row]*b` 的行组装照抄进
+  glam 会存成**转置**（对称矩阵不暴露，`update_pose` 的 Apq/cluster 协方差拿到逆旋转——pose 测试抓出）；
+  正确写法 `m += Matrix3::from_cols(a*b.x, a*b.y, a*b.z)`；②K-mean 空簇会被 Terminate 删（cluster 数 ≤ k+1），
+  fallback（k=0）**不装 master**（Bullet 缩进逐字）；③cluster 冲量链：joint→cluster_v_impulse（即时 lv/av +
+  vimpulses 累加）→ `solve_constraints` 头 `apply_clusters(false)` 摊到节点位置；④同轴 cluster 堆叠不稳定
+  （数值不对称水平滑开——demo 场景 2 改并排推开）。
 - **Phase E：软体关节 + API 收口**（~500 行）
   LJoint/AJoint（IControl→`trait AngularControl`）/append_linear_joint/angular_joint（vs rigid/cluster/soft）；
   transform/rotate/scale/translate/transform_to/setPose/resetLinkRestLengths/setRestLengthScale/cutLink/

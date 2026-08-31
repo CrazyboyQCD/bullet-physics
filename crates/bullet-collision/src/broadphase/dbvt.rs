@@ -422,14 +422,27 @@ impl DbvtTree {
     /// Bullet's `collideTT`: visit every leaf pair `(leaf-of-self,
     /// leaf-of-other)` whose volumes overlap, in Bullet's stack order (each
     /// internal pair pushes `(a0,b0), (a1,b0), (a0,b1), (a1,b1)` so `(a1,b1)`
-    /// pops first). The self-collision branch (`a == b`) is not ported — the
-    /// only caller (soft-soft `VF_SS`) never passes the same tree twice.
+    /// pops first). When both arguments are the same tree (soft-body
+    /// self-collision), Bullet's `a == b` branch expands same-node pairs
+    /// into `(c0,c0), (c1,c1), (c0,c1)` — the mirrored `(c1,c0)` is
+    /// skipped, so each unordered leaf pair reports exactly once.
     pub fn for_each_overlapping_pair(&self, other: &DbvtTree, out: &mut Vec<(usize, usize)>) {
+        let same_tree = std::ptr::eq(self, other);
         let mut stack: Vec<[u32; 2]> = Vec::new();
         if self.root != NONE && other.root != NONE {
             stack.push([self.root, other.root]);
         }
         while let Some([a, b]) = stack.pop() {
+            if same_tree && a == b {
+                if let NodeKind::Internal { children } =
+                    &self.nodes[a as usize].as_ref().unwrap().kind
+                {
+                    stack.push([children[0], children[0]]);
+                    stack.push([children[1], children[1]]);
+                    stack.push([children[0], children[1]]);
+                }
+                continue;
+            }
             if !self.volume(a).overlaps(&other.volume(b)) {
                 continue;
             }

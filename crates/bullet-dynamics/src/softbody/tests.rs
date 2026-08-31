@@ -820,3 +820,322 @@ fn pressure_inflates_closed_pillow() {
     assert!(volume > initial * 2.0, "no inflation: {volume} vs {initial}");
     assert!(volume < initial * 40.0, "explosion: {volume} vs {initial}");
 }
+
+// ---- Phase D: tetras, clusters, pose, quickhull, CL_RS/CL_SS ----
+
+use super::helpers::{create_ellipsoid, create_from_convex_hull};
+
+/// The ellipsoid builder keeps every Hammersley point as a hull vertex
+/// (all points of a sphere point set are extreme), and the hull closes:
+/// its divergence-theorem volume is a meaningful fraction of the true
+/// ellipsoid volume (the hull is inscribed).
+#[test]
+fn ellipsoid_builder_topology() {
+    let sb = create_ellipsoid(Vector3::new(1.0, 2.0, 3.0), Vector3::new(1.0, 2.0, 1.5), 40);
+    assert_eq!(sb.nodes.len(), 43, "3 + res nodes survive as hull vertices");
+    assert!(sb.faces.len() >= 4);
+    assert!(sb.links.len() >= sb.faces.len() * 3 / 2, "hull edges are links");
+    let v = sb.get_volume().abs();
+    let true_v = 4.0 / 3.0 * bullet_math::PI * 1.0 * 2.0 * 1.5;
+    assert!(
+        v > true_v * 0.4 && v < true_v,
+        "hull volume {v} not an inscribed fraction of {true_v}"
+    );
+}
+
+/// `set_total_mass_from_faces` distributes mass by incident face area: a
+/// node on a dense end of a wedge-shaped sheet carries more mass than one
+/// on the sparse end (same node count, larger triangles).
+#[test]
+fn face_area_mass_distribution() {
+    let mut psb = SoftBody::new(
+        &[Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(2.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0), Vector3::new(1.0, 1.0, 0.0), Vector3::new(2.0, 1.0, 0.0)],
+        &[0.0; 6],
+    );
+    psb.append_face(0, 1, 4, None);
+    psb.append_face(4, 3, 0, None);
+    psb.append_face(1, 2, 5, None);
+    psb.append_face(5, 4, 1, None);
+    psb.set_total_mass_from_faces(6.0);
+    let total = psb.get_total_mass();
+    assert!((total - 6.0).abs() < 1e-4, "total mass {total}");
+    // All triangles share the doubled area 1, so a node's share scales with
+    // its incident-face count: nodes 1 and 4 touch three faces, 0 and 5
+    // two, 2 and 3 one.
+    for i in [1, 4] {
+        assert!((psb.get_mass(i) - 1.5).abs() < 1e-3, "node {i} mass {}", psb.get_mass(i));
+    }
+    for i in [0, 5] {
+        assert!((psb.get_mass(i) - 1.0).abs() < 1e-3, "node {i} mass {}", psb.get_mass(i));
+    }
+    for i in [2, 3] {
+        assert!((psb.get_mass(i) - 0.5).abs() < 1e-3, "node {i} mass {}", psb.get_mass(i));
+    }
+}
+
+/// `set_volume_mass` weights by incident tetra volumes: the tetra holding
+/// fixed nodes keeps them at mass zero, and a node shared by two tetras
+/// with equal rest volumes carries double the share of a single-tetra node
+/// of the same volume.
+#[test]
+fn tetra_volume_mass() {
+    let mut psb = SoftBody::new(
+        &[
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 1.0, 1.0),
+        ],
+        &[0.0; 5],
+    );
+    psb.append_tetra(0, 1, 2, 3, None);
+    psb.append_tetra(1, 2, 3, 4, None);
+    // The first tetra's rest volume (triple product) is 1, the second's 2;
+    // `im = rank / sum(|rv|)` then `set_total_mass` lands shares of
+    // 4/3 (single small tetra), 2 (shared nodes) and 8/3 (the big one's
+    // lone node) summing to 10.
+    psb.set_volume_mass(10.0);
+    assert!((psb.get_mass(0) - 4.0 / 3.0).abs() < 1e-3);
+    for i in [1, 2, 3] {
+        assert!((psb.get_mass(i) - 2.0).abs() < 1e-3, "node {i} mass {}", psb.get_mass(i));
+    }
+    assert!((psb.get_mass(4) - 8.0 / 3.0).abs() < 1e-3);
+    assert!((psb.get_total_mass() - 10.0).abs() < 1e-3);
+}
+
+/// `generate_bending_constraints(2)` links the patch's diagonal neighbors:
+/// for an `n x n` grid, every interior node gains its distance-2 partners
+/// (the count matches the adjacency-list derivation).
+#[test]
+fn bending_links_count_on_grid() {
+    let mut psb = super::helpers::create_patch(
+        Vector3::ZERO,
+        Vector3::new(3.0, 0.0, 0.0),
+        Vector3::new(0.0, 3.0, 0.0),
+        Vector3::new(3.0, 3.0, 0.0),
+        5,
+        5,
+        0,
+        false,
+        0.0,
+    );
+    let structural = psb.links.len();
+    let n = psb.generate_bending_constraints(2, None);
+    assert_eq!(psb.links.len(), structural + n);
+    assert!(n > 0, "grid has distance-2 pairs");
+    assert!(psb.links.iter().any(|l| l.bending));
+    // A 5x5 lattice: distance-2 pairs (|dx|+|dy|) == 2 are the axis-2
+    // separations plus the unit diagonals of each cell.
+    let mut expected = 0usize;
+    for y in 0..5 {
+        for x in 0..5 {
+            if x + 2 < 5 {
+                expected += 1;
+            }
+            if y + 2 < 5 {
+                expected += 1;
+            }
+        }
+    }
+    let diagonals = 4 * 4 * 2; // both diagonal directions per cell
+    assert_eq!(n, expected + diagonals, "axis-2 pairs + cell diagonals");
+}
+
+/// `generate_clusters` on a K-mean split: the master cluster lands at
+/// index 0 holding every node, colliding clusters partition the body, and
+/// the connectivity matrix is symmetric with connected clusters flagged.
+#[test]
+fn cluster_generation_master_and_connectivity() {
+    let mut sb = create_ellipsoid(Vector3::ZERO, Vector3::new(1.0, 1.0, 1.0), 64);
+    sb.generate_clusters(8, 16);
+    // K-mean clusters may collapse to empty and get dropped, so the count
+    // is `<= k + master`; the master always lands at index 0.
+    assert!(sb.clusters.len() <= 9 && sb.clusters.len() >= 2);
+    let master = &sb.clusters[0];
+    assert_eq!(master.nodes.len(), sb.nodes.len(), "master holds all nodes");
+    assert!(!master.collide, "master does not collide");
+    let mut covered = vec![false; sb.nodes.len()];
+    for c in &sb.clusters[1..] {
+        assert!(c.collide);
+        for &ni in &c.nodes {
+            covered[ni] = true;
+        }
+    }
+    assert!(covered.iter().all(|&c| c), "kmean clusters cover the nodes");
+    let n = sb.clusters.len();
+    assert_eq!(sb.cluster_connectivity.len(), n * n);
+    for a in 0..n {
+        for b in 0..n {
+            assert_eq!(
+                sb.cluster_connectivity[a + b * n],
+                sb.cluster_connectivity[b + a * n],
+                "connectivity symmetric"
+            );
+        }
+    }
+    // Distinct kmean clusters may still be connected through the face
+    // merge; the master is connected to everything.
+    assert!(sb.cluster_connectivity[n], "master connects to cluster 1");
+}
+
+/// `generate_clusters(0)` falls back to one cluster per face (or per
+/// tetra) — Bullet's fallback branch installs no master cluster.
+#[test]
+fn cluster_per_face_fallback() {
+    let mut sb = create_ellipsoid(Vector3::ZERO, Vector3::new(1.0, 1.0, 1.0), 16);
+    let nfaces = sb.faces.len();
+    sb.generate_clusters(0, 0);
+    assert_eq!(sb.clusters.len(), nfaces, "one per face, no master");
+}
+
+/// The polar decomposition recovers a pure rotation's orthogonal factor
+/// and the identity symmetric factor.
+#[test]
+fn polar_decompose_recovers_rotation() {
+    use super::cluster::polar_decompose;
+    let r = Matrix3::from_quat(bullet_math::compat::quat_from_axis_angle(
+        Vector3::new(0.3, 0.8, 0.5).normalize(),
+        0.7,
+    ));
+    let (q, s) = polar_decompose(&r);
+    for (qa, ra) in q.to_cols_array().iter().zip(r.to_cols_array().iter()) {
+        assert!((qa - ra).abs() < 1e-3, "q != r");
+    }
+    for (sa, ia) in s.to_cols_array().iter().zip(Matrix3::IDENTITY.to_cols_array().iter()) {
+        assert!((sa - ia).abs() < 1e-3, "s != I");
+    }
+}
+
+/// `update_pose` tracks a rigid rotation of the whole body: after
+/// rotating every node, the pose rotation matches (the axis-angle of
+/// `pose.rot` recovers the applied rotation).
+#[test]
+fn pose_tracks_rigid_rotation() {
+    let mut sb = create_ellipsoid(Vector3::ZERO, Vector3::new(1.0, 1.0, 1.0), 32);
+    sb.set_total_mass_from_faces(10.0);
+    sb.set_pose(true, true);
+    let q = bullet_math::compat::quat_from_axis_angle(
+        Vector3::new(0.0, 0.0, 1.0),
+        bullet_math::FRAC_PI_2,
+    );
+    for n in &mut sb.nodes {
+        n.x = q * n.x;
+        n.v = Vector3::ZERO;
+    }
+    sb.update_pose();
+    // pose.rot maps rest positions onto current ones: applying it to a
+    // rest offset must land on the rotated offset.
+    let i = sb.nodes.len() / 2;
+    let rest = sb.pose.pos[i];
+    let world = sb.pose.rot * rest + sb.pose.com;
+    let expect = q * (rest + Vector3::ZERO);
+    assert!(
+        (world - expect).length() < 0.05,
+        "pose rotation did not track: {world:?} vs {expect:?}"
+    );
+}
+
+/// CL_RS: a cluster ellipsoid falls onto the ground plane and settles in
+/// the margin band without tunneling (the world-level integration of the
+/// cluster colliders + joint solve).
+#[test]
+fn cluster_ellipsoid_settles_on_plane() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(GRAVITY);
+    let ground = world.add_body(RigidBody::new_static(
+        CollisionShape::plane(Vector3::new(0.0, 1.0, 0.0), 0.0),
+        Vector3::ZERO,
+    ));
+    let _ = ground;
+    let ball = world.add_soft_body(create_ellipsoid(
+        Vector3::new(0.0, 3.0, 0.0),
+        Vector3::new(1.0, 1.0, 1.0),
+        48,
+    ));
+    {
+        let sb = world.soft_body_mut(ball);
+        sb.cfg.piterations = 4;
+        sb.cfg.collisions = super::config::SoftCollision::CL_RS;
+        sb.set_total_mass_from_faces(20.0);
+        sb.generate_bending_constraints(2, None);
+        sb.generate_clusters(8, 16);
+        for c in &mut sb.clusters {
+            c.matching = 0.3;
+        }
+    }
+    let mut min_y: Real = 3.0;
+    for _ in 0..360 {
+        world.step_simulation(DT);
+        for n in &world.soft_body(ball).nodes {
+            min_y = min_y.min(n.x.y);
+        }
+    }
+    assert!(min_y < 1.0, "never reached the ground: {min_y}");
+    assert!(min_y > -0.1, "tunneled: {min_y}");
+    let sb = world.soft_body(ball);
+    assert!(sb.nodes.iter().all(|n| n.x.is_finite()));
+}
+
+/// CL_SS: two overlapping cluster ellipsoids push each other apart through
+/// their contact joints (the world-level soft-soft dispatch).
+#[test]
+fn cluster_pair_pushes_apart() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::ZERO);
+    let a = world.add_soft_body(create_ellipsoid(
+        Vector3::new(-0.4, 0.0, 0.0),
+        Vector3::new(1.0, 1.0, 1.0),
+        32,
+    ));
+    let b = world.add_soft_body(create_ellipsoid(
+        Vector3::new(0.4, 0.0, 0.0),
+        Vector3::new(1.0, 1.0, 1.0),
+        32,
+    ));
+    for i in [a, b] {
+        let sb = world.soft_body_mut(i);
+        sb.cfg.piterations = 4;
+        sb.cfg.collisions = super::config::SoftCollision::CL_SS;
+        sb.set_total_mass_from_faces(10.0);
+        sb.generate_clusters(8, 16);
+        for c in &mut sb.clusters {
+            c.matching = 0.3;
+        }
+    }
+    let com = |sb: &SoftBody| {
+        let mut c = Vector3::ZERO;
+        for n in &sb.nodes {
+            c += n.x;
+        }
+        c / sb.nodes.len() as Real
+    };
+    let start = (com(world.soft_body(a)) - com(world.soft_body(b))).length();
+    let mut separation = start;
+    for _ in 0..240 {
+        world.step_simulation(DT);
+        separation = (com(world.soft_body(a)) - com(world.soft_body(b))).length();
+    }
+    assert!(
+        separation > start + 0.3,
+        "CL_SS did not separate: {separation} vs {start}"
+    );
+}
+
+/// `create_from_convex_hull` drops interior points: only the hull
+/// vertices become nodes.
+#[test]
+fn convex_hull_builder_drops_interior() {
+    let pts = [
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(-1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(0.0, 0.0, -1.0),
+        Vector3::ZERO,
+    ];
+    let sb = create_from_convex_hull(&pts);
+    assert_eq!(sb.nodes.len(), 6, "interior point excluded");
+    assert_eq!(sb.faces.len(), 8, "octahedron faces");
+}

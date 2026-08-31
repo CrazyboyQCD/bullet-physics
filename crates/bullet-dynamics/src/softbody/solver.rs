@@ -76,6 +76,10 @@ impl SoftBody {
             n.f = Vector3::ZERO;
         }
 
+        // Clusters (Bullet refreshes the frames/velocities right after the
+        // integration; the matching pulls the nodes toward the rest frame).
+        self.update_clusters();
+
         // Bounds (Bullet ends predictMotion with the node/face dbvt updates,
         // the pose match and the contact clear — those arrive with their
         // phases; the world-space bounds are shared by all of them).
@@ -140,6 +144,7 @@ impl SoftBody {
         self.rcontacts.clear();
         self.scontacts.clear();
         self.ndbvt.optimize_incremental(1);
+        self.cdbvt.optimize_incremental(1);
     }
 
     /// Solve the constraint set (Bullet's `solveConstraints`): assemble the
@@ -166,6 +171,9 @@ impl SoftBody {
         after: &mut [SoftBody],
         bodies: &mut [RigidBody],
     ) {
+        // Apply clusters (Bullet opens the solve by spreading the velocity
+        // impulses accumulated by the cluster joints).
+        this.apply_clusters(false);
         // Prepare links: gradient c3 = q1 - q0 and c2 = 1/(|c3|^2 * c0).
         for l in &mut this.links {
             l.c3 = this.nodes[l.n[1]].q - this.nodes[l.n[0]].q;
@@ -237,6 +245,10 @@ impl SoftBody {
                 n.v += (n.x - n.q) * vcf;
             }
         }
+        // Apply clusters (Bullet closes the solve with the node damping and
+        // the drift impulses).
+        this.damp_clusters();
+        this.apply_clusters(true);
     }
 
     /// Run the position kernel sequence for `iterations` rounds without the

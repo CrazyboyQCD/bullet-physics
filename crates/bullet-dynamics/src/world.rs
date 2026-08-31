@@ -13,6 +13,7 @@ use crate::island::UnionFind;
 use crate::multibody::body::{MultiBody, MultiBodyScratch};
 use crate::multibody::contact::{self, ContactSide, MbContactRow, PendingContact};
 use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
+use crate::softbody::cluster::solve_clusters;
 use crate::softbody::collide::collide_vf_ss;
 use crate::softbody::config::SoftCollision;
 use crate::softbody::SoftBody;
@@ -1420,9 +1421,24 @@ impl PhysicsWorld {
         // stepped (solved *and* integrated), so contacts read the solved
         // rigid velocities and any impulses applied to rigid bodies land on
         // the next step — kept identical here (see `docs/softbody.md` §0/§4).
+        // The cluster contact joints solve globally first (Bullet's static
+        // `btSoftBody::solveClusters` over all bodies).
         let (soft_bodies, bodies) = (&mut self.soft_bodies, &mut self.bodies);
+        solve_clusters(soft_bodies, bodies);
         for i in 0..soft_bodies.len() {
             SoftBody::solve_constraints(i, soft_bodies, bodies);
+        }
+
+        // 7t. Soft-body self collisions (Bullet's per-body
+        // `defaultCollisionHandler(psb)` loop after the solve): only bodies
+        // with both `CL_SS` and `CL_SELF` act.
+        for i in 0..self.soft_bodies.len() {
+            let c = self.soft_bodies[i].cfg.collisions;
+            if c.contains(SoftCollision::CL_SS) && c.contains(SoftCollision::CL_SELF) {
+                let (soft_bodies, scratch) =
+                    (&mut self.soft_bodies, &mut self.soft_pair_scratch);
+                soft_bodies[i].collide_cluster_self(i, scratch);
+            }
         }
 
         // 8s. Soft-body normals refresh (Bullet's `updateSoftBodies` ->
@@ -1452,11 +1468,11 @@ impl PhysicsWorld {
 
     /// Soft-vs-rigid collision for one broad-phase pair (Bullet's
     /// `btSoftRigidCollisionAlgorithm` -> `defaultCollisionHandler`): the
-    /// soft body's node tree is queried against the rigid body's
-    /// margin-padded AABB and every contacting node lands in the soft
-    /// body's `rcontacts` (solved at stage 7s). Detection uses the rigid
-    /// body's *current* pose — the rigid solve has not run yet, matching
-    /// Bullet's detection inside `performDiscreteCollisionDetection`.
+    /// dispatch matches `(collisions & RVSmask)` *exactly* — `SDF_RS` nodes
+    /// the body, `CL_RS` clusters it, combinations fall through to nothing
+    /// (Bullet's switch semantics). Detection uses the rigid body's
+    /// *current* pose — the rigid solve has not run yet, matching Bullet's
+    /// detection inside `performDiscreteCollisionDetection`.
     fn soft_vs_rigid(&mut self, soft: usize, rigid: usize) {
         // A sleeping island's pair is skipped: nothing on the rigid side
         // moves and the soft body's nodes were at rest relative to it (the
@@ -1469,19 +1485,48 @@ impl PhysicsWorld {
             // margin artifact.
             return;
         }
+        let mode = self.soft_bodies[soft].cfg.collisions.0 & SoftCollision::RVS_MASK.0;
         let (soft_bodies, bodies) = (&mut self.soft_bodies, &self.bodies);
-        soft_bodies[soft].collide_rigid(rigid, &bodies[rigid], &mut self.soft_scratch);
+        if mode == SoftCollision::CL_RS.0 {
+            soft_bodies[soft].collide_cluster_rigid(
+                soft,
+                rigid,
+                &bodies[rigid],
+                &mut self.soft_scratch,
+            );
+        } else if mode == SoftCollision::SDF_RS.0 {
+            soft_bodies[soft].collide_rigid(rigid, &bodies[rigid], &mut self.soft_scratch);
+        }
     }
 
     /// Soft-vs-soft collision for one broad-phase pair (Bullet's
-    /// `btSoftSoftCollisionAlgorithm` -> `defaultCollisionHandler(psb)`
-    /// `VF_SS` branch): both bodies must select vertex-face handling —
-    /// Bullet's dispatch matches `(collisions_a & collisions_b) & SVSmask`
-    /// *exactly* against `VF_SS`, so a combination like `VF_SS | CL_SELF`
-    /// falls through to nothing. Each side's nodes are tested against the
-    /// other's faces (contacts land in the node-side body, solved at 7s).
+    /// `btSoftSoftCollisionAlgorithm` -> `defaultCollisionHandler(psb)`):
+    /// the dispatch matches `(collisions_a & collisions_b) & SVSmask`
+    /// *exactly* — `VF_SS` runs the node-face contacts both ways, `CL_SS`
+    /// one cluster-cluster tree pass (joints land on body A), combinations
+    /// fall through to nothing.
     fn soft_vs_soft(&mut self, a: usize, b: usize) {
         let effective = self.soft_bodies[a].cfg.collisions.0 & self.soft_bodies[b].cfg.collisions.0;
+        if effective & SoftCollision::SVS_MASK.0 == SoftCollision::CL_SS.0 {
+            let (soft_bodies, scratch) = (&mut self.soft_bodies, &mut self.soft_pair_scratch);
+            let (before, rest) = soft_bodies.split_at_mut(a.min(b));
+            let _ = before;
+            let (sa, sb) = if a < b {
+                let (sa, after) = rest.split_first_mut().unwrap();
+                let sb = &mut after[b - a - 1];
+                (sa, sb)
+            } else {
+                let (sb, after) = rest.split_first_mut().unwrap();
+                let sa = &mut after[a - b - 1];
+                (sa, sb)
+            };
+            if a < b {
+                sa.collide_cluster_soft(a, sb, b, scratch);
+            } else {
+                sb.collide_cluster_soft(b, sa, a, scratch);
+            }
+            return;
+        }
         if effective & SoftCollision::SVS_MASK.0 != SoftCollision::VF_SS.0 {
             return;
         }

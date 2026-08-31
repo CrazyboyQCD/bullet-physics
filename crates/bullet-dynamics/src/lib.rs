@@ -21,8 +21,9 @@ pub use constraint::{
 };
 pub use multibody::{MultiBody, MultiBodyConstraint};
 pub use softbody::{
-    create_patch, create_rope, patch_fixeds, AeroModel, Face, Material, MsvcRand, Pose, SContact,
-    SoftBody, SoftCollision, ROPE_FIX_END, ROPE_FIX_START,
+    create_ellipsoid, create_from_convex_hull, create_from_tri_mesh, create_patch, create_rope,
+    patch_fixeds, AeroModel, Cluster, Face, Impulse, Material, MsvcRand, Pose, SContact, Side,
+    SoftBody, SoftCollision, Tetra, ROPE_FIX_END, ROPE_FIX_START,
 };
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
 pub use world::{PhysicsWorld, StepStage, StepTimings, STEP_STAGES};

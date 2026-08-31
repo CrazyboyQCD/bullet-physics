@@ -1097,3 +1097,15 @@ dynamics before the cloth phase, so the trajectories still compare).
 | soft_soft_vf f32/f64 | 43 (both) | upper 0.844 / lower 0.339 | upper 0.752 / lower 0.248 | The VF_SS (vertex-vs-face soft-soft) check: free fall is bit-identical to the first touch (frame 43 — the upper sheet reaching the lower one's band), and **both engines hold the sheets margin-sum apart (0.504 vs 0.505)** — the contact-band semantics align. The absolute height difference is inherited from the lower sheet's plane settle (the rope_ground SDF class above). Both bodies opt in (`fCollision::Default | VF_SS`; the default flags are SDF_RS only in this tree) |
 
 Compare with `python tools/mbdiff.py target/sb_*_bullet.txt target/sb_*_rust.txt`.
+
+### Phase D probes (2026-08-31): ellipsoid_ground, cluster_pair
+
+Phase D scenes (same probe binaries; ellipsoid = `CreateEllipsoid` Hammersley
+hull + `setTotalMass(mass, true)` + `generateBendingConstraints(2)` +
+`generateClusters(16, 32)`, `kLST = 0.5`, matching 0.35 on every cluster).
+
+| Scene | First divergent frame | Final Bullet | Final Rust | Classification |
+|---|---|---|---|---|
+| ellipsoid_ground f32 | 22 | min_y 0.350 / com 1.312 / half 0.980 | min_y 0.228 / com 1.192 / half 0.995 | Volumetric ball onto the plane through CL_RS clusters. The first 21 frames (free fall) match within 1e-4; the divergence starts while still airborne — the quickhull **vertex ordering** differs from Bullet's `HullLibrary` (same vertex set, different link/face append order), so the PBD solve order diverges and the cluster matching amplifies it (the pre-recorded deviations §11 scatter class). Settle differs +122 mm: Bullet's plane route triangulates into extruded hulls (triangle margin 0.04 counted on both sides plus the rigid shape margin → effective band ~0.35) while our analytic plane distance keeps the hull at margin 0.25 − slop — the rope_ground SDF class, cluster edition. Shape character matches (squash/recover half-height 0.98 vs 0.995, settle stable, no tunneling) |
+| ellipsoid_ground f64 | 43 | min_y 0.350 / com 1.334 / half 0.997 | min_y 0.226 / com 1.201 / half 0.984 | Same pattern as f32 (settle +124 mm, divergence pre-contact) — f32 = f64 → structural, not precision |
+| cluster_pair f32/f64 | 0 | separation 79.8, **min_y −223 (Bullet explodes through the ground)** | separation 32.9, min_y 0.229 (settled in band) | Two overlapping cluster ellipsoids pushing apart through CL_SS. Frame 0 already differs ~3.7 cm: the pair starts inside the 0.5 contact band, and the first-touch joint impulses differ through the hull-vertex-order/mass-share scatter. After that **Bullet's own CL_SS goes numerically unstable on the large initial overlap** (nodes driven to y = −223 m) — the same "Bullet's own weak spot" family as `gimpact_stack_100` (both engines diverge, Bullet worse); our pair separates smoothly and settles on the plane. Behavioral fork makes the ratio meaningless; the conclusion is recorded in deviations instead |
