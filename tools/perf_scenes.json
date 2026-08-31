@@ -1,5 +1,5 @@
 {
-  "comment": "Single source of truth for performance scenes (Rust vs Bullet wall-clock comparison; docs/bullet-perf.md). tools/generate_perf_scenes.py expands the parameterized generators into static body tables: tools/bullet_perf_scenes.h (C++ runner, tools/bullet_perf.cpp) and crates/bullet/src/perf_scenes_table.rs (Rust runner, crates/bullet/examples/perf_scenes.rs); do not edit the generated files. Unlike tools/scenes.json (parity), bodies come from deterministic generators (never listed by hand): 'box_grid' stacks nx*ny*nz boxes, 'mixed_rain' drops a deterministic box/sphere/capsule lattice, and 'chains' builds a grid of fixed-base multibody pendulums. dt is [num, den]; warmup frames run before timing; iterations is the PGS count. broadphase_aabb is the sweep-extent hint for btAxisSweep3 (our AxisSweep3 is unbounded; the hint only scopes the C++ side).",
+  "comment": "Single source of truth for performance scenes (Rust vs Bullet wall-clock comparison; docs/bullet-perf.md). tools/generate_perf_scenes.py expands the parameterized generators into static body tables: tools/bullet_perf_scenes.h (C++ runner, tools/bullet_perf.cpp) and crates/bullet/src/perf_scenes_table.rs (Rust runner, crates/bullet/examples/perf_scenes.rs); do not edit the generated files. Unlike tools/scenes.json (parity), bodies come from deterministic generators (never listed by hand): 'box_grid' stacks nx*ny*nz boxes, 'mixed_rain' drops a deterministic box/sphere/capsule lattice, 'chains' builds a grid of fixed-base multibody pendulums, 'mesh_rain' drops dynamic triangle-mesh shells (GImpact). dt is [num, den]; warmup frames run before timing; iterations is the PGS count. broadphase_aabb is the sweep-extent hint for btAxisSweep3 (our AxisSweep3 is unbounded; the hint only scopes the C++ side).",
   "scenes": {
     "stack_1000": {
       "comment": "Solver stress: a 10x10x10 box stack settling on a box ground. 600 frames cover the active settle (~2s) plus the sleeping steady state; last300_ms reports the steady-state window.",
@@ -143,6 +143,47 @@
           "sphere_radius": 0.35,
           "capsule_radius": 0.3,
           "capsule_half_height": 0.5
+        }
+      ]
+    },
+    "gimpact_rain_100": {
+      "comment": "Dynamic concave mesh (GImpact) stress: 100 closed triangle-mesh shells (12-triangle boxes) rain onto a wavy 40x40 height mesh. Every shell-vs-terrain and shell-vs-shell pair runs the mesh-mesh path (tree-vs-tree candidate query + per-triangle-pair GJK with the margin shell), matching Bullet's btGImpactMeshShape via the registered GImpact collision algorithm. The drop is deliberately low (touchdown ~4.5 m/s, one-step travel < the 0.1 margin band) - zero-thickness panels can tunnel when a single step exceeds the band (docs/bullet-deviations.md). A stacking variant was tried and rejected: both engines collapse gimpact stacks (Bullet worse - its shells end up tunneled through the ground), so the two sides' workloads diverge and the numbers are meaningless; see docs/bullet-deviations.md.",
+      "dt": [1, 60],
+      "frames": 300,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-20, -2, -20], [20, 20, 20]],
+      "bodies": [
+        {
+          "name": "terrain",
+          "shape": {
+            "type": "mesh",
+            "grid": [40, 40],
+            "origin": [-19.5, -19.5],
+            "cell": [1.0, 1.0],
+            "heights_expr": {
+              "amp": 0.2,
+              "ax": 0.7,
+              "az": 0.6
+            }
+          },
+          "position": [0, 0, 0],
+          "mass": 0
+        }
+      ],
+      "generators": [
+        {
+          "type": "mesh_rain",
+          "nx": 10,
+          "nz": 10,
+          "layers": 1,
+          "spacing": [1.05, 1.6, 1.05],
+          "base": [-4.725, 1.5, -4.725],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "shell_half": [0.35, 0.35, 0.35]
         }
       ]
     }

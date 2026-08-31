@@ -96,8 +96,12 @@ def build_perf():
     full_env.update(env)
 
     obj = os.path.join(TOOLS, "bullet_perf.obj")
+    # The Gimpact headers (btGImpactShape.h et al.) live in the Gimpact
+    # subfolder, not next to the other collision headers.
+    gimpact_inc = os.path.join(ROOT, "refs", "bullet3", "src", "BulletCollision", "Gimpact")
     cmd = ["cl", "/nologo", "/O2", "/EHsc", "/std:c++17",
            f"/Fo{obj}", f"/I{os.path.join(ROOT, 'refs', 'bullet3', 'src')}",
+           f"/I{gimpact_inc}",
            PERF_SRC, f"/Fe:{PERF_EXE}", "/link", *libs("f32")]
     print("+", " ".join(cmd))
     r = subprocess.run(cmd, env=full_env)

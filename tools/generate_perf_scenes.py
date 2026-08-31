@@ -31,10 +31,32 @@ C_HEADER = os.path.join(ROOT, "tools", "bullet_perf_scenes.h")
 # parity tables).
 RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "perf_scenes_table.rs")
 
-GENERATOR_TYPES = {"box_grid", "mixed_rain"}
+GENERATOR_TYPES = {"box_grid", "mixed_rain", "mesh_rain"}
 SHAPE_TYPES = {"box", "sphere", "capsule", "mesh"}
 SHAPE_ENUM = {"box": "PERF_SHAPE_BOX", "sphere": "PERF_SHAPE_SPHERE",
               "capsule": "PERF_SHAPE_CAPSULE", "mesh": "PERF_SHAPE_MESH"}
+
+# Closed 12-triangle box shell (outward winding): the dynamic-mesh (GImpact)
+# body template shared by the mesh_rain/mesh_grid generators. Closed so the
+# far side of the shell can catch a tunneling contact (deviations: single
+# panels have no recovery), and 12 triangles so the per-pair tree query and
+# GJK band work match a real concave load.
+SHELL_TRIANGLES = [
+    0, 1, 2,  0, 2, 3,   # bottom (-Y)
+    4, 6, 5,  4, 7, 6,   # top (+Y)
+    0, 5, 1,  0, 4, 5,   # z = -hz (-Z)
+    2, 7, 3,  2, 6, 7,   # z = +hz (+Z)
+    1, 6, 2,  1, 5, 6,   # x = +hx (+X)
+    0, 3, 7,  0, 7, 4,   # x = -hx (-X)
+]
+
+
+def shell_geometry(half):
+    """Flat vertex/index buffers for the closed box shell template."""
+    hx, hy, hz = half
+    verts = [-hx, -hy, -hz, hx, -hy, -hz, hx, -hy, hz, -hx, -hy, hz,
+             -hx, hy, -hz, hx, hy, -hz, hx, hy, hz, -hx, hy, hz]
+    return verts, list(SHELL_TRIANGLES)
 
 
 def expand_generator(g):
@@ -78,6 +100,23 @@ def expand_generator(g):
                         "position": [bx + i * sx, by + layer * sy, bz + j * sz],
                         "mass": m, "friction": fr, "restitution": re,
                     })
+    elif kind == "mesh_rain":
+        # Dynamic triangle-mesh shells (GImpact) dropped in a grid: every
+        # shell-vs-terrain / shell-vs-shell pair exercises the mesh-mesh path.
+        nx, nz, layers = g["nx"], g["nz"], g["layers"]
+        sx, sy, sz = g["spacing"]
+        bx, by, bz = g["base"]
+        m, fr, re = g["mass"], g["friction"], g["restitution"]
+        shell = {"type": "mesh", "shell": g["shell_half"]}
+        for layer in range(layers):
+            for j in range(nz):
+                for i in range(nx):
+                    out.append({
+                        "name": f"{kind}_{i}_{j}_{layer}",
+                        "shape": dict(shell),
+                        "position": [bx + i * sx, by + layer * sy, bz + j * sz],
+                        "mass": m, "friction": fr, "restitution": re,
+                    })
     else:
         raise ValueError(f"unknown generator type {kind!r}")
     return out
@@ -100,6 +139,17 @@ def mesh_heights(shape):
     nx, nz = shape["grid"]
     return [e["amp"] * math.sin(x * e["ax"]) * math.cos(z * e["az"])
             for z in range(nz) for x in range(nx)]
+
+
+def mesh_geometry(shape):
+    """(flat vertices, flat indices) for one mesh shape: a height grid
+    (static terrain) or the closed box shell template (dynamic shells)."""
+    if "shell" in shape:
+        return shell_geometry(shape["shell"])
+    expanded = dict(shape)
+    expanded["heights"] = mesh_heights(shape)
+    nx, nz, verts = mesh_vertices(expanded)
+    return verts, mesh_indices(nx, nz)
 
 
 def shape_params(shape):
@@ -165,10 +215,7 @@ def gen_c(scenes):
         for b in bodies:
             if b["shape"]["type"] != "mesh":
                 continue
-            expanded = dict(b["shape"])
-            expanded["heights"] = mesh_heights(b["shape"])
-            nx, nz, verts = mesh_vertices(expanded)
-            idx = mesh_indices(nx, nz)
+            verts, idx = mesh_geometry(b["shape"])
             vs = ", ".join(f"btScalar({fmt(x)})" for x in verts)
             is_ = ", ".join(str(i) for i in idx)
             lines.append(f"static const btScalar k{name}_{b['name']}_verts[] = {{ {vs} }};")
@@ -285,11 +332,7 @@ def gen_rs(scenes):
             elif t == "capsule":
                 shape = f"PerfShapeSpec::Capsule({fmt(params[0])}, {fmt(params[1])})"
             else:  # mesh
-                expanded = dict(b["shape"])
-                expanded["heights"] = mesh_heights(b["shape"])
-                _, _, verts = mesh_vertices(expanded)
-                nx, nz = b["shape"]["grid"]
-                idx = mesh_indices(nx, nz)
+                verts, idx = mesh_geometry(b["shape"])
                 vs = ", ".join(fmt(x) for x in verts)
                 is_ = ", ".join(str(i) for i in idx)
                 shape = f"PerfShapeSpec::Mesh(&[{vs}], &[{is_}])"

@@ -11,6 +11,10 @@
 //     perf scene <name> bodies <n> frames <f> warmup <w>
 //     repeat <i> total_ms <x> last300_ms <y>
 //
+// `--dump` instead steps one run from frame 0 (including warmup) and prints
+// aggregate stack health every 5 frames (matching the Rust runner's
+// run_dump protocol, for behavioral comparison of settling scenes).
+//
 // Fairness notes (documented in docs/bullet-perf.md):
 //   - the broad phase follows the scene spec: btAxisSweep3 (matching this
 //     crate's default AxisSweep3, scoped with the broadphase_aabb hint) or
@@ -19,8 +23,13 @@
 //     the parity recorder);
 //   - multibody scenes use btMultiBodyDynamicsWorld with link colliders in
 //     the DefaultFilter group (required for the island solver) and a manual
-//     forwardKinematics before attaching them.
-//
+//     forwardKinematics before attaching them;
+//   - dynamic mesh bodies (mass > 0) use btGImpactMeshShape with the GImpact
+//     collision algorithm registered on the dispatcher (without the
+//     registration every gimpact pair silently misses - the numbers would
+//     look fast and be meaningless), matching this crate's dynamic
+//     TriangleMesh path; static meshes stay btBvhTriangleMeshShape.
+
 // Usage: bullet_perf.exe <scene_name> [repeats]
 
 #include <chrono>
@@ -32,6 +41,8 @@
 #include "btBulletDynamicsCommon.h"
 #include <BulletCollision/BroadphaseCollision/btAxisSweep3.h>
 #include <BulletCollision/BroadphaseCollision/btDbvtBroadphase.h>
+#include <BulletCollision/Gimpact/btGImpactShape.h>
+#include <BulletCollision/Gimpact/btGImpactCollisionAlgorithm.h>
 
 #include <BulletDynamics/Featherstone/btMultiBody.h>
 #include <BulletDynamics/Featherstone/btMultiBodyDynamicsWorld.h>
@@ -42,7 +53,7 @@
 
 namespace {
 
-btCollisionShape* make_shape(const PerfBodySpec& b,
+btCollisionShape* make_shape(const PerfBodySpec& b, bool is_static,
                              std::vector<std::unique_ptr<btTriangleMesh>>& meshes) {
   const btScalar* p = b.params;
   switch (b.shape) {
@@ -67,7 +78,12 @@ btCollisionShape* make_shape(const PerfBodySpec& b,
                         btVector3(e[0], e[1], e[2]));
       }
       meshes.push_back(std::unique_ptr<btTriangleMesh>(tm));
-      return new btBvhTriangleMeshShape(tm, true);
+      if (is_static) return new btBvhTriangleMeshShape(tm, true);
+      // Dynamic concave mesh: the GImpact route (updateBound is mandatory -
+      // without it the shape keeps an empty AABB and never pairs).
+      btGImpactMeshShape* g = new btGImpactMeshShape(tm);
+      g->updateBound();
+      return g;
     }
   }
   return nullptr;
@@ -103,16 +119,20 @@ struct SceneRun {
     btContactSolverInfo& info = world.getSolverInfo();
     info.m_solverMode &= ~SOLVER_RANDMIZE_ORDER;
     info.m_numIterations = spec.iterations;
+    // Registers on this run's dispatcher (the table lives per dispatcher
+    // instance, so every SceneRun needs it; harmless for gimpact-free scenes).
+    btGImpactCollisionAlgorithm::registerAlgorithm(&dispatcher);
 
     for (int i = 0; i < spec.num_bodies; ++i) {
       const PerfBodySpec& b = spec.bodies[i];
-      shapes.push_back(std::unique_ptr<btCollisionShape>(make_shape(b, mesh_storage)));
+      const bool is_static = b.mass == btScalar(0);
+      shapes.push_back(std::unique_ptr<btCollisionShape>(
+          make_shape(b, is_static, mesh_storage)));
       btCollisionShape* shape = shapes.back().get();
       motions.push_back(std::unique_ptr<btMotionState>(
           new btDefaultMotionState(btTransform(btQuaternion(0, 0, 0, 1),
                                                btVector3(b.pos[0], b.pos[1], b.pos[2])))));
       btVector3 local_inertia(0, 0, 0);
-      const bool is_static = b.mass == btScalar(0);
       if (!is_static) shape->calculateLocalInertia(b.mass, local_inertia);
       btRigidBody::btRigidBodyConstructionInfo ci(
           is_static ? btScalar(0.0) : b.mass, motions.back().get(), shape, local_inertia);
@@ -185,21 +205,55 @@ const PerfSceneSpec* find_scene(const char* name) {
   return nullptr;
 }
 
+// Debug probe matching the Rust runner's run_dump: aggregate stack health
+// every 5 frames (sum of dynamic-body y, sum/max speed, awake count).
+void run_dump(const PerfSceneSpec& spec, btScalar dt) {
+  SceneRun run(spec);
+  const int frames = spec.warmup + spec.frames;
+  for (int f = 0; f < frames; ++f) {
+    run.world.stepSimulation(dt, 1, dt);
+    if (f % 5 == 0 || f == frames - 1) {
+      double sum_y = 0.0, sum_v = 0.0, max_v = 0.0;
+      int awake = 0, count = 0;
+      for (int i = 0; i < int(run.bodies.size()); ++i) {
+        const btRigidBody* b = run.bodies[i].get();
+        if (b->getInvMass() == btScalar(0)) continue;
+        ++count;
+        sum_y += double(b->getWorldTransform().getOrigin().getY());
+        const double v = double(b->getLinearVelocity().length());
+        sum_v += v;
+        if (v > max_v) max_v = v;
+        if (b->isActive()) ++awake;
+      }
+      std::printf("dump frame %d bodies %d sum_y %.4f sum_v %.5f max_v %.5f awake %d\n",
+                  f, count, sum_y, sum_v, max_v, awake);
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: bullet_perf.exe <scene_name> [repeats]\n");
+    std::fprintf(stderr, "usage: bullet_perf.exe <scene_name> [repeats] [--dump]\n");
     return 2;
   }
   const char* scene_name = argv[1];
-  const int repeats = argc > 2 ? std::atoi(argv[2]) : 5;
+  bool dump = false;
+  for (int i = 2; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--dump") == 0) dump = true;
+  }
   const PerfSceneSpec* spec = find_scene(scene_name);
   if (!spec) {
     std::fprintf(stderr, "bullet_perf: unknown scene '%s'\n", scene_name);
     return 2;
   }
   const btScalar dt = btScalar(spec->dt_num) / btScalar(spec->dt_den);
+  if (dump) {
+    run_dump(*spec, dt);
+    return 0;
+  }
+  const int repeats = argc > 2 ? std::atoi(argv[2]) : 5;
   const int bodies = spec->num_bodies + (spec->chains.count > 0 ? spec->chains.count : 0);
   std::printf("perf scene %s bodies %d frames %d warmup %d\n", spec->name, bodies,
               spec->frames, spec->warmup);
