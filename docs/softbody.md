@@ -192,15 +192,21 @@ Bullet HullLibrary 可能不同 → links 生成顺序不同 → PBD 求解顺�
   **实现勘误**：①`randomizeConstraints` 是内建 LCG 非 rand()（§8 已修正，无需 MSVC rand 复刻）；
   ②`updateLinkConstants` 的 `c0 = (im0+im1) / kLST`（除法，§6 表已修正）；
   ③`setTotalMass` 缩放为 `im *= total/mass`。
-- **Phase B：SDF_RS 碰撞 + 锚 + broadphase/island 集成** ✅ 核心完成（2026-08-31 深夜三；probe 后置见下）
+- **Phase B：SDF_RS 碰撞 + 锚 + broadphase/island 集成** ✅ 完成（2026-08-31 深夜三 + B 后半 probe 同日）
   DbvtTree 从 dbvt.rs 泛化导出（Tree→pub DbvtTree，insert/remove/update_fat/for_each_overlapping/
   optimize_incremental/clear 公开——纯可见性重构，broadphase 逻辑零变）；check_contact（plane 解析/
   凸 GJK 零球点距/静态 mesh·heightfield 点-三角形最近）；SDF_RS→RContact；PSolve_RContacts/PSolve_Anchors
   （solve_constraints 传 &mut bodies 字段级拆分借用）；add_soft_body proxy/ProxyOwner::Soft 分流/
   4b 岛 soft 恒醒钉醒/5s 碰撞/3s bounds 刷 proxy/remove_soft_body + remove_body 锚级联。
   demo：`softbody_rope_ground`（绳落 plane settle 带内 0.149/绳跨球不穿 1.23/双锚 cargo 摆荡保持）。
-  **待办（B 后半）**：①probe 启动（tools/softbody_probe.cpp + twin——rope_pendulum/rope_ground/cloth_plane，
-  SDF 精确距离偏差量化）；②软体 raycast（需 fdbvt faces——挪到 C 期）。
+  **B 后半完成（2026-08-31）**：probe 落地——`tools/softbody_probe.cpp` + `examples/softbody_probe.rs` +
+  `tools/build_softbody_probe.py`（链 `BulletSoftBody.lib`，先 cmake build 该 target），场景
+  rope_pendulum/rope_ground/cloth_plane ×f32/f64，台账 `docs/bullet-compare.md` "SoftBody probes"。
+  读数：纯 PBD（rope_pendulum）打印精度内全对齐（f32 287/300 逐字节）——A/B 求解内核坐实；
+  接触场景首触同帧（57）、settle 差 85–86mm（f32=f64 → 结构性）——Bullet 对 plane 走 concave
+  三角化+GJK+体素插值的三重近似（`isConvex(plane)`=false，plane 永不直入 GJK 分支），有效接触带
+  抬到几何 margin 之上；我们解析距离 settle 在 margin+3mm。deviations §1 已记两行（精确距离量化、
+  soft 不休眠）。软体 raycast 挪 C 期（需 fdbvt faces，见下）。
   **实现要点/勘误**：①Bullet 的 `timemargin` 是死代码（wtr 与 ctr 同一对象）→ dynmargin=stamargin；
   ②`dst = 距离 − margin` 语义下 `offset = dst − dot(n,x)`、PSolve 的 dp 即检测时 dst；③**隧穿边界：
   margin 带必须 ≥ 单步位移**（v·dt）——Bullet 0.25 默认即为此设计（15 m/s 上限），测试 margin 0.05+
@@ -213,8 +219,9 @@ Bullet HullLibrary 可能不同 → links 生成顺序不同 → PBD 求解顺�
 - **Phase C：Faces + 布料现象**（~800 行）
   faces/update_normals/update_area；aero（V_Point/V_TwoSided(+LiftDrag)/V_OneSided/F_* 7 模型）；
   pressure/volume（getVolume 散度定理、updatePose）；PSolve_SContacts + VF_SS（soft-soft 碰撞，5s 扩展）；
-  create_patch（fixeds 位图/gendiags/perturbation+rand 复刻）。demo：`softbody_flag`（风场飘动）、
-  `softbody_balloon`（pressure 闭合 patch）。probe：patch_catenary（四角固定 settle）、soft_soft_vf。
+  create_patch（fixeds 位图/gendiags/perturbation+rand 复刻）；**软体 raycast**（需 fdbvt faces，自 B 期
+  挪入）。demo：`softbody_flag`（风场飘动）、`softbody_balloon`（pressure 闭合 patch）。
+  probe：patch_catenary（四角固定 settle）、soft_soft_vf。
 - **Phase D：Tetra + Cluster 体积软体**（~1200 行）
   tetras/体积梯度（kVST 行）、setVolumeMass/Density；pose（bvolume/bframe/m_aqq/matching kMT）；
   K-mean generate_clusters + cluster 惯量/求解/阻尼/apply；quickhull；CL_RS/CL_SS/CL_SELF（cluster 连通性）；
@@ -231,6 +238,8 @@ Bullet HullLibrary 可能不同 → links 生成顺序不同 → PBD 求解顺�
 
 1. **无 SparseSDF**：节点-刚体距离精确化；Bullet 的 0.25 体素 trilinear 插值误差消失 → 接触带内
    settle 位置差异（probe 量化，预期同"margin 壳 44mm 悬浮"量级分类）。
+   **已量化（2026-08-31）**：plane 场景 settle 差 85–86mm（Bullet 三重近似把有效带抬到几何 margin 之上，
+   我们 settle 在 margin+3mm）——deviations §1 "Soft body: node-vs-rigid distance" 落地。
 2. **静态 mesh 不走 extruded hull**：点-三角形精确距离 + margin 带（Bullet 三角形 ±0.04 挤出 + SDF）。
 3. **soft 不休眠**（对齐 Bullet 实际管线，非我们简化）。
 4. **mb 耦合后置**（Phase F 前软体不与 mb link collider 交互——broadphase pair 过滤）。

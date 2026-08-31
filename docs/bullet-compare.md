@@ -1070,3 +1070,28 @@ of the GJK route, deviations §1).
 Build: `tools/build_recorder.py`'s `msvc_env` + `cl /Irefs/bullet3/src
 /Irefs/bullet3/src/BulletCollision/Gimpact tools/gimpact_probe.cpp /Fe:tools/gimpact_probe.exe
 /link <f32 libs>`; compare with `python tools/mbdiff.py <bullet.txt> <rust.txt>`.
+
+## SoftBody probes (2026-08-31, phase B)
+
+Classic soft-body ropes/cloth (our `softbody` module vs Bullet's
+`BulletSoftBody`): `tools/softbody_probe.cpp` (built by
+`tools/build_softbody_probe.py`, links `BulletSoftBody.lib` — build it first
+with `cmake --build target/bullet3-build --target BulletSoftBody --config
+Release`, same for `-double`) + `examples/softbody_probe.rs`, three scenes,
+f32 + f64, gravity −9.81 (also written into `getWorldInfo().m_gravity` — it
+defaults to −10 and `setGravity` does not sync it), `piterations = 4`,
+`SOLVER_RANDMIZE_ORDER` cleared. `rope_pendulum` = CreateRope (0,8,0)→(4,8,0)
+res 16, pinned start, 300/600 frames (tip + mass-weighted COM; never reaches
+the ground — pure link PBD). `rope_ground` = 22-node rope dropped from y=5
+onto the plane. `cloth_plane` = CreatePatch 12×12, 4×4 m, diagonals, dropped
+from y=5 (the Rust twin builds nodes+links only; faces carry no position
+dynamics before the cloth phase, so the trajectories still compare).
+
+| Scene | First divergent frame | Final Bullet | Final Rust | Classification |
+|---|---|---|---|---|
+| rope_pendulum f32 | — | — | — | **Within tolerance all 300 frames** (287 bit-identical, rest ≤1e-6 = print precision) — the PBD link/anchor kernels align (phase A numerics, first probe) |
+| rope_pendulum f64 | — | — | — | **Within tolerance all 600 frames** (141 bit-identical, rest ≤4e-6) — same class, f32/f64 agree → not precision-driven |
+| rope_ground f32/f64 | 57 (both) | min_y 0.3374 / com 0.3519 | min_y 0.2527 / com 0.2527 | Free fall bit-matches to frame 57, then the contact regimes diverge: **settle offset +85 mm** (same in both precisions → structural). Bullet's soft-vs-plane path treats the plane as concave (`isConcave(STATIC_PLANE_PROXYTYPE)` is true): `btSoftBodyConcaveCollisionAlgorithm` triangulates the plane, each triangle runs the GJK point distance, and the sparse-SDF cell trilinear interpolation stacks approximations that open the contact band ~0.3 m above the geometry (first contacts at node y≈0.5, verified by probing `m_rcontacts`). Our analytic plane distance puts the band where the geometry says (settle at margin 0.25 + 3 mm); probe instrumentation also showed the plane itself never enters the GJK branch directly (`isConvex(plane)` is false — `DistanceToShape` would return 0), so there is no "exact" Bullet reference for plane contacts to align to |
+| cloth_plane f32/f64 | 57 (both) | min_y 0.3384 / com 0.3518 | min_y 0.2527 / com 0.2527 | Same class as rope_ground (settle +86 mm, COM drift ≤8 mm); cloth link ordering is a byte-exact `CreatePatch` replay (horizontal, vertical, diagonal per cell), and the pre-contact trajectories confirm it |
+
+Compare with `python tools/mbdiff.py target/sb_*_bullet.txt target/sb_*_rust.txt`.
