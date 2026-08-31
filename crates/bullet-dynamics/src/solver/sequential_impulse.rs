@@ -35,8 +35,18 @@ pub struct ContactConstraint {
     r_b: Vector3,
     inv_mass_a: Real,
     inv_mass_b: Real,
-    inv_inertia_a: Matrix3,
-    inv_inertia_b: Matrix3,
+    /// Pre-folded angular impulse components along each row direction
+    /// (`comp = invI · (r × dir)`, Bullet's per-row `m_angularComponentA/B`
+    /// from `setupContactConstraint`): applying an impulse `dir · j` becomes
+    /// `ω -= comp · j`, so the ten-iteration hot path multiplies a vector by
+    /// a scalar instead of re-running `invI · (r × impulse)` matrix-vector
+    /// products. The row no longer stores the inverse-inertia matrices.
+    ang_normal_a: Vector3,
+    ang_normal_b: Vector3,
+    ang_tangent1_a: Vector3,
+    ang_tangent1_b: Vector3,
+    ang_tangent2_a: Vector3,
+    ang_tangent2_b: Vector3,
     normal_mass: Real,
     tangent1_mass: Real,
     tangent2_mass: Real,
@@ -185,6 +195,15 @@ impl ContactConstraint {
         let inv_mass_a = a.inv_mass();
         let inv_mass_b = b.inv_mass();
 
+        // Pre-fold the angular components once (Bullet's
+        // `m_angularComponentA/B = invInertiaTensorWorld * relPos.cross(dir)`).
+        let ang_normal_a = inv_inertia_a * (r_a.cross(normal));
+        let ang_normal_b = inv_inertia_b * (r_b.cross(normal));
+        let ang_tangent1_a = inv_inertia_a * (r_a.cross(tangent1));
+        let ang_tangent1_b = inv_inertia_b * (r_b.cross(tangent1));
+        let ang_tangent2_a = inv_inertia_a * (r_a.cross(tangent2));
+        let ang_tangent2_b = inv_inertia_b * (r_b.cross(tangent2));
+
         let normal_mass = effective_mass(inv_mass_a, inv_mass_b, &inv_inertia_a, &inv_inertia_b, r_a, r_b, normal);
         let tangent1_mass =
             effective_mass(inv_mass_a, inv_mass_b, &inv_inertia_a, &inv_inertia_b, r_a, r_b, tangent1);
@@ -208,8 +227,12 @@ impl ContactConstraint {
             r_b,
             inv_mass_a,
             inv_mass_b,
-            inv_inertia_a,
-            inv_inertia_b,
+            ang_normal_a,
+            ang_normal_b,
+            ang_tangent1_a,
+            ang_tangent1_b,
+            ang_tangent2_a,
+            ang_tangent2_b,
             normal_mass,
             tangent1_mass,
             tangent2_mass,
@@ -303,9 +326,9 @@ pub fn solve(
 pub(crate) fn warm_start(bodies: &mut [RigidBody], constraints: &mut [ContactConstraint]) {
     for c in constraints.iter_mut() {
         let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
-        apply_impulse(a, b, c, c.normal * c.normal_impulse);
-        apply_impulse(a, b, c, c.tangent1 * c.tangent1_impulse);
-        apply_impulse(a, b, c, c.tangent2 * c.tangent2_impulse);
+        apply_impulse(a, b, c, Dir::Normal, c.normal_impulse);
+        apply_impulse(a, b, c, Dir::Tangent1, c.tangent1_impulse);
+        apply_impulse(a, b, c, Dir::Tangent2, c.tangent2_impulse);
     }
 }
 
@@ -363,20 +386,20 @@ pub(crate) fn split_impulse_pass(
             c.push_impulse = (old + delta).max(0.0);
             let j = c.push_impulse - old;
             if j != 0.0 {
-                apply_push(a, b, c, c.normal * j);
+                apply_push(a, b, c, j);
             }
         }
     }
 }
 
 /// Accumulate a split-impulse positional push onto the bodies' push velocities
-/// (Bullet's `internalApplyPushImpulse`); same geometry as [`apply_impulse`]
-/// but written to `push_linear`/`push_angular` instead of the real velocities.
-fn apply_push(a: &mut RigidBody, b: &mut RigidBody, c: &ContactConstraint, impulse: Vector3) {
-    a.push_linear -= impulse * c.inv_mass_a;
-    b.push_linear += impulse * c.inv_mass_b;
-    a.push_angular -= c.inv_inertia_a * (c.r_a.cross(impulse));
-    b.push_angular += c.inv_inertia_b * (c.r_b.cross(impulse));
+/// (Bullet's `internalApplyPushImpulse`): the push runs along the row normal
+/// only, so it reuses the pre-folded normal angular components.
+fn apply_push(a: &mut RigidBody, b: &mut RigidBody, c: &ContactConstraint, j: Real) {
+    a.push_linear -= c.normal * (j * c.inv_mass_a);
+    b.push_linear += c.normal * (j * c.inv_mass_b);
+    a.push_angular -= c.ang_normal_a * j;
+    b.push_angular += c.ang_normal_b * j;
 }
 
 fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Real) {
@@ -416,7 +439,7 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
     c.normal_impulse = (old + lambda).max(0.0);
     let jn = c.normal_impulse - old;
 
-    apply_impulse(a, b, c, c.normal * jn);
+    apply_impulse(a, b, c, Dir::Normal, jn);
 
     // Friction: two tangent directions, clamped by Coulomb's law.
     let max_friction = c.friction * c.normal_impulse;
@@ -431,7 +454,7 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
         let old = c.tangent1_impulse;
         let new = (old + lambda).clamp(-max_friction, max_friction);
         c.tangent1_impulse = new;
-        apply_impulse(a, b, c, c.tangent1 * (new - old));
+        apply_impulse(a, b, c, Dir::Tangent1, new - old);
     }
 
     // Tangent 2.
@@ -444,7 +467,7 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
         let old = c.tangent2_impulse;
         let new = (old + lambda).clamp(-max_friction, max_friction);
         c.tangent2_impulse = new;
-        apply_impulse(a, b, c, c.tangent2 * (new - old));
+        apply_impulse(a, b, c, Dir::Tangent2, new - old);
     }
 }
 
@@ -476,11 +499,35 @@ fn solve_joint_row(bodies: &mut [RigidBody], c: &mut ConstraintRow) {
     }
 }
 
-fn apply_impulse(a: &mut RigidBody, b: &mut RigidBody, c: &ContactConstraint, impulse: Vector3) {
-    a.linear_velocity -= impulse * c.inv_mass_a;
-    b.linear_velocity += impulse * c.inv_mass_b;
-    a.angular_velocity -= c.inv_inertia_a * (c.r_a.cross(impulse));
-    b.angular_velocity += c.inv_inertia_b * (c.r_b.cross(impulse));
+/// Which row direction an impulse acts along (selects the pre-folded angular
+/// component and the direction vector).
+#[derive(Clone, Copy)]
+enum Dir {
+    Normal,
+    Tangent1,
+    Tangent2,
+}
+
+/// Apply an impulse `dir · j` to both bodies: the linear parts scale the
+/// direction by `j · inv_mass`, the angular parts use the row's pre-folded
+/// component (`ω -= comp · j`), matching Bullet's
+/// `resolveSingleConstraintRowGeneric` shape.
+fn apply_impulse(
+    a: &mut RigidBody,
+    b: &mut RigidBody,
+    c: &ContactConstraint,
+    dir: Dir,
+    j: Real,
+) {
+    let (dir_vec, comp_a, comp_b) = match dir {
+        Dir::Normal => (c.normal, c.ang_normal_a, c.ang_normal_b),
+        Dir::Tangent1 => (c.tangent1, c.ang_tangent1_a, c.ang_tangent1_b),
+        Dir::Tangent2 => (c.tangent2, c.ang_tangent2_a, c.ang_tangent2_b),
+    };
+    a.linear_velocity -= dir_vec * (j * c.inv_mass_a);
+    b.linear_velocity += dir_vec * (j * c.inv_mass_b);
+    a.angular_velocity -= comp_a * j;
+    b.angular_velocity += comp_b * j;
 }
 
 #[cfg(test)]
