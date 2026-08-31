@@ -13,6 +13,7 @@ use crate::island::UnionFind;
 use crate::multibody::body::{MultiBody, MultiBodyScratch};
 use crate::multibody::contact::{self, ContactSide, MbContactRow, PendingContact};
 use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
+use crate::softbody::SoftBody;
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
 use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, SLOP, SPLIT_TURN_ERP};
 
@@ -281,6 +282,10 @@ pub struct PhysicsWorld {
     /// Reused per-sweep buffer for the contact rows' normal-impulse
     /// snapshot (kept across steps so the solve sweeps do not allocate).
     mb_row_scratch: Vec<Real>,
+    /// Position-based soft bodies (Bullet's `btSoftBody` list of
+    /// `btSoftRigidDynamicsWorld`; phase A — no broad-phase proxies or
+    /// contacts yet, see `docs/softbody.md` §4/§10).
+    soft_bodies: Vec<SoftBody>,
     /// Cumulative per-stage step timings; zero until enabled (see
     /// [`PhysicsWorld::enable_step_timing`]).
     step_timings: StepTimings,
@@ -328,6 +333,7 @@ impl PhysicsWorld {
             mb_pending_contacts: Vec::new(),
             mb_contact_rows: Vec::new(),
             mb_row_scratch: Vec::new(),
+            soft_bodies: Vec::new(),
             step_timings: StepTimings::default(),
         }
     }
@@ -484,6 +490,30 @@ impl PhysicsWorld {
 
     pub fn num_multibodies(&self) -> usize {
         self.multibodies.len()
+    }
+
+    /// Add a soft body (Bullet's `btSoftRigidDynamicsWorld::addSoftBody`)
+    /// and return its index. Phase A: the body steps through
+    /// predict/solve but does not join the broad phase or collide yet.
+    pub fn add_soft_body(&mut self, body: SoftBody) -> usize {
+        self.soft_bodies.push(body);
+        self.soft_bodies.len() - 1
+    }
+
+    pub fn soft_body(&self, index: usize) -> &SoftBody {
+        &self.soft_bodies[index]
+    }
+
+    pub fn soft_body_mut(&mut self, index: usize) -> &mut SoftBody {
+        &mut self.soft_bodies[index]
+    }
+
+    pub fn soft_bodies(&self) -> &[SoftBody] {
+        &self.soft_bodies
+    }
+
+    pub fn num_soft_bodies(&self) -> usize {
+        self.soft_bodies.len()
     }
 
     /// Add a multibody constraint (Bullet's `addMultiBodyConstraint`) and
@@ -822,6 +852,15 @@ impl PhysicsWorld {
             }
         }
         self.mb_solve_external_forces(dt);
+
+        // 1s. Soft bodies: integrate the nodes to their predicted positions
+        // (Bullet's `predictMotion`, driven from `predictUnconstraintMotion`
+        // after the rigid velocity integration; insertion map
+        // `docs/softbody.md` §4).
+        let gravity = self.gravity;
+        for sb in &mut self.soft_bodies {
+            sb.predict_motion(dt, gravity);
+        }
         clk.mark(&mut self.step_timings, StepStage::IntegrateVelocities);
 
         // 2. Predicted positions (used only for contact detection).
@@ -1246,6 +1285,15 @@ impl PhysicsWorld {
                 let from = body.position - body.linear_velocity * dt;
                 body.position = from + (body.position - from) * ccd_clamps[i];
             }
+        }
+
+        // 7s. Soft bodies: solve the position-based constraint set. Bullet
+        // runs `solveSoftBodiesConstraints` after the rigid bodies are fully
+        // stepped (solved *and* integrated), so contacts read the solved
+        // rigid velocities and any impulses applied to rigid bodies land on
+        // the next step — kept identical here (see `docs/softbody.md` §0/§4).
+        for sb in &mut self.soft_bodies {
+            sb.solve_constraints();
         }
 
         // 8. Clear accumulated forces for the next step.

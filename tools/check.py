@@ -36,7 +36,7 @@ def run(cmd, **kw):
     return subprocess.run(cmd, **kw)
 
 
-DEMOS = ["falling_box", "falling_capsule", "falling_mesh", "ccd", "character", "vehicle", "joints", "multibody", "mixed_stress"]
+DEMOS = ["falling_box", "falling_capsule", "falling_mesh", "ccd", "character", "vehicle", "joints", "multibody", "mixed_stress", "softbody_rope"]
 
 
 def ensure_scenes_generated():

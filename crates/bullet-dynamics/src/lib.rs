@@ -6,6 +6,7 @@ pub mod character;
 pub mod constraint;
 mod island;
 pub mod multibody;
+pub mod softbody;
 pub mod solver;
 pub mod vehicle;
 pub mod world;
@@ -19,5 +20,6 @@ pub use constraint::{
     TranslationalLimitMotor,
 };
 pub use multibody::{MultiBody, MultiBodyConstraint};
+pub use softbody::{create_rope, Material, SoftBody, ROPE_FIX_END, ROPE_FIX_START};
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
 pub use world::{PhysicsWorld, StepStage, StepTimings, STEP_STAGES};

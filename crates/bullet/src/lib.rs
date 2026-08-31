@@ -28,8 +28,8 @@ pub mod prelude {
     pub use bullet_collision::raycast::RayHit;
     pub use bullet_collision::shapes::CollisionShape;
     pub use bullet_dynamics::{
-        KinematicCharacterController, MultiBody, MultiBodyConstraint, PhysicsWorld,
-        RaycastVehicle, RigidBody, StepStage, StepTimings, VehicleTuning, STEP_STAGES,
+        create_rope, KinematicCharacterController, MultiBody, MultiBodyConstraint, PhysicsWorld,
+        RaycastVehicle, RigidBody, SoftBody, StepStage, StepTimings, VehicleTuning, STEP_STAGES,
     };
     pub use bullet_math::{Quaternion, Real, Vector3};
 }
