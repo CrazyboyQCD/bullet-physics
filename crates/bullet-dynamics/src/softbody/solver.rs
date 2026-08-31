@@ -3,10 +3,12 @@
 //! functions (phase A: links only; contacts and anchors arrive with the
 //! collision phase — see `docs/softbody.md` §10).
 
-use bullet_math::{Real, Vector3};
+use bullet_math::{Aabb, Real, Vector3};
 
 use super::body::SoftBody;
+use super::collide::impulse_matrix;
 use super::config::PSolverKind;
+use crate::body::RigidBody;
 
 /// The bullet-source epsilon gating the link position solve
 /// (`l.m_c1 + len > SIMD_EPSILON`): below it the pair is treated as
@@ -15,6 +17,13 @@ use super::config::PSolverKind;
 const LINK_EPSILON: Real = 2.2e-16;
 #[cfg(not(feature = "f64"))]
 const LINK_EPSILON: Real = 1.19e-7;
+
+/// `dn <= SIMD_EPSILON` gates the rigid-contact solve (Bullet's
+/// `PSolve_RContacts`); precision-dependent like every Bullet epsilon.
+#[cfg(feature = "f64")]
+const CONTACT_EPSILON: Real = 2.2e-16;
+#[cfg(not(feature = "f64"))]
+const CONTACT_EPSILON: Real = 1.19e-7;
 
 impl SoftBody {
     /// Integrate the nodes to their predicted positions under gravity and
@@ -64,19 +73,57 @@ impl SoftBody {
         // the pose match and the contact clear — those arrive with their
         // phases; the world-space bounds are shared by all of them).
         self.update_bounds();
+
+        // Nodes tree (Bullet's `m_ndbvt.update(leaf, FromCR(x, radmrg),
+        // v * velmrg, updmrg)`): the fat leaf absorbs the step's motion, so
+        // resting nodes cost nothing.
+        let radmrg = self.sst.radmrg;
+        let velmrg = self.sst.velmrg;
+        let updmrg = self.sst.updmrg;
+        for i in 0..self.nodes.len() {
+            let (x, v, leaf) = {
+                let n = &self.nodes[i];
+                (n.x, n.v, n.leaf)
+            };
+            let pad = Vector3::splat(radmrg);
+            let volume = Aabb::new(x - pad, x + pad);
+            self.ndbvt.update_fat(leaf, volume, v * velmrg, updmrg);
+        }
+        self.ndbvt.optimize_incremental(1);
+
+        // Clear contacts (Bullet resizes m_rcontacts/m_scontacts to zero at
+        // the end of predictMotion).
+        self.rcontacts.clear();
     }
 
     /// Solve the constraint set (Bullet's `solveConstraints`): assemble the
     /// per-solve link/anchor constants, run the velocity sequence, the
     /// position sequence, and the drift sequence, then write the velocities
-    /// back from the corrected positions.
-    pub fn solve_constraints(&mut self) {
+    /// back from the corrected positions. `bodies` is the owning world's
+    /// rigid-body slice (anchor preparation and contact impulses reach into
+    /// it, exactly like Bullet's `btRigidBody::applyImpulse` calls).
+    pub fn solve_constraints(&mut self, bodies: &mut [RigidBody]) {
         // Prepare links: gradient c3 = q1 - q0 and c2 = 1/(|c3|^2 * c0).
         for l in &mut self.links {
             l.c3 = self.nodes[l.n[1]].q - self.nodes[l.n[0]].q;
             l.c2 = 1.0 / (l.c3.length_squared() * l.c0);
         }
-        // Anchors prepare here against their rigid body (phase B).
+        // Prepare anchors (Bullet: impulse matrix per anchor + activate the
+        // body so a sleeping anchor target takes part).
+        for a in &mut self.anchors {
+            let body = &mut bodies[a.body];
+            let ra = body.orientation * a.local;
+            a.c0 = impulse_matrix(
+                self.sst.sdt,
+                self.nodes[a.node].im,
+                body.inv_mass(),
+                &body.inv_inertia_world(),
+                ra,
+            );
+            a.c1 = ra;
+            a.c2 = self.sst.sdt * self.nodes[a.node].im;
+            body.activate();
+        }
 
         let sdt = self.sst.sdt;
 
@@ -101,7 +148,7 @@ impl SoftBody {
                 let ti = isolve as Real / piterations;
                 for k in 0..self.cfg.psequence.len() {
                     let kind = self.cfg.psequence[k];
-                    self.run_psolver(kind, 1.0, ti);
+                    self.run_psolver(kind, 1.0, ti, bodies);
                 }
             }
             let vc = self.sst.isdt * (1.0 - self.cfg.k_dp);
@@ -120,7 +167,7 @@ impl SoftBody {
             for _ in 0..self.cfg.diterations {
                 for k in 0..self.cfg.dsequence.len() {
                     let kind = self.cfg.dsequence[k];
-                    self.run_psolver(kind, 1.0, 0.0);
+                    self.run_psolver(kind, 1.0, 0.0, bodies);
                 }
             }
             for n in &mut self.nodes {
@@ -131,11 +178,11 @@ impl SoftBody {
 
     /// Run the position kernel sequence for `iterations` rounds without the
     /// velocity writeback (Bullet's `staticSolve`, used by refine).
-    pub fn static_solve(&mut self, iterations: u32) {
+    pub fn static_solve(&mut self, iterations: u32, bodies: &mut [RigidBody]) {
         for _ in 0..iterations {
             for k in 0..self.cfg.psequence.len() {
                 let kind = self.cfg.psequence[k];
-                self.run_psolver(kind, 1.0, 0.0);
+                self.run_psolver(kind, 1.0, 0.0, bodies);
             }
         }
     }
@@ -170,13 +217,14 @@ impl SoftBody {
         }
     }
 
-    fn run_psolver(&mut self, kind: PSolverKind, kst: Real, ti: Real) {
+    fn run_psolver(&mut self, kind: PSolverKind, kst: Real, ti: Real, bodies: &mut [RigidBody]) {
         match kind {
             PSolverKind::Linear => self.solve_links(kst),
-            // Anchors, rigid contacts and soft contacts are filled by the
-            // collision phase; with no data they are no-ops.
-            PSolverKind::Anchors | PSolverKind::RContacts | PSolverKind::SContacts => {
-                let _ = (kst, ti);
+            PSolverKind::Anchors => self.solve_anchors(kst, bodies),
+            PSolverKind::RContacts => self.solve_rigid_contacts(kst, bodies),
+            // Soft contacts arrive with the soft-soft phase.
+            PSolverKind::SContacts => {
+                let _ = ti;
             }
         }
     }
@@ -220,6 +268,77 @@ impl SoftBody {
             let step_b = link.c3 * (j * self.nodes[ib].im);
             self.nodes[ia].v += step_a;
             self.nodes[ib].v -= step_b;
+        }
+    }
+
+    /// Pull anchored nodes onto their rigid bodies (Bullet's
+    /// `PSolve_Anchors`): `vr = (va - vb) + (wa - x) * kAHR`,
+    /// `impulse = c0 * vr * influence`, node moved by `impulse * c2` and
+    /// the body receiving `-impulse` at the anchor.
+    fn solve_anchors(&mut self, kst: Real, bodies: &mut [RigidBody]) {
+        let k_ahr = self.cfg.k_ahr * kst;
+        let sdt = self.sst.sdt;
+        for a in 0..self.anchors.len() {
+            let (node, body_idx, local, influence, c0, c1, c2) = {
+                let a = &self.anchors[a];
+                (a.node, a.body, a.local, a.influence, a.c0, a.c1, a.c2)
+            };
+            let body = &mut bodies[body_idx];
+            let wa = body.position + body.orientation * local;
+            let va = body.velocity_at_local_point(c1) * sdt;
+            let (x, q) = {
+                let n = &self.nodes[node];
+                (n.x, n.q)
+            };
+            let vb = x - q;
+            let vr = (va - vb) + (wa - x) * k_ahr;
+            let impulse = c0 * vr * influence;
+            self.nodes[node].x += impulse * c2;
+            body.apply_impulse(-impulse, c1);
+        }
+    }
+
+    /// Solve the rigid contacts (Bullet's `PSolve_RContacts`): approaching
+    /// nodes (`dn <= EPS`) get the impulse-matrix correction
+    /// `c0 * ((vr - fv*c3 + n*(dp*c4)) * kst)` with the depth clamp
+    /// `dp = min(dot(x, n) + offset, margin)`, the node moves by
+    /// `impulse * c2` and the body receives `+impulse` at the contact
+    /// anchor (sign-flipped vs the anchor — the source is written that way).
+    fn solve_rigid_contacts(&mut self, kst: Real, bodies: &mut [RigidBody]) {
+        let sdt = self.sst.sdt;
+        let mrg = self.margin;
+        for c in 0..self.rcontacts.len() {
+            let (node, body_idx, c0, c1, c2, c3, c4, normal, offset) = {
+                let c = &self.rcontacts[c];
+                (
+                    c.node,
+                    c.cti.body,
+                    c.c0,
+                    c.c1,
+                    c.c2,
+                    c.c3,
+                    c.c4,
+                    c.cti.normal,
+                    c.cti.offset,
+                )
+            };
+            let body = &mut bodies[body_idx];
+            let va = body.velocity_at_local_point(c1) * sdt;
+            let (x, q) = {
+                let n = &self.nodes[node];
+                (n.x, n.q)
+            };
+            let vb = x - q;
+            let vr = vb - va;
+            let dn = vr.dot(normal);
+            if dn > CONTACT_EPSILON {
+                continue;
+            }
+            let dp = (x.dot(normal) + offset).min(mrg);
+            let fv = vr - normal * dn;
+            let impulse = c0 * ((vr - fv * c3 + normal * (dp * c4)) * kst);
+            self.nodes[node].x -= impulse * c2;
+            body.apply_impulse(impulse, c1);
         }
     }
 }

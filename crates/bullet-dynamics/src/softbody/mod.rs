@@ -15,6 +15,7 @@
 //! `btSoftRigidDynamicsWorld`.
 
 pub mod body;
+pub mod collide;
 pub mod config;
 pub mod helpers;
 pub mod solver;
@@ -22,6 +23,7 @@ pub mod solver;
 mod tests;
 
 pub use body::{Link, Material, Node, SoftBody};
+pub use collide::{Anchor, Cti, RContact};
 pub use config::{
     AeroModel, Config, PSolverKind, SoftCollision, SolverPreset, SolverState, VSolverKind,
 };

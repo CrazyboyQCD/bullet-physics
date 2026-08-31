@@ -8,7 +8,7 @@ mod dbvt;
 
 pub use axis_sweep3::AxisSweep3;
 pub use brute_force::BruteForceBroadPhase;
-pub use dbvt::DbvtBroadPhase;
+pub use dbvt::{DbvtBroadPhase, DbvtTree};
 
 /// Selectable broad-phase backend: an enum dispatch (no `dyn` on the hot
 /// path) so a world can be built with either structure. `AxisSweep3` is the

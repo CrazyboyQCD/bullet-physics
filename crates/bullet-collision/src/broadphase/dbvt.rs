@@ -51,7 +51,10 @@ enum NodeKind {
 
 /// One dynamic-or-fixed AABB tree (Bullet's `btDbvt`), array-based: nodes
 /// live in a slab with a free list and all references are slab indices.
-struct Tree {
+/// Leaves carry an arbitrary `usize` payload — the broad phase stores proxy
+/// ids, the soft bodies store node/face/cluster indices (Bullet's `m_ndbvt`/
+/// `m_fdbvt`/`m_cdbvt` are plain `btDbvt`s too).
+pub struct DbvtTree {
     nodes: Vec<Option<Node>>,
     free: Vec<u32>,
     root: u32,
@@ -74,8 +77,25 @@ fn proximity(a: &Aabb, b: &Aabb) -> Real {
     d.x.abs() + d.y.abs() + d.z.abs()
 }
 
-impl Tree {
-    fn new() -> Self {
+impl DbvtTree {
+    /// Leaf/node index meaning "null pointer".
+    pub const NONE: u32 = u32::MAX;
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.root == Self::NONE
+    }
+
+    /// Drop every leaf (Bullet's `btDbvt::clear`); the node slab keeps its
+    /// capacity for the next inserts.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.free.clear();
+        self.root = Self::NONE;
+        self.leaves = 0;
+    }
+
+    pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
             free: Vec::new(),
@@ -247,15 +267,15 @@ impl Tree {
     }
 
     /// Bullet's `insert`.
-    fn insert(&mut self, volume: Aabb, proxy: usize) -> u32 {
-        let leaf = self.alloc(NONE, volume, NodeKind::Leaf { proxy });
+    pub fn insert(&mut self, volume: Aabb, payload: usize) -> u32 {
+        let leaf = self.alloc(NONE, volume, NodeKind::Leaf { proxy: payload });
         self.insert_leaf(self.root, leaf);
         self.leaves += 1;
         leaf
     }
 
     /// Bullet's `remove`.
-    fn remove(&mut self, leaf: u32) {
+    pub fn remove(&mut self, leaf: u32) {
         self.remove_leaf(leaf);
         self.release(leaf);
         self.leaves -= 1;
@@ -287,7 +307,7 @@ impl Tree {
     /// fat leaf volume still contains the exact volume; otherwise grow the
     /// volume by `margin` and along `velocity` and reinsert. Returns whether
     /// the tree changed (the caller then re-collides the leaf).
-    fn update_fat(
+    pub fn update_fat(
         &mut self,
         leaf: u32,
         volume: Aabb,
@@ -357,7 +377,7 @@ impl Tree {
 
     /// Bullet's `optimizeIncremental`: walk a pseudo-random path to a leaf,
     /// rotating on the way, and reinsert that leaf two levels up.
-    fn optimize_incremental(&mut self, passes: u32) {
+    pub fn optimize_incremental(&mut self, passes: u32) {
         if self.root == NONE || passes == 0 {
             return;
         }
@@ -377,8 +397,8 @@ impl Tree {
     }
 
     /// Bullet's `collideTV`: visit every leaf whose volume overlaps
-    /// `volume` and report its proxy.
-    fn for_each_overlapping(&self, volume: &Aabb, out: &mut Vec<usize>) {
+    /// `volume` and report its payload.
+    pub fn for_each_overlapping(&self, volume: &Aabb, out: &mut Vec<usize>) {
         self.walk_overlapping(self.root, volume, out);
     }
 
@@ -419,6 +439,12 @@ impl Tree {
     }
 }
 
+impl Default for DbvtTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Broad-phase proxy (Bullet's `btDbvtProxy`): the exact (world-inflated)
 /// AABB, the owning leaf, the stage slot, and the intrusive stage-list
 /// links.
@@ -440,10 +466,10 @@ struct Proxy {
 pub struct DbvtBroadPhase {
     proxies: Vec<Option<Proxy>>,
     /// Moving proxies (Bullet's `m_sets[DYNAMIC_SET]`).
-    dynamic: Tree,
+    dynamic: DbvtTree,
     /// Proxies resting for two consecutive steps (Bullet's
     /// `m_sets[FIXED_SET]`); any `set_aabb` moves them back.
-    fixed: Tree,
+    fixed: DbvtTree,
     /// Stage list heads (proxy ids), `[stage0, stage1, fixed]`.
     stage_roots: [u32; STAGE_COUNT + 1],
     stage_current: u8,
@@ -475,8 +501,8 @@ impl DbvtBroadPhase {
     pub fn new() -> Self {
         Self {
             proxies: Vec::new(),
-            dynamic: Tree::new(),
-            fixed: Tree::new(),
+            dynamic: DbvtTree::new(),
+            fixed: DbvtTree::new(),
             stage_roots: [NONE; STAGE_COUNT + 1],
             stage_current: 0,
             fixed_left: 0,

@@ -5,8 +5,10 @@
 //! element stores node indices instead (Bullet's own serialization path
 //! `pointersToIndices` proves the index encoding is equivalent).
 
-use bullet_math::{Real, Vector3};
+use bullet_collision::broadphase::DbvtTree;
+use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
 
+use super::collide::{Anchor, RContact};
 use super::config::{Config, SolverState};
 
 /// Linear/angular/volume stiffness coefficients of a material (Bullet's
@@ -48,6 +50,8 @@ pub struct Node {
     pub area: Real,
     /// Whether the node is anchored to a rigid body.
     pub battach: bool,
+    /// Node-tree leaf handle (`DbvtTree::NONE` until inserted).
+    pub leaf: u32,
 }
 
 impl Node {
@@ -61,6 +65,7 @@ impl Node {
             im: if mass > 0.0 { 1.0 / mass } else { 0.0 },
             area: 0.0,
             battach: false,
+            leaf: DbvtTree::NONE,
         }
     }
 }
@@ -111,6 +116,14 @@ pub struct SoftBody {
     pub links: Vec<Link>,
     /// Materials.
     pub materials: Vec<Material>,
+    /// Node AABB tree (Bullet's `m_ndbvt`): leaves keyed by node index,
+    /// volumes padded by the collision margin and the step's velocity.
+    pub ndbvt: DbvtTree,
+    /// Contacts against rigid bodies this step (Bullet's `m_rcontacts`,
+    /// cleared in `predict_motion`, filled by the collision phase).
+    pub rcontacts: Vec<RContact>,
+    /// Rigid-body anchors (Bullet's `m_anchors`).
+    pub anchors: Vec<Anchor>,
     /// World-space bounds (nodes +/- margin), refreshed in `predict_motion`.
     pub bounds: [Vector3; 2],
     /// Whether runtime constants must be refreshed at the next
@@ -140,12 +153,19 @@ impl SoftBody {
             nodes: Vec::with_capacity(positions.len()),
             links: Vec::new(),
             materials: vec![Material::default()],
+            ndbvt: DbvtTree::new(),
+            rcontacts: Vec::new(),
+            anchors: Vec::new(),
             bounds: [Vector3::ZERO, Vector3::ZERO],
             update_rt_cst: true,
             rest_length_scale: 1.0,
         };
-        for (&x, &m) in positions.iter().zip(masses) {
+        for (i, (&x, &m)) in positions.iter().zip(masses).enumerate() {
             body.nodes.push(Node::new(x, m));
+            // Bullet's appendNode: FromCR(x, margin) — a box around the
+            // point padded by the collision margin.
+            let pad = Vector3::splat(body.margin);
+            body.nodes[i].leaf = body.ndbvt.insert(Aabb::new(x - pad, x + pad), i);
         }
         body
     }
@@ -291,6 +311,45 @@ impl SoftBody {
             let m = &self.materials[l.mat];
             l.c0 = (self.nodes[l.n[0]].im + self.nodes[l.n[1]].im) / m.k_lst;
         }
+    }
+
+    /// Pin a node to a rigid body at its current world position (Bullet's
+    /// `appendAnchor(node, body, disableCollisions, influence)`; the anchor
+    /// local point is the node position mapped into body space). The body
+    /// pose is passed by value so callers can hand over world borrows
+    /// piecewise.
+    pub fn append_anchor(
+        &mut self,
+        node: usize,
+        body: usize,
+        body_position: Vector3,
+        body_orientation: Quaternion,
+        influence: Real,
+    ) {
+        // local = R^T * (x - body position) (Bullet's frame-inverted map).
+        let local = body_orientation.inverse() * (self.nodes[node].x - body_position);
+        self.append_anchor_local(node, body, local, influence);
+    }
+
+    /// Pin a node to a rigid body at an explicit body-space pivot (Bullet's
+    /// `appendAnchor(node, body, localPivot, ...)`).
+    pub fn append_anchor_local(&mut self, node: usize, body: usize, local: Vector3, influence: Real) {
+        self.nodes[node].battach = true;
+        self.anchors.push(Anchor {
+            node,
+            body,
+            local,
+            influence,
+            c0: Matrix3::ZERO,
+            c1: Vector3::ZERO,
+            c2: 0.0,
+        });
+    }
+
+    /// Remove every anchor of one node (Bullet's `removeAnchor`).
+    pub fn remove_anchor(&mut self, node: usize) {
+        self.anchors.retain(|a| a.node != node);
+        self.nodes[node].battach = false;
     }
 
     /// Shuffle the constraints with Bullet's built-in deterministic LCG

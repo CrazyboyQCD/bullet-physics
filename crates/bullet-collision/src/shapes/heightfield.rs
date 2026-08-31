@@ -45,7 +45,7 @@ impl Heightfield {
 
     /// The internal triangle mesh (shared narrow-phase path).
     #[inline]
-    pub(crate) fn as_mesh(&self) -> &TriangleMesh {
+    pub fn as_mesh(&self) -> &TriangleMesh {
         &self.mesh
     }
 

@@ -88,7 +88,7 @@ impl TriangleMesh {
 
     /// Triangle indices whose AABB overlaps `aabb` (local space).
     #[inline]
-    pub(crate) fn triangles_in_aabb(&self, aabb: &Aabb) -> Vec<u32> {
+    pub fn triangles_in_aabb(&self, aabb: &Aabb) -> Vec<u32> {
         let mut out = Vec::new();
         self.bvh.triangles_in_aabb(aabb, &mut out);
         out

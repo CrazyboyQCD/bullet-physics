@@ -192,13 +192,24 @@ Bullet HullLibrary 可能不同 → links 生成顺序不同 → PBD 求解顺�
   **实现勘误**：①`randomizeConstraints` 是内建 LCG 非 rand()（§8 已修正，无需 MSVC rand 复刻）；
   ②`updateLinkConstants` 的 `c0 = (im0+im1) / kLST`（除法，§6 表已修正）；
   ③`setTotalMass` 缩放为 `im *= total/mass`。
-- **Phase B：SDF_RS 碰撞 + 锚 + broadphase/island 集成**（~900 行）
-  DbvtTree 泛化重构（collide_tt；broadphase 输出中立验证）；check_contact（GJK 点距/plane/静态 mesh）；
-  SDF_RS→RContact；PSolve_RContacts/PSolve_Anchors；add_soft_body/proxy/owner 分流/4b 岛/5s 碰撞插入；
-  软体 raycast（fdbvt 叶求交，`rayTest` 语义）；remove_soft_body 级联（锚）。demo：`softbody_rope_ground`
-  （绳落 plane settle）、`softbody_cloth_ground`（links-only patch 落地+落球压坑）。
-  **probe 启动**：`tools/softbody_probe.cpp` + `examples/softbody_probe.rs`——rope_pendulum（无碰撞动力学对照）、
-  rope_ground（SDF 偏差量化）、cloth_plane。台账 bullet-compare.md 新分区。
+- **Phase B：SDF_RS 碰撞 + 锚 + broadphase/island 集成** ✅ 核心完成（2026-08-31 深夜三；probe 后置见下）
+  DbvtTree 从 dbvt.rs 泛化导出（Tree→pub DbvtTree，insert/remove/update_fat/for_each_overlapping/
+  optimize_incremental/clear 公开——纯可见性重构，broadphase 逻辑零变）；check_contact（plane 解析/
+  凸 GJK 零球点距/静态 mesh·heightfield 点-三角形最近）；SDF_RS→RContact；PSolve_RContacts/PSolve_Anchors
+  （solve_constraints 传 &mut bodies 字段级拆分借用）；add_soft_body proxy/ProxyOwner::Soft 分流/
+  4b 岛 soft 恒醒钉醒/5s 碰撞/3s bounds 刷 proxy/remove_soft_body + remove_body 锚级联。
+  demo：`softbody_rope_ground`（绳落 plane settle 带内 0.149/绳跨球不穿 1.23/双锚 cargo 摆荡保持）。
+  **待办（B 后半）**：①probe 启动（tools/softbody_probe.cpp + twin——rope_pendulum/rope_ground/cloth_plane，
+  SDF 精确距离偏差量化）；②软体 raycast（需 fdbvt faces——挪到 C 期）。
+  **实现要点/勘误**：①Bullet 的 `timemargin` 是死代码（wtr 与 ctr 同一对象）→ dynmargin=stamargin；
+  ②`dst = 距离 − margin` 语义下 `offset = dst − dot(n,x)`、PSolve 的 dp 即检测时 dst；③**隧穿边界：
+  margin 带必须 ≥ 单步位移**（v·dt）——Bullet 0.25 默认即为此设计（15 m/s 上限），测试 margin 0.05+
+  7.7 m/s 落速必穿（Bullet 同款物理限制非 bug）；④PBD 链欠收敛拉伸（悬挂 31 节点链 4 迭代 ~60% 伸长）
+  与锚摆荡 33% 拉伸是 Bullet 同款特征——断言按形态学特征设；⑤**发现既有 rigid bug（非本轮引入）**：
+  宽扁箱（如 1×0.1×1）落 plane 单角接触→自旋→下沉/穿透，HEAD 复现（立方箱正常、parity 场景未覆盖
+  扁箱），已记 ignored 测试 + HANDOFF 待办。
+  验收：check.py 全绿（f32/f64 + 11 demo）、clippy 双 feature 清零、parity 6 场景逐数字一致、
+  dbvt 13 测试绿（mb 路径 diff 为空逻辑论证跳过）。
 - **Phase C：Faces + 布料现象**（~800 行）
   faces/update_normals/update_area；aero（V_Point/V_TwoSided(+LiftDrag)/V_OneSided/F_* 7 模型）；
   pressure/volume（getVolume 散度定理、updatePose）；PSolve_SContacts + VF_SS（soft-soft 碰撞，5s 扩展）；

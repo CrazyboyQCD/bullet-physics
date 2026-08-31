@@ -191,12 +191,15 @@ struct ColliderEntry {
     proxy: Option<usize>,
 }
 
-/// What a broad-phase proxy slot belongs to (rigid bodies and multibody
-/// link colliders share one proxy index space).
+/// What a broad-phase proxy slot belongs to (rigid bodies, multibody link
+/// colliders and soft bodies share one proxy index space).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProxyOwner {
     Body(usize),
     Collider(usize),
+    /// A whole soft body (one proxy over its node hull, Bullet's soft-body
+    /// collision object with the `m_bounds` AABB).
+    Soft(usize),
     /// A destroyed proxy slot (see [`PhysicsWorld::remove_body`]). The
     /// broad phases recycle freed slots, so the entry is cleared until
     /// `create_proxy` hands the slot out again.
@@ -283,9 +286,14 @@ pub struct PhysicsWorld {
     /// snapshot (kept across steps so the solve sweeps do not allocate).
     mb_row_scratch: Vec<Real>,
     /// Position-based soft bodies (Bullet's `btSoftBody` list of
-    /// `btSoftRigidDynamicsWorld`; phase A — no broad-phase proxies or
-    /// contacts yet, see `docs/softbody.md` §4/§10).
+    /// `btSoftRigidDynamicsWorld`); each body owns one broad-phase proxy
+    /// over its node-hull bounds (phase B: SDF_RS contacts and anchors;
+    /// soft-soft and clusters follow — see `docs/softbody.md` §4/§10).
     soft_bodies: Vec<SoftBody>,
+    /// Broad-phase proxy of each soft body.
+    soft_proxies: Vec<usize>,
+    /// Recycled leaf scratch for the soft-body SDF_RS queries.
+    soft_scratch: Vec<usize>,
     /// Cumulative per-stage step timings; zero until enabled (see
     /// [`PhysicsWorld::enable_step_timing`]).
     step_timings: StepTimings,
@@ -334,6 +342,8 @@ impl PhysicsWorld {
             mb_contact_rows: Vec::new(),
             mb_row_scratch: Vec::new(),
             soft_bodies: Vec::new(),
+            soft_proxies: Vec::new(),
+            soft_scratch: Vec::new(),
             step_timings: StepTimings::default(),
         }
     }
@@ -448,6 +458,26 @@ impl PhysicsWorld {
             .retain(|c| c.body_a() != index && c.body_b() != index);
         self.mb_constraints
             .retain(|c| c.rigid_body_b() != Some(index));
+        // Soft-body anchors pinning this body die with it (the anchors'
+        // body indices would dangle, exactly like the joint cascade above —
+        // a recorded deviation: Bullet leaves the user to remove them).
+        for sb in &mut self.soft_bodies {
+            let mut unanchored = false;
+            sb.anchors.retain(|a| {
+                let keep = a.body != index;
+                unanchored |= !keep;
+                keep
+            });
+            if unanchored {
+                // Recheck battach: only clear it when no anchor of that
+                // node survived (Bullet's removeAnchor semantics).
+                for i in 0..sb.nodes.len() {
+                    if !sb.anchors.iter().any(|a| a.node == i) {
+                        sb.nodes[i].battach = false;
+                    }
+                }
+            }
+        }
         self.no_collision_pairs.clear();
         for c in &self.constraints {
             if c.disable_collisions() {
@@ -493,11 +523,44 @@ impl PhysicsWorld {
     }
 
     /// Add a soft body (Bullet's `btSoftRigidDynamicsWorld::addSoftBody`)
-    /// and return its index. Phase A: the body steps through
-    /// predict/solve but does not join the broad phase or collide yet.
-    pub fn add_soft_body(&mut self, body: SoftBody) -> usize {
+    /// and return its index. The body owns one broad-phase proxy over its
+    /// node-hull bounds and collides with rigid bodies through the SDF_RS
+    /// node-contacts (phase B).
+    pub fn add_soft_body(&mut self, mut body: SoftBody) -> usize {
+        body.update_bounds();
+        let aabb = Aabb::new(body.bounds[0], body.bounds[1]);
+        let proxy = self.broadphase.create_proxy(aabb);
+        // Broad-phase slots are recycled after removals, so this covers
+        // both a fresh slot and a recycled Free one (same pattern as
+        // `add_body`).
+        if proxy == self.proxy_owners.len() {
+            self.proxy_owners.push(ProxyOwner::Soft(self.soft_bodies.len()));
+        } else {
+            self.proxy_owners[proxy] = ProxyOwner::Soft(self.soft_bodies.len());
+        }
+        let index = self.soft_bodies.len();
         self.soft_bodies.push(body);
-        self.soft_bodies.len() - 1
+        self.soft_proxies.push(proxy);
+        index
+    }
+
+    /// Remove a soft body: its proxy is destroyed (slot recycled) and any
+    /// anchors of *rigid* bodies pinning it become inert (Bullet removes
+    /// the soft body's anchors with it).
+    pub fn remove_soft_body(&mut self, index: usize) {
+        let proxy = self.soft_proxies[index];
+        self.broadphase.destroy_proxy(proxy);
+        self.proxy_owners[proxy] = ProxyOwner::Free;
+        self.soft_bodies.remove(index);
+        self.soft_proxies.remove(index);
+        // Reindex the surviving owners above the removed slot.
+        for p in &self.soft_proxies {
+            if let ProxyOwner::Soft(i) = &mut self.proxy_owners[*p]
+                && *i > index
+            {
+                *i -= 1;
+            }
+        }
     }
 
     pub fn soft_body(&self, index: usize) -> &SoftBody {
@@ -682,7 +745,7 @@ impl PhysicsWorld {
             .into_iter()
             .filter_map(|p| match self.proxy_owners[p] {
                 ProxyOwner::Body(i) => Some(i),
-                ProxyOwner::Collider(_) | ProxyOwner::Free => None,
+                ProxyOwner::Collider(_) | ProxyOwner::Soft(_) | ProxyOwner::Free => None,
             })
             .collect()
     }
@@ -911,6 +974,17 @@ impl PhysicsWorld {
             .expanded(BROADPHASE_AABB_MARGIN);
             self.broadphase.set_aabb(proxy, aabb);
         }
+
+        // 3s. Soft-body proxies follow the node-hull bounds computed by
+        // this step's predict (Bullet's `updateSingleAabb` on the soft
+        // body's collision object; soft bodies never sleep, so every proxy
+        // refreshes — a resting body's bounds are unchanged and the
+        // broad-phase absorbs the no-op).
+        for (i, proxy) in self.soft_proxies.iter().enumerate() {
+            let bounds = self.soft_bodies[i].bounds;
+            self.broadphase
+                .set_aabb(*proxy, Aabb::new(bounds[0], bounds[1]));
+        }
         clk.mark(&mut self.step_timings, StepStage::UpdateAabbs);
 
         // 4. Broad phase: candidate overlapping pairs.
@@ -946,6 +1020,27 @@ impl PhysicsWorld {
         self.prev_simulate = simulate;
         for &(pi, pj) in &pairs {
             let (owner_a, owner_b) = (self.proxy_owners[pi], self.proxy_owners[pj]);
+            // 5s. Soft-body pairs (Bullet's soft collision algorithms,
+            // dispatched from the same pair pass): soft-vs-rigid runs the
+            // SDF_RS node contacts against the current rigid pose (the
+            // rigid solve has not run yet, matching Bullet's detection
+            // inside `performDiscreteCollisionDetection`); soft-vs-soft
+            // (VF_SS) arrives with the cloth phase, soft-vs-link with the
+            // multibody phase.
+            match (owner_a, owner_b) {
+                (ProxyOwner::Soft(s), ProxyOwner::Body(j)) => {
+                    self.soft_vs_rigid(s, j);
+                    continue;
+                }
+                (ProxyOwner::Body(j), ProxyOwner::Soft(s)) => {
+                    self.soft_vs_rigid(s, j);
+                    continue;
+                }
+                (ProxyOwner::Soft(_), ProxyOwner::Soft(_))
+                | (ProxyOwner::Soft(_), ProxyOwner::Collider(_))
+                | (ProxyOwner::Collider(_), ProxyOwner::Soft(_)) => continue,
+                _ => {}
+            }
             let (ProxyOwner::Body(i), ProxyOwner::Body(j)) = (owner_a, owner_b) else {
                 // Multibody link-collider pair (mixed or collider-collider):
                 // run the narrow phase at the current FK pose and collect the
@@ -987,7 +1082,7 @@ impl PhysicsWorld {
                                 col.restitution,
                             ))
                         }
-                        ProxyOwner::Free => None,
+                        ProxyOwner::Soft(_) | ProxyOwner::Free => None,
                     }
                 };
                 let Some((side_a, shape_a, pa, qa, fa, ra)) = resolve(owner_a) else {
@@ -1292,8 +1387,9 @@ impl PhysicsWorld {
         // stepped (solved *and* integrated), so contacts read the solved
         // rigid velocities and any impulses applied to rigid bodies land on
         // the next step — kept identical here (see `docs/softbody.md` §0/§4).
-        for sb in &mut self.soft_bodies {
-            sb.solve_constraints();
+        let (soft_bodies, bodies) = (&mut self.soft_bodies, &mut self.bodies);
+        for sb in soft_bodies {
+            sb.solve_constraints(bodies);
         }
 
         // 8. Clear accumulated forces for the next step.
@@ -1314,6 +1410,29 @@ impl PhysicsWorld {
         clk.mark(&mut self.step_timings, StepStage::IntegratePositions);
     }
 
+    /// Soft-vs-rigid collision for one broad-phase pair (Bullet's
+    /// `btSoftRigidCollisionAlgorithm` -> `defaultCollisionHandler`): the
+    /// soft body's node tree is queried against the rigid body's
+    /// margin-padded AABB and every contacting node lands in the soft
+    /// body's `rcontacts` (solved at stage 7s). Detection uses the rigid
+    /// body's *current* pose — the rigid solve has not run yet, matching
+    /// Bullet's detection inside `performDiscreteCollisionDetection`.
+    fn soft_vs_rigid(&mut self, soft: usize, rigid: usize) {
+        // A sleeping island's pair is skipped: nothing on the rigid side
+        // moves and the soft body's nodes were at rest relative to it (the
+        // island pass would have woken the body otherwise — a soft body in
+        // the island pins it awake, so a sleeping rigid island can only be
+        // paired while the soft body itself is out of reach).
+        if !self.bodies[rigid].is_active() && !self.bodies[rigid].is_static() {
+            // Dynamic-but-sleeping: the soft body would have woken it in
+            // 4b if they truly overlapped; the pair is a broad-phase
+            // margin artifact.
+            return;
+        }
+        let (soft_bodies, bodies) = (&mut self.soft_bodies, &self.bodies);
+        soft_bodies[soft].collide_rigid(rigid, &bodies[rigid], &mut self.soft_scratch);
+    }
+
     /// Build the per-step union-find islands and apply the island sleep/wake
     /// decision (Bullet's `calculateSimulationIslands` + the activation pass
     /// of `btSimulationIslandManager::buildIslands`; phase D design
@@ -1331,13 +1450,19 @@ impl PhysicsWorld {
     /// sleep as a unit.
     fn step_islands(&mut self, pairs: &[(usize, usize)]) {
         let num_bodies = self.bodies.len();
-        let total = num_bodies + self.multibodies.len();
+        let num_mbs = self.multibodies.len();
+        let soft_base = num_bodies + num_mbs;
+        let total = soft_base + self.soft_bodies.len();
         let mut uf = UnionFind::new(total);
 
         // Proxy-pair owners -> island nodes (None: not an island member).
+        // A soft body is one node (Bullet unions the soft body's single
+        // collision object the same way) and never sleeps, so any island
+        // touching it stays awake.
         let node_of = |world: &Self, owner: ProxyOwner| match owner {
             ProxyOwner::Body(i) => world.bodies[i].participates_in_islands().then_some(i),
             ProxyOwner::Collider(e) => Some(num_bodies + world.collider_entries[e].mb),
+            ProxyOwner::Soft(i) => Some(soft_base + i),
             ProxyOwner::Free => None,
         };
         for &(pi, pj) in pairs {
@@ -1385,13 +1510,18 @@ impl PhysicsWorld {
                 island_awake[uf.find(num_bodies + i)] = true;
             }
         }
+        // Soft bodies never sleep (Bullet's `updateActivationState` only
+        // walks the rigid list), so they pin their islands awake.
+        for i in 0..self.soft_bodies.len() {
+            island_awake[uf.find(soft_base + i)] = true;
+        }
 
         // Resolve every member's island state first (the decisions borrow
         // the union-find while applying them borrows the world).
         let body_awake: Vec<bool> = (0..num_bodies)
             .map(|i| island_awake[uf.find(i)])
             .collect();
-        let mb_awake: Vec<bool> = (0..self.multibodies.len())
+        let mb_awake: Vec<bool> = (0..num_mbs)
             .map(|i| island_awake[uf.find(num_bodies + i)])
             .collect();
         for (i, &awake) in body_awake.iter().enumerate() {

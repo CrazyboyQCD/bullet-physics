@@ -14,7 +14,7 @@ mod mesh_mesh;
 mod plane;
 mod sphere;
 
-pub use convex_sweep::{convex_cast, swept_sphere_cast, SweepHit};
+pub use convex_sweep::{convex_cast, point_triangle_distance, swept_sphere_cast, SweepHit};
 
 /// Detect collision between two shapes and generate a contact manifold.
 ///

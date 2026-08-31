@@ -202,7 +202,7 @@ where
 /// Squared distance from `point` to the triangle `a-b-c` and the vector from
 /// the closest point on the triangle toward `point` (Ericson's
 /// `ClosestPtPointTriangle`, Real-Time Collision Detection, 5.1.5).
-fn point_triangle_distance(point: Vector3, a: Vector3, b: Vector3, c: Vector3) -> (Real, Vector3) {
+pub fn point_triangle_distance(point: Vector3, a: Vector3, b: Vector3, c: Vector3) -> (Real, Vector3) {
     let ab = b - a;
     let ac = c - a;
     let ap = point - a;
