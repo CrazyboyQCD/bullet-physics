@@ -27,7 +27,7 @@
 use std::time::Instant;
 
 use bullet::dynamics::{MultiBody, PhysicsWorld, RigidBody, StepStage, STEP_STAGES};
-use bullet::math::{Quaternion, Real, Vector3};
+use bullet::math::{Quaternion, Real, Vector3, PI};
 use bullet::shapes::CollisionShape;
 use bullet::collision::broadphase::{BroadPhaseBackend, DbvtBroadPhase};
 
@@ -136,10 +136,45 @@ fn add_chains(world: &mut PhysicsWorld, c: &PerfChainSpec) {
     }
 }
 
+/// Deterministic per-frame arena tick (the `game_arena` script), mirroring
+/// the C++ runner's `SceneRun::step` formula for formula: a launcher ball
+/// every 30 frames plus the velocity-driven dozer. Runs before
+/// `step_simulation` so the solver sees the scripted frame.
+fn arena_tick(world: &mut PhysicsWorld, frame: u64) {
+    const DOZER: usize = 1; // bodies[1] is the mass-50 dozer sphere (json contract)
+    if frame.is_multiple_of(30) && frame < 610 {
+        let k = frame / 30;
+        let from = Vector3::new(0.0, 2.5, -8.0);
+        let target = Vector3::new(((k % 5) as Real - 2.0) * 0.6, 0.7, 0.0);
+        let dir = (target - from).normalize();
+        let ball = world.add_body(
+            RigidBody::new_dynamic(CollisionShape::sphere(0.25), from, 1.0).friction(0.5),
+        );
+        world.body_mut(ball).linear_velocity = dir * 12.0;
+    }
+    // Only x is overridden so y/z still solve naturally; activate() first -
+    // writing the velocity of a sleeping body would not wake it (and the
+    // wake propagates through contacts).
+    world.body_mut(DOZER).activate();
+    let vx = 4.0 * (2.0 * PI / 240.0) * (2.0 * PI * frame as Real / 240.0).cos();
+    world.body_mut(DOZER).linear_velocity.x = vx;
+}
+
+/// One scripted step: the arena tick (when the scene asks for it) plus the
+/// solver step, shared by every run mode so the workload is identical.
+fn step_once(world: &mut PhysicsWorld, spec: &PerfSceneSpec, frame: u64, dt: Real) {
+    if spec.arena_script {
+        arena_tick(world, frame);
+    }
+    world.step_simulation(dt);
+}
+
 fn run_scene(spec: &PerfSceneSpec, dt: Real) -> (std::time::Duration, std::time::Duration) {
     let mut world = build_world(spec);
+    let mut frame: u64 = 0;
     for _ in 0..spec.warmup {
-        world.step_simulation(dt);
+        step_once(&mut world, spec, frame, dt);
+        frame += 1;
     }
     let start = Instant::now();
     let mut last300_start = None;
@@ -147,7 +182,8 @@ fn run_scene(spec: &PerfSceneSpec, dt: Real) -> (std::time::Duration, std::time:
         if f + 300 == spec.frames {
             last300_start = Some(Instant::now());
         }
-        world.step_simulation(dt);
+        step_once(&mut world, spec, frame, dt);
+        frame += 1;
     }
     let total = start.elapsed();
     let last300 = last300_start.map_or(total, |t| t.elapsed());
@@ -156,12 +192,15 @@ fn run_scene(spec: &PerfSceneSpec, dt: Real) -> (std::time::Duration, std::time:
 
 fn run_stages(spec: &PerfSceneSpec, dt: Real) {
     let mut world = build_world(spec);
+    let mut frame: u64 = 0;
     for _ in 0..spec.warmup {
-        world.step_simulation(dt);
+        step_once(&mut world, spec, frame, dt);
+        frame += 1;
     }
     world.enable_step_timing();
     for _ in 0..spec.frames {
-        world.step_simulation(dt);
+        step_once(&mut world, spec, frame, dt);
+        frame += 1;
     }
     let t = world.step_timings();
     for stage in STEP_STAGES {
@@ -192,7 +231,7 @@ fn run_dump(spec: &PerfSceneSpec, dt: Real) {
     let mut world = build_world(spec);
     let frames = spec.warmup + spec.frames;
     for f in 0..frames {
-        world.step_simulation(dt);
+        step_once(&mut world, spec, f as u64, dt);
         if f % 5 == 0 || f == frames - 1 {
             let mut sum_y = 0.0f64;
             let mut sum_v = 0.0f64;

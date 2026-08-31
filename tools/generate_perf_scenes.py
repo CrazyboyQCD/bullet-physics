@@ -203,6 +203,7 @@ def gen_c(scenes):
         "  btScalar gravity[3];",
         "  btScalar bp_min[3], bp_max[3];  // btAxisSweep3 world extent hint",
         "  int bp_kind;                   // 0: btAxisSweep3, 1: btDbvtBroadphase",
+        "  int script;                    // 0: plain stepping, 1: arena tick (launcher + dozer)",
         "  int num_bodies;",
         "  const PerfBodySpec* bodies;",
         "  PerfChainSpec chains;",
@@ -258,7 +259,8 @@ def gen_c(scenes):
         hi = ", ".join(fmt(x) for x in sc["broadphase_aabb"][1])
         lines.append(f"static const PerfSceneSpec k{name} = {{\"{name}\", {dt_num}, {dt_den}, "
                      f"{sc['frames']}, {sc['warmup']}, {sc['iterations']}, {{{g}}}, "
-                     f"{{{lo}}}, {{{hi}}}, {1 if sc['broadphase'] == 'dbvt' else 0}, {len(bodies)}, k{name}_bodies, {chains}}};")
+                     f"{{{lo}}}, {{{hi}}}, {1 if sc['broadphase'] == 'dbvt' else 0}, "
+                     f"{1 if sc['script'] == 'arena' else 0}, {len(bodies)}, k{name}_bodies, {chains}}};")
         lines.append("")
     lines.append("static const PerfSceneSpec* kPerfScenes[] = {")
     for name in scenes:
@@ -313,6 +315,7 @@ def gen_rs(scenes):
         "    pub iterations: u32,",
         "    pub gravity: [f32; 3],",
         "    pub broadphase_dbvt: bool,",
+        "    pub arena_script: bool,",
         "    pub bodies: &'static [PerfBodySpec],",
         "    pub chains: Option<PerfChainSpec>,",
         "}",
@@ -362,6 +365,7 @@ def gen_rs(scenes):
         lines.append(f"        frames: {sc['frames']}, warmup: {sc['warmup']}, "
                      f"iterations: {sc['iterations']}, gravity: [{g}],")
         lines.append(f"        broadphase_dbvt: {'true' if sc['broadphase'] == 'dbvt' else 'false'},")
+        lines.append(f"        arena_script: {'true' if sc['script'] == 'arena' else 'false'},")
         lines.append("    }),")
     lines.append("];")
     lines.append("")
@@ -379,10 +383,23 @@ def validate(scenes):
         sc.setdefault("generators", [])
         sc.setdefault("broadphase", "sweep")
         sc.setdefault("broadphase_aabb", [[-50, -50, -50], [50, 50, 50]])
+        sc.setdefault("script", "none")
         if sc["broadphase"] not in ("sweep", "dbvt"):
             print(f"error: {name}: bad broadphase {sc['broadphase']!r} (want 'sweep' or 'dbvt')",
                   file=sys.stderr)
             return False
+        if sc["script"] not in ("none", "arena"):
+            print(f"error: {name}: bad script {sc['script']!r} (want 'none' or 'arena')",
+                  file=sys.stderr)
+            return False
+        if sc["script"] == "arena":
+            bodies = sc.get("bodies", [])
+            dozer = bodies[1] if len(bodies) > 1 else None
+            if (not dozer or dozer.get("mass") != 50
+                    or dozer.get("shape", {}).get("type") != "sphere"):
+                print(f"error: {name}: arena scripts expect bodies[1] to be the "
+                      "mass-50 dozer sphere", file=sys.stderr)
+                return False
         for b in sc["bodies"]:
             if b["shape"]["type"] not in SHAPE_TYPES:
                 print(f"error: {name}/{b['name']}: bad shape type {b['shape']['type']!r}",

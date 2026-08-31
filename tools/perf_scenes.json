@@ -186,6 +186,98 @@
           "shell_half": [0.35, 0.35, 0.35]
         }
       ]
+    },
+    "game_arena": {
+      "comment": "Game-realistic load profile: the point is not body count (the rain/stack scenes already cover 500-2000 bodies) but sustained activity - a launcher throws a ball into the box tower every 0.5 s (20 balls over the run) while a heavy driven ball (mass 50, body #1, velocity-scripted along x = 4*sin(2*pi*t/240)) plows back and forth through the props. Typical games keep ~100-300 active bodies; this runs ~67 initial props (48-box tower + 25 scattered boxes + 9 shells + 9 mixed props) growing to ~88 with the stream, so contacts stay hot the whole run instead of settling like a one-shot rain. The 'script' field selects the deterministic per-frame arena tick both runners implement (launcher + dozer velocity); bodies[1] must stay the dozer (mass 50 sphere).",
+      "dt": [1, 60],
+      "frames": 600,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-20, -2, -20], [20, 20, 20]],
+      "script": "arena",
+      "bodies": [
+        {
+          "name": "terrain",
+          "shape": {
+            "type": "mesh",
+            "grid": [40, 40],
+            "origin": [-19.5, -19.5],
+            "cell": [1.0, 1.0],
+            "heights_expr": {
+              "amp": 0.2,
+              "ax": 0.7,
+              "az": 0.6
+            }
+          },
+          "position": [0, 0, 0],
+          "mass": 0
+        },
+        {
+          "name": "bulldozer",
+          "shape": {
+            "type": "sphere",
+            "radius": 1.0
+          },
+          "position": [0, 1.0, -3.0],
+          "mass": 50,
+          "friction": 0.5,
+          "restitution": 0.0
+        }
+      ],
+      "generators": [
+        {
+          "type": "box_grid",
+          "nx": 4,
+          "ny": 3,
+          "nz": 4,
+          "spacing": 0.72,
+          "half_extents": [0.35, 0.35, 0.35],
+          "base": [-1.08, 0.36, -1.08],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "type": "box_grid",
+          "nx": 5,
+          "ny": 1,
+          "nz": 5,
+          "spacing": 0.75,
+          "half_extents": [0.35, 0.35, 0.35],
+          "base": [-1.5, 0.36, 1.5],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "type": "mesh_rain",
+          "nx": 3,
+          "nz": 3,
+          "layers": 1,
+          "spacing": [1.2, 1.6, 1.2],
+          "base": [-1.2, 1.0, 3.8],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "shell_half": [0.3, 0.3, 0.3]
+        },
+        {
+          "type": "mixed_rain",
+          "nx": 3,
+          "nz": 3,
+          "layers": 1,
+          "spacing": [1.4, 2.0, 1.4],
+          "base": [3.8, 1.2, -1.4],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "box_half": 0.35,
+          "sphere_radius": 0.35,
+          "capsule_radius": 0.3,
+          "capsule_half_height": 0.5
+        }
+      ]
     }
   }
 }

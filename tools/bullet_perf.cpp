@@ -33,6 +33,7 @@
 // Usage: bullet_perf.exe <scene_name> [repeats]
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -104,6 +105,8 @@ struct SceneRun {
   // Declared last so it is destroyed first, while the bodies and multibodies
   // it references are still alive (unregistration happens in its destructor).
   btMultiBodyDynamicsWorld world;       // plain scenes: behaves like the discrete world
+  long frame = 0;                       // total stepped frames (warmup included)
+  const bool arena;                     // per-frame arena tick (launcher + dozer)
 
   SceneRun(const PerfSceneSpec& spec)
       : config(),
@@ -113,7 +116,8 @@ struct SceneRun {
                                       btVector3(spec.bp_min[0], spec.bp_min[1], spec.bp_min[2]),
                                       btVector3(spec.bp_max[0], spec.bp_max[1], spec.bp_max[2])))),
         solver(),
-        world(&dispatcher, broadphase.get(), &solver, &config) {
+        world(&dispatcher, broadphase.get(), &solver, &config),
+        arena(spec.script == 1) {
     world.setGravity(btVector3(spec.gravity[0], spec.gravity[1], spec.gravity[2]));
     // Reproducibility precondition (docs/parity-harness.md).
     btContactSolverInfo& info = world.getSolverInfo();
@@ -196,6 +200,47 @@ struct SceneRun {
       }
     }
   }
+
+  // One scripted step (plain scenes: just the solver step). The arena tick
+  // mirrors the Rust runner's arena_tick formula for formula so the two
+  // sides stay workload-comparable; it runs before the solver sees the frame.
+  void step(btScalar dt) {
+    if (arena) {
+      // Launcher: a small ball every 30 frames (21 total), aimed at a
+      // deterministic spread across the box tower.
+      if (frame % 30 == 0 && frame < 610) {
+        const long k = frame / 30;
+        const btVector3 from(0, btScalar(2.5), -8);
+        const btVector3 target(btScalar((k % 5) - 2) * btScalar(0.6), btScalar(0.7), 0);
+        const btVector3 dir = (target - from).normalize();
+        btSphereShape* s = new btSphereShape(btScalar(0.25));
+        shapes.push_back(std::unique_ptr<btCollisionShape>(s));
+        btVector3 inertia(0, 0, 0);
+        s->calculateLocalInertia(btScalar(1), inertia);
+        btDefaultMotionState* ms = new btDefaultMotionState(
+            btTransform(btQuaternion(0, 0, 0, 1), from));
+        motions.push_back(std::unique_ptr<btMotionState>(ms));
+        btRigidBody::btRigidBodyConstructionInfo ci(btScalar(1), ms, s, inertia);
+        btRigidBody* b = new btRigidBody(ci);
+        b->setFriction(btScalar(0.5));
+        b->setLinearVelocity(dir * btScalar(12));
+        world.addRigidBody(b);
+        bodies.push_back(std::unique_ptr<btRigidBody>(b));
+      }
+      // Dozer (bodies[1], mass 50): velocity-driven along
+      // x = 4*sin(2*pi*t/240); only x is overridden so y/z still solve
+      // naturally. activate() first - setting a velocity on a sleeping body
+      // would not wake it (and the wake propagates through contacts).
+      btRigidBody* dozer = bodies[1].get();
+      dozer->activate();
+      btVector3 v = dozer->getLinearVelocity();
+      v.setX(btScalar(4) * (btScalar(2) * SIMD_PI / btScalar(240)) *
+             std::cos(btScalar(2) * SIMD_PI * frame / btScalar(240)));
+      dozer->setLinearVelocity(v);
+    }
+    world.stepSimulation(dt, 1, dt);
+    ++frame;
+  }
 };
 
 const PerfSceneSpec* find_scene(const char* name) {
@@ -211,7 +256,7 @@ void run_dump(const PerfSceneSpec& spec, btScalar dt) {
   SceneRun run(spec);
   const int frames = spec.warmup + spec.frames;
   for (int f = 0; f < frames; ++f) {
-    run.world.stepSimulation(dt, 1, dt);
+    run.step(dt);
     if (f % 5 == 0 || f == frames - 1) {
       double sum_y = 0.0, sum_v = 0.0, max_v = 0.0;
       int awake = 0, count = 0;
@@ -261,12 +306,12 @@ int main(int argc, char** argv) {
   using clock = std::chrono::steady_clock;
   for (int r = 0; r < repeats; ++r) {
     SceneRun run(*spec);
-    for (int f = 0; f < spec->warmup; ++f) run.world.stepSimulation(dt, 1, dt);
+    for (int f = 0; f < spec->warmup; ++f) run.step(dt);
     const auto start = clock::now();
     clock::time_point last300_start = start;
     for (int f = 0; f < spec->frames; ++f) {
       if (f + 300 == spec->frames) last300_start = clock::now();
-      run.world.stepSimulation(dt, 1, dt);
+      run.step(dt);
     }
     const auto total = clock::now() - start;
     const auto last300 = clock::now() - last300_start;
