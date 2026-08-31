@@ -25,7 +25,7 @@ use super::config::SoftCollision;
 use super::geometry::{
     bary_coord, bary_eval_real, bary_eval_vec3, project_origin_triangle, ray_from_to_triangle,
 };
-use super::joints::{impulse_matrix_two, CJoint};
+use super::joints::{impulse_matrix_two, CJoint, SoftJoint};
 
 /// Contact info against one rigid body (Bullet's `sCti`).
 #[derive(Clone, Copy, Debug)]
@@ -725,7 +725,7 @@ impl SoftBody {
             .expanded(margin);
         scratch.clear();
         self.cdbvt.for_each_overlapping(&volume, scratch);
-        let mut new_joints = Vec::new();
+        let mut new_joints: Vec<SoftJoint> = Vec::new();
         for &ci in &*scratch {
             let cluster = &self.clusters[ci];
             // Anchored clusters do not collide with static bodies.
@@ -760,7 +760,7 @@ impl SoftBody {
                     joint.erp *= self.cfg.k_srhr_cl;
                     joint.split *= self.cfg.k_sr_splt_cl;
                 }
-                new_joints.push(joint);
+                new_joints.push(SoftJoint::Contact(joint));
             }
         }
         self.joints.append(&mut new_joints);
@@ -783,7 +783,7 @@ impl SoftBody {
         self.cdbvt.for_each_overlapping_pair(&other.cdbvt, pairs);
         let same_body = a_idx == b_idx;
         let n_clusters = self.clusters.len();
-        let mut new_joints = Vec::new();
+        let mut new_joints: Vec<SoftJoint> = Vec::new();
         for &(ca, cb) in &*pairs {
             // Connectivity skip: clusters sharing a node inside one body
             // never collide with each other.
@@ -809,7 +809,7 @@ impl SoftBody {
                 self.cfg.k_sshr_cl.max(other.cfg.k_sshr_cl),
                 (self.cfg.k_ss_splt_cl + other.cfg.k_ss_splt_cl) / 2.0,
             ) {
-                new_joints.push(joint);
+                new_joints.push(SoftJoint::Contact(joint));
             }
         }
         self.joints.append(&mut new_joints);
@@ -829,7 +829,7 @@ impl SoftBody {
         if n_clusters == 0 {
             return;
         }
-        let mut new_joints = Vec::new();
+        let mut new_joints: Vec<SoftJoint> = Vec::new();
         for &(ca, cb) in &*pairs {
             if !self.cluster_connectivity.is_empty()
                 && self.cluster_connectivity[ca + n_clusters * cb]
@@ -851,7 +851,7 @@ impl SoftBody {
                 self.cfg.k_sshr_cl,
                 self.cfg.k_ss_splt_cl,
             ) {
-                new_joints.push(joint);
+                new_joints.push(SoftJoint::Contact(joint));
             }
         }
         self.joints.append(&mut new_joints);

@@ -369,6 +369,17 @@ impl RigidBody {
         self.angular_velocity += self.inv_inertia_world() * rel_pos.cross(impulse);
     }
 
+    /// Apply a torque impulse (Bullet's `applyTorqueImpulse`): an instant
+    /// angular velocity change `Δω = inv_inertia_world · impulse`. Static
+    /// bodies ignore it.
+    #[inline]
+    pub fn apply_torque_impulse(&mut self, impulse: Vector3) {
+        if self.inv_mass == 0.0 {
+            return;
+        }
+        self.angular_velocity += self.inv_inertia_world() * impulse;
+    }
+
     /// Velocity of the point at offset `rel_pos` from the center of mass
     /// (Bullet's `getVelocityInLocalPoint`):
     /// `linear_velocity + angular_velocity × rel_pos`.

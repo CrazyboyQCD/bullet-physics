@@ -16,8 +16,8 @@ use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
 use crate::softbody::cluster::solve_clusters;
 use crate::softbody::collide::collide_vf_ss;
 use crate::softbody::config::SoftCollision;
-use crate::softbody::SoftBody;
-use bullet_math::{Aabb, Quaternion, Real, Vector3};
+use crate::softbody::{AngularJointSpecs, LinearJointSpecs, Side, SoftBody};
+use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
 use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, SLOP, SPLIT_TURN_ERP};
 
 /// FxHash-style hasher (rustc's `FxHashMap` recipe) for the pair-keyed maps
@@ -584,6 +584,46 @@ impl PhysicsWorld {
 
     pub fn num_soft_bodies(&self) -> usize {
         self.soft_bodies.len()
+    }
+
+    /// Install a linear joint between soft body `soft`'s master cluster
+    /// (`clusters[0]`, Bullet's `appendLinearJoint(specs, body)` overload)
+    /// and any other side — a rigid body index or another soft body's
+    /// master cluster. Requires the soft body to have clusters
+    /// (`generate_clusters` first).
+    pub fn add_soft_linear_joint(
+        &mut self,
+        soft: usize,
+        specs: LinearJointSpecs,
+        body1: Side,
+    ) {
+        let xform1 = self.side_xform(body1);
+        self.soft_bodies[soft].append_linear_joint(soft, 0, &specs, body1, xform1);
+    }
+
+    /// Install an angular joint between soft body `soft`'s master cluster
+    /// and any other side (Bullet's `appendAngularJoint(specs, body)`
+    /// overload). Requires the soft body to have clusters.
+    pub fn add_soft_angular_joint(
+        &mut self,
+        soft: usize,
+        specs: AngularJointSpecs,
+        body1: Side,
+    ) {
+        let xform1 = self.side_xform(body1);
+        self.soft_bodies[soft].append_angular_joint(soft, 0, &specs, body1, xform1);
+    }
+
+    /// The world frame of one joint side: a rigid body's transform or a
+    /// cluster's frame.
+    fn side_xform(&self, side: Side) -> (Vector3, Matrix3) {
+        match side {
+            Side::Cluster { soft, cluster } => {
+                let c = &self.soft_bodies[soft].clusters[cluster];
+                (c.framepos, c.framerot)
+            }
+            Side::Rigid(i) => (self.bodies[i].position, Matrix3::from_quat(self.bodies[i].orientation)),
+        }
     }
 
     /// Add a multibody constraint (Bullet's `addMultiBodyConstraint`) and

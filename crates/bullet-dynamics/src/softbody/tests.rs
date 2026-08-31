@@ -1139,3 +1139,334 @@ fn convex_hull_builder_drops_interior() {
     assert_eq!(sb.nodes.len(), 6, "interior point excluded");
     assert_eq!(sb.faces.len(), 8, "octahedron faces");
 }
+
+// ---------------------------------------------------------------------------
+// Phase E: joints, transforms, cut/refine.
+// ---------------------------------------------------------------------------
+
+use bullet_math::compat::quat_from_axis_angle;
+use super::body::{ImplicitFn, Side};
+use super::joints::{AngularControl, AngularJointSpecs, AJoint, LinearJointSpecs};
+
+/// The SoftDemo motor control (Bullet's `MotorControl`): drive the joint
+/// speed toward `goal` with a clamped torque rate.
+#[derive(Clone, Debug)]
+struct MotorControl {
+    goal: Real,
+    maxtorque: Real,
+}
+
+impl AngularControl for MotorControl {
+    fn speed(&self, _joint: &AJoint, current: Real) -> Real {
+        current + self.maxtorque.min((-self.maxtorque).max(self.goal - current))
+    }
+    fn clone_box(&self) -> Box<dyn AngularControl> {
+        Box::new(self.clone())
+    }
+}
+
+/// A massaged ellipsoid ready for cluster tests (uniform face-weighted
+/// mass, bending links, 8 K-mean clusters + master).
+fn cluster_ellipsoid(center: Vector3) -> SoftBody {
+    let mut sb = create_ellipsoid(center, Vector3::splat(1.0), 64);
+    sb.set_total_mass_from_faces(20.0);
+    sb.generate_bending_constraints(2, None);
+    sb.generate_clusters(8, 32);
+    sb
+}
+
+/// The transform family maps positions/previous positions rigidly, keeps
+/// link rest lengths consistent with the geometry, and refreshes the
+/// bounds.
+#[test]
+fn transform_translates_rotates_and_scales() {
+    let mut sb = cluster_ellipsoid(Vector3::ZERO);
+    // Translate: rigid offset of every node, rest lengths unchanged.
+    let before: Vec<Vector3> = sb.nodes.iter().map(|n| n.x).collect();
+    sb.translate(Vector3::new(1.0, 2.0, 3.0));
+    for (n, &b) in sb.nodes.iter().zip(&before) {
+        assert!((n.x - (b + Vector3::new(1.0, 2.0, 3.0))).length() < 1e-5);
+        assert!((n.q - n.x).length() < 1e-5, "previous position must move with x");
+    }
+    // Rotate: distance structure preserved; the COM maps rigidly (it does
+    // not sit at the world origin, so it moves with the rotation).
+    let com = sb.get_center_of_mass();
+    sb.rotate(quat_from_axis_angle(Vector3::Z, 0.7));
+    for l in &sb.links {
+        let len = (sb.nodes[l.n[0]].x - sb.nodes[l.n[1]].x).length();
+        assert!((len - l.rl).abs() < 1e-4, "rotation changed a rest length");
+    }
+    let rot = Matrix3::from_quat(quat_from_axis_angle(Vector3::Z, 0.7));
+    assert!(
+        (sb.get_center_of_mass() - rot * com).length() < 1e-4,
+        "COM must transform rigidly"
+    );
+    // Scale: uniform scaling doubles the rest lengths and the geometry
+    // with them (update_constants re-seeds the rest lengths).
+    let [n0, n1] = sb.links[0].n;
+    let len_before = (sb.nodes[n0].x - sb.nodes[n1].x).length();
+    sb.scale(Vector3::splat(2.0));
+    let len = (sb.nodes[n0].x - sb.nodes[n1].x).length();
+    let rl_now = sb.links[0].rl;
+    assert!(
+        (len - rl_now).abs() < 1e-4,
+        "update_constants must re-seed rest lengths after scaling: {len} vs {rl_now}"
+    );
+    assert!(
+        (len - 2.0 * len_before).abs() < 1e-4,
+        "uniform scaling must double the edge: {len} vs {}",
+        2.0 * len_before
+    );
+}
+
+/// `transform_to` teleports the body onto a target frame: the rigid fit
+/// composed with the current one maps every node back to where a rigid
+/// motion would put it, and the fit itself reports the applied motion.
+#[test]
+fn transform_to_recovers_rigid_motion() {
+    let mut sb = cluster_ellipsoid(Vector3::ZERO);
+    let rest: Vec<Vector3> = sb.nodes.iter().map(|n| n.x).collect();
+    let rest_com = sb.get_center_of_mass();
+    let rot = quat_from_axis_angle(Vector3::new(0.3, 0.5, 0.8).normalize(), 0.9);
+    let t = Vector3::new(2.0, -1.0, 0.5);
+    sb.transform(Matrix3::from_quat(rot), t);
+    // The fit recovers the motion (origin = the mass-weighted COM, which
+    // need not sit at the construction center for face-weighted masses).
+    let (fit_r, fit_t) = sb.get_rigid_transform();
+    let com = sb.get_center_of_mass();
+    assert!((fit_t - com).length() < 1e-6, "fit origin {fit_t:?} vs com {com:?}");
+    assert!((fit_t - (Matrix3::from_quat(rot) * rest_com + t)).length() < 1e-3);
+    let diff = fit_r - Matrix3::from_quat(rot);
+    let r_err = diff
+        .x_axis
+        .abs()
+        .max(diff.y_axis.abs())
+        .max(diff.z_axis.abs())
+        .max_element();
+    assert!(r_err < 1e-3, "fit rotation off by {r_err}");
+    // Undo: back onto the identity frame at the origin — every node lands
+    // on the rest pose relative to its COM.
+    sb.transform_to(Matrix3::IDENTITY, Vector3::ZERO);
+    for (n, &b) in sb.nodes.iter().zip(&rest) {
+        assert!(
+            (n.x - (b - rest_com)).length() < 1e-3,
+            "node did not return: {:?} vs {:?}",
+            n.x,
+            b - rest_com
+        );
+    }
+    assert!((sb.get_center_of_mass() - Vector3::ZERO).length() < 1e-4);
+}
+
+/// `cut_link` splits every matching edge in place through a fresh node
+/// pair; a non-edge pair changes nothing.
+#[test]
+fn cut_link_splits_topology() {
+    let mut rope = create_rope(Vector3::ZERO, Vector3::new(3.0, 0.0, 0.0), 2, 0);
+    // No match: (0, 2) is not an edge.
+    assert!(!rope.cut_link(0, 2, 0.5));
+    assert_eq!(rope.nodes.len(), 4);
+    assert_eq!(rope.links.len(), 3);
+    // Cut (1, 2) at 0.25: the edge splits into (1, pn0) and (pn1, 2),
+    // inheriting the interpolated velocity.
+    rope.nodes[1].v = Vector3::new(0.0, 4.0, 0.0);
+    rope.nodes[2].v = Vector3::ZERO;
+    assert!(rope.cut_link(1, 2, 0.25));
+    assert_eq!(rope.nodes.len(), 6, "a fresh node pair is appended");
+    assert_eq!(rope.links.len(), 4, "the cut edge becomes two");
+    let pn0 = 4;
+    let pn1 = 5;
+    let mut has_1_pn0 = false;
+    let mut has_pn1_2 = false;
+    for l in &rope.links {
+        if l.n == [1, pn0] || l.n == [pn0, 1] {
+            has_1_pn0 = true;
+        }
+        if l.n == [pn1, 2] || l.n == [2, pn1] {
+            has_pn1_2 = true;
+        }
+    }
+    assert!(has_1_pn0 && has_pn1_2, "split halves missing");
+    let expected_x = rope.nodes[1].x.lerp(rope.nodes[2].x, 0.25);
+    assert!((rope.nodes[pn0].x - expected_x).length() < 1e-5);
+    assert!((rope.nodes[pn0].v - Vector3::new(0.0, 3.0, 0.0)).length() < 1e-5);
+}
+
+/// The plane implicit function used by the refine tests.
+struct PlaneY(Real);
+impl ImplicitFn for PlaneY {
+    fn eval(&self, x: Vector3) -> Real {
+        x.y - self.0
+    }
+}
+
+/// `refine` drops bending links across the surface, inserts a node at every
+/// crossing, and splits the crossed edges — mass stays conserved.
+#[test]
+fn refine_inserts_crossing_node() {
+    let mut rope = create_rope(Vector3::new(0.0, 0.5, 0.0), Vector3::new(0.0, -0.5, 0.0), 2, 0);
+    rope.generate_bending_constraints(2, None);
+    let bending = rope.links.iter().filter(|l| l.bending).count();
+    assert!(bending > 0, "precondition: bending links present");
+    let total_mass = rope.get_total_mass();
+    let links_before = rope.links.len();
+    rope.refine(&PlaneY(0.0), 0.01, false);
+    // Structural edges crossing y = 0 gain nodes: 3 nodes spaced evenly
+    // (0.5, -0.166, -0.5 -> interior pairs (0,1)(1,2) straddle zero? node
+    // values are +0.5, +0.1667, -0.1667, -0.5, so only (1,2) crosses).
+    assert_eq!(rope.nodes.len(), 5, "one crossing node");
+    assert!((rope.nodes[4].x.y).abs() < 0.01, "crossing sits on the plane");
+    assert_eq!(rope.links.iter().filter(|l| !l.bending).count(), 4, "edge split in two");
+    assert_eq!(rope.links.iter().filter(|l| l.bending).count(), 0, "crossed bending dropped");
+    assert!(rope.links.len() < links_before + 4);
+    assert!(
+        (rope.get_total_mass() - total_mass).abs() < 1e-3,
+        "mass redistributed, not created: {} vs {total_mass}",
+        rope.get_total_mass()
+    );
+}
+
+/// A plane that separates the rope's two halves: refining with `cut`
+/// duplicates the in-band crossing node and re-routes the negative-side
+/// links onto it (Bullet's `< accuracy` test is signed, so the whole
+/// negative half-space qualifies) — the split halves then dangle, and
+/// Bullet's orphan cleanup culls the chain end to end (refine/cut is a
+/// surface-mesh tool; the chain result is pinned verbatim).
+#[test]
+fn refine_cut_duplicates_surface_side() {
+    let mut rope = create_rope(Vector3::new(0.0, 0.5, 0.0), Vector3::new(0.0, -0.5, 0.0), 2, 0);
+    let total_mass = rope.get_total_mass();
+    rope.refine(&PlaneY(0.0), 0.01, true);
+    // 4 original nodes + the crossing node + its in-band copy.
+    assert_eq!(rope.nodes.len(), 6, "only the in-band crossing node duplicates");
+    // The copy carries the crossing node's velocity, the mass splits.
+    assert!((rope.nodes[5].v - rope.nodes[4].v).length() < 1e-6);
+    assert!(
+        (rope.get_total_mass() - total_mass).abs() < 1e-3,
+        "halved masses doubled across the copies: {} vs {total_mass}",
+        rope.get_total_mass()
+    );
+    // Every remaining chain end has rank 1 after the split, so the orphan
+    // cleanup cascades through the whole chain.
+    assert!(rope.links.is_empty(), "dangling links survived the cleanup");
+}
+
+/// A linear joint pins the master cluster to a rigid frame: the body hangs
+/// at the anchor instead of free-falling.
+#[test]
+fn linear_joint_holds_cluster_at_anchor() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    // Anchor frame parked above the body so nothing collides with it.
+    let anchor_body = world.add_body(RigidBody::new_static(
+        CollisionShape::box_shape(Vector3::splat(0.1)),
+        Vector3::new(0.0, 9.0, 0.0),
+    ));
+    let soft = world.add_soft_body(cluster_ellipsoid(Vector3::new(0.0, 5.0, 0.0)));
+    world.add_soft_linear_joint(
+        soft,
+        LinearJointSpecs {
+            position: Vector3::new(0.0, 5.0, 0.0),
+            ..LinearJointSpecs::default()
+        },
+        Side::Rigid(anchor_body),
+    );
+    let anchor = Vector3::new(0.0, 5.0, 0.0);
+    for _ in 0..300 {
+        world.step_simulation(DT);
+    }
+    let com = world.soft_body(soft).get_center_of_mass();
+    let d = (com - anchor).length();
+    assert!(d < 0.6, "cluster fell away from the anchor: {d} ({com:?})");
+    // Free fall over 5s would be ~120m; the joint is what holds it.
+    assert!(d < 1.0);
+}
+
+/// An angular joint realigns a rotated cluster frame back onto the axis
+/// (the default control passes the speed through, leaving only the
+/// misalignment drift).
+#[test]
+fn angular_joint_aligns_axes() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::ZERO);
+    let anchor_body = world.add_body(RigidBody::new_static(
+        CollisionShape::box_shape(Vector3::splat(0.1)),
+        Vector3::ZERO,
+    ));
+    let soft = world.add_soft_body(cluster_ellipsoid(Vector3::ZERO));
+    world.add_soft_angular_joint(
+        soft,
+        AngularJointSpecs {
+            axis: Vector3::Y,
+            ..AngularJointSpecs::default()
+        },
+        Side::Rigid(anchor_body),
+    );
+    // Tilt the body 0.5 rad about X (a rigid teleport: x/q rotate together,
+    // so the PBD pass does not fight it). The cluster frames catch up on
+    // the first `predict_motion`.
+    let tilt = quat_from_axis_angle(Vector3::X, 0.5);
+    world.soft_body_mut(soft).rotate(tilt);
+    let y_axis_err = |w: &PhysicsWorld| {
+        w.soft_body(soft).clusters[0].framerot.y_axis.cross(Vector3::Y).length()
+    };
+    world.step_simulation(DT);
+    let start_err = y_axis_err(&world);
+    assert!(start_err > 0.4, "precondition: axes start apart ({start_err})");
+    for _ in 0..600 {
+        world.step_simulation(DT);
+    }
+    let end_err = y_axis_err(&world);
+    assert!(end_err < 0.15, "axes did not realign: {end_err}");
+}
+
+/// The SoftDemo motor control spins the cluster toward its goal speed.
+#[test]
+fn angular_joint_motor_spins_cluster() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::ZERO);
+    let anchor_body = world.add_body(RigidBody::new_static(
+        CollisionShape::box_shape(Vector3::splat(0.1)),
+        Vector3::ZERO,
+    ));
+    let soft = world.add_soft_body(cluster_ellipsoid(Vector3::ZERO));
+    world.add_soft_angular_joint(
+        soft,
+        AngularJointSpecs {
+            axis: Vector3::Y,
+            control: Box::new(MotorControl { goal: 2.0, maxtorque: 0.5 }),
+            ..AngularJointSpecs::default()
+        },
+        Side::Rigid(anchor_body),
+    );
+    for _ in 0..480 {
+        world.step_simulation(DT);
+    }
+    let av = world.soft_body(soft).clusters[0].av.y;
+    assert!(
+        av > 1.0 && av < 3.0,
+        "motor did not spin the cluster to the goal: {av}"
+    );
+}
+
+/// `apply_torque_impulse` changes the angular velocity through the world
+/// inertia (the rigid side of the angular joints).
+#[test]
+fn torque_impulse_updates_angular_velocity() {
+    let mut body = RigidBody::new_dynamic(
+        CollisionShape::box_shape(Vector3::splat(0.5)),
+        Vector3::ZERO,
+        2.0,
+    );
+    let iw = body.inv_inertia_world();
+    body.apply_torque_impulse(Vector3::new(0.0, 0.0, 3.0));
+    let expect = iw * Vector3::new(0.0, 0.0, 3.0);
+    assert!((body.angular_velocity - expect).length() < 1e-9);
+    // Static bodies ignore torque impulses.
+    let mut stat = RigidBody::new_static(
+        CollisionShape::box_shape(Vector3::splat(0.5)),
+        Vector3::ZERO,
+    );
+    stat.apply_torque_impulse(Vector3::ONE);
+    assert_eq!(stat.angular_velocity, Vector3::ZERO);
+}

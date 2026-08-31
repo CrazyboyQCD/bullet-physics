@@ -10,6 +10,9 @@ use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
 
 use super::collide::{Anchor, RContact, SContact};
 use super::config::{Config, SolverState};
+use super::joints::{
+    AngularJointSpecs, AJoint, LinearJointSpecs, LJoint, SoftJoint,
+};
 
 /// Linear/angular/volume stiffness coefficients of a material (Bullet's
 /// `btSoftBody::Material`; the `DebugDraw`-only `m_flags` bit is not
@@ -248,6 +251,12 @@ pub enum Side {
     Rigid(usize),
 }
 
+impl Default for Side {
+    fn default() -> Self {
+        Side::Rigid(0)
+    }
+}
+
 /// Rest-pose bookkeeping (Bullet's `btSoftBody::Pose`): mass weights,
 /// rest offsets from the COM and the rest volume captured by `set_pose`.
 /// The rotation/scale fields only advance when a frame pose is enabled
@@ -335,9 +344,11 @@ pub struct SoftBody {
     /// Cluster adjacency for self-collision filtering (Bullet's
     /// `m_clusterConnectivity`, row-major `c0 + c1 * clusters.len()`).
     pub cluster_connectivity: Vec<bool>,
-    /// Contact joints created by the cluster colliders this step (Bullet's
-    /// `m_joints`); prepared/solved/terminated by the cluster solver.
-    pub joints: Vec<super::joints::CJoint>,
+    /// Joints: contact joints created by the cluster colliders this step
+    /// (one solve each) plus the user-installed linear/angular joints
+    /// (Bullet's `m_joints`); prepared/solved/terminated by the cluster
+    /// solver.
+    pub joints: Vec<super::joints::SoftJoint>,
     /// Impulse cap for self-collision contacts (Bullet's
     /// `m_maxSelfCollisionImpulse`, default 100).
     pub max_self_collision_impulse: Real,
@@ -368,6 +379,11 @@ pub struct SoftBody {
     pub update_rt_cst: bool,
     /// Scale of link rest lengths (Bullet's `m_restLengthScale`).
     pub rest_length_scale: Real,
+    /// Initial node positions (Bullet's `m_X`): captured once at
+    /// construction and never refreshed — `transform_to` fits the rigid
+    /// motion from initial to current pose through them (Bullet's quirk:
+    /// nodes appended later have no rest sample).
+    pub rest_positions: Vec<Vector3>,
 }
 
 impl Default for SoftBody {
@@ -409,6 +425,7 @@ impl SoftBody {
             bounds: [Vector3::ZERO, Vector3::ZERO],
             update_rt_cst: true,
             rest_length_scale: 1.0,
+            rest_positions: positions.to_vec(),
         };
         for (i, (&x, &m)) in positions.iter().zip(masses).enumerate() {
             body.nodes.push(Node::new(x, m));
@@ -418,6 +435,17 @@ impl SoftBody {
             body.nodes[i].leaf = body.ndbvt.insert(Aabb::new(x - pad, x + pad), i);
         }
         body
+    }
+
+    /// Append a node with an ndbvt leaf (Bullet's `appendNode`). Rest
+    /// positions (`m_X`) are not refreshed — Bullet's quirk. Returns the
+    /// new node index.
+    pub fn append_node(&mut self, x: Vector3, mass: Real) -> usize {
+        let index = self.nodes.len();
+        self.nodes.push(Node::new(x, mass));
+        let pad = Vector3::splat(self.margin);
+        self.nodes[index].leaf = self.ndbvt.insert(Aabb::new(x - pad, x + pad), index);
+        index
     }
 
     /// Append a material and return its index (Bullet's `appendMaterial`).
@@ -878,4 +906,479 @@ impl SoftBody {
             self.links.swap(i, j);
         }
     }
+
+    /// Install a linear joint between this body's cluster `cluster0` and
+    /// `body1` (Bullet's `appendLinearJoint(specs, body0, body1)`): both
+    /// frames capture a local anchor at `specs.position`. `xform1` is the
+    /// other side's world frame `(origin, basis)` at installation time
+    /// (Bullet reads it through the `Body` pointer).
+    pub fn append_linear_joint(
+        &mut self,
+        self_idx: usize,
+        cluster0: usize,
+        specs: &LinearJointSpecs,
+        body1: Side,
+        xform1: (Vector3, Matrix3),
+    ) {
+        let cluster = &self.clusters[cluster0];
+        let refs0 = cluster.framerot.transpose() * (specs.position - cluster.framepos);
+        let refs1 = xform1.1.transpose() * (specs.position - xform1.0);
+        self.joints.push(SoftJoint::Linear(LJoint {
+            bodies: [Side::Cluster { soft: self_idx, cluster: cluster0 }, body1],
+            refs: [refs0, refs1],
+            cfm: specs.tuning.cfm,
+            erp: specs.tuning.erp,
+            split: specs.tuning.split,
+            rpos: [Vector3::ZERO; 2],
+            drift: Vector3::ZERO,
+            sdrift: Vector3::ZERO,
+            massmatrix: Matrix3::ZERO,
+        }));
+    }
+
+    /// Install an angular joint between this body's cluster `cluster0` and
+    /// `body1` (Bullet's `appendAngularJoint(specs, body0, body1)`): both
+    /// frames capture a local axis from `specs.axis`.
+    pub fn append_angular_joint(
+        &mut self,
+        self_idx: usize,
+        cluster0: usize,
+        specs: &AngularJointSpecs,
+        body1: Side,
+        xform1: (Vector3, Matrix3),
+    ) {
+        let cluster = &self.clusters[cluster0];
+        let refs0 = cluster.framerot.transpose() * specs.axis;
+        let refs1 = xform1.1.transpose() * specs.axis;
+        self.joints.push(SoftJoint::Angular(AJoint {
+            bodies: [Side::Cluster { soft: self_idx, cluster: cluster0 }, body1],
+            refs: [refs0, refs1],
+            cfm: specs.tuning.cfm,
+            erp: specs.tuning.erp,
+            split: specs.tuning.split,
+            axis: [Vector3::ZERO; 2],
+            control: specs.control.clone_box(),
+            drift: Vector3::ZERO,
+            sdrift: Vector3::ZERO,
+            massmatrix: Matrix3::ZERO,
+        }));
+    }
+
+    /// Move every node by `trs` (Bullet's `translate`).
+    pub fn translate(&mut self, trs: Vector3) {
+        self.transform(Matrix3::IDENTITY, trs);
+    }
+
+    /// Rotate every node about the world origin (Bullet's `rotate`).
+    pub fn rotate(&mut self, rot: Quaternion) {
+        self.transform(Matrix3::from_quat(rot), Vector3::ZERO);
+    }
+
+    /// Apply a rigid transform to every node (Bullet's `transform`):
+    /// positions and previous positions map, normals rotate, the node-tree
+    /// leaves reinsert at their exact new volumes, then the derived data
+    /// rebuilds — `update_constants` re-seeds the link rest lengths, so a
+    /// transformed body keeps rest lengths matching its geometry (Bullet's
+    /// semantics).
+    pub fn transform(&mut self, basis: Matrix3, origin: Vector3) {
+        let margin = self.margin;
+        for i in 0..self.nodes.len() {
+            let n = &mut self.nodes[i];
+            n.x = basis * n.x + origin;
+            n.q = basis * n.q + origin;
+            n.n = basis * n.n;
+            let pad = Vector3::splat(margin);
+            let volume = Aabb::new(n.x - pad, n.x + pad);
+            self.ndbvt.update_exact(n.leaf, volume);
+        }
+        self.update_normals();
+        self.update_bounds();
+        self.update_constants();
+    }
+
+    /// Scale every node per-axis (Bullet's `scale`): positions and previous
+    /// positions multiply, then the same derived-data refresh as
+    /// `transform` (Bullet's trailing `initializeDmInverse` belongs to the
+    /// NeoHookean system and is not ported).
+    pub fn scale(&mut self, scl: Vector3) {
+        let margin = self.margin;
+        for i in 0..self.nodes.len() {
+            let n = &mut self.nodes[i];
+            n.x *= scl;
+            n.q *= scl;
+            let pad = Vector3::splat(margin);
+            let volume = Aabb::new(n.x - pad, n.x + pad);
+            self.ndbvt.update_exact(n.leaf, volume);
+        }
+        self.update_normals();
+        self.update_bounds();
+        self.update_constants();
+    }
+
+    /// Best-fit rigid transform from the rest positions to the current
+    /// nodes (Bullet's `getRigidTransform`): the mass-weighted COM plus the
+    /// Kabsch rotation. Bullet decomposes the covariance `S` with
+    /// `btImplicitQRSVD` and returns `V*U^T`; for full-rank `S` that equals
+    /// the transpose of the polar factor, which is what we reuse here —
+    /// rank-deficient fits may differ (a transform API, not a solver path).
+    pub fn get_rigid_transform(&self) -> (Matrix3, Vector3) {
+        let t = self.get_center_of_mass();
+        // `S -= OuterProduct(m_X[i], t - x_i)` — the outer-product
+        // accumulation in glam's column-major layout (see `update_pose`
+        // for the transposition trap).
+        let mut s = Matrix3::ZERO;
+        let count = self.rest_positions.len().min(self.nodes.len());
+        for i in 0..count {
+            let a = self.rest_positions[i];
+            let b = self.nodes[i].x - t;
+            s += Matrix3::from_cols(a * b.x, a * b.y, a * b.z);
+        }
+        let (w, _) = super::cluster::polar_decompose(&s);
+        (w.transpose(), t)
+    }
+
+    /// Teleport the body so its rigid fit lands on `(basis, origin)`
+    /// (Bullet's `transformTo`): the current best rigid fit (measured from
+    /// the initial rest positions) is composed with the inverse of the
+    /// target and applied through `transform`.
+    pub fn transform_to(&mut self, basis: Matrix3, origin: Vector3) {
+        let (cur_basis, cur_origin) = self.get_rigid_transform();
+        let new_basis = basis * cur_basis.transpose();
+        let new_origin = origin - new_basis * cur_origin;
+        self.transform(new_basis, new_origin);
+    }
+
+    /// Cut every link and face edge between the two nodes, inserting a pair
+    /// of fresh nodes at the interpolated `position` (Bullet's `cutLink`).
+    /// Returns whether anything matched; on no match the fresh pair is
+    /// removed again.
+    pub fn cut_link(&mut self, node0: usize, node1: usize, position: Real) -> bool {
+        let x = self.nodes[node0].x.lerp(self.nodes[node1].x, position);
+        let v = self.nodes[node0].v.lerp(self.nodes[node1].v, position);
+        let pn = [self.append_node(x, 1.0), self.append_node(x, 1.0)];
+        self.nodes[pn[0]].v = v;
+        self.nodes[pn[1]].v = v;
+        let mut done = false;
+        // Links: every edge matching (node0, node1) splits into two halves
+        // through the fresh pair. Appended copies stay out of this pass
+        // (Bullet iterates a size snapshot).
+        let nlinks = self.links.len();
+        for i in 0..nlinks {
+            if let Some(mtch) = match_edge(self.links[i].n[0], self.links[i].n[1], node0, node1) {
+                let mut copy = self.links[i];
+                self.links[i].n[1] = pn[mtch];
+                copy.n[0] = pn[1 - mtch];
+                self.links.push(copy);
+                done = true;
+            }
+        }
+        // Faces: the same edge match turns the triangle pair into a quad
+        // split, sewing the diagonal with two fresh links.
+        let nfaces = self.faces.len();
+        for i in 0..nfaces {
+            let mut k = 2;
+            let mut l = 0;
+            while l < 3 {
+                if let Some(mtch) = match_edge(self.faces[i].n[k], self.faces[i].n[l], node0, node1)
+                {
+                    let mut copy = self.faces[i];
+                    self.faces[i].n[l] = pn[mtch];
+                    copy.n[k] = pn[1 - mtch];
+                    self.faces.push(copy);
+                    let next = self.faces[i].n[(l + 1) % 3];
+                    let mat = Some(self.faces[i].mat);
+                    self.append_link(pn[0], next, mat, true);
+                    self.append_link(pn[1], next, mat, true);
+                }
+                k = l;
+                l += 1;
+            }
+        }
+        if !done {
+            for &p in &pn {
+                let leaf = self.nodes[p].leaf;
+                self.ndbvt.remove(leaf);
+            }
+            self.nodes.pop();
+            self.nodes.pop();
+        }
+        self.update_rt_cst = true;
+        done
+    }
+
+    /// Refine the mesh against an implicit surface (Bullet's `refine`):
+    /// bending links crossing the surface are dropped, structural
+    /// link/face edges crossing it gain a node at the intersection, and
+    /// with `cut` the surface-side geometry is duplicated so the body can
+    /// split along the surface.
+    pub fn refine(&mut self, ifn: &dyn ImplicitFn, accuracy: Real, cut: bool) {
+        let ncount = self.nodes.len();
+        // Symmetric edge matrix (Bullet's `btSymMatrix`, triangle storage):
+        // -2 = no edge, -1 = edge without intersection, >= 0 = index of the
+        // inserted intersection node.
+        let mut edges = vec![-2i64; ncount * (ncount + 1) / 2];
+        fn sym_index(a: usize, b: usize) -> usize {
+            let (c, r) = if a > b { (b, a) } else { (a, b) };
+            r * (r + 1) / 2 + c
+        }
+
+        // Filter out bending links spanning the surface.
+        let mut i = 0;
+        while i < self.links.len() {
+            let l = self.links[i];
+            if l.bending {
+                let (xa, xb) = (self.nodes[l.n[0]].x, self.nodes[l.n[1]].x);
+                if !same_sign(ifn.eval(xa), ifn.eval(xb)) {
+                    let last = self.links.len() - 1;
+                    self.links.swap(i, last);
+                    self.links.pop();
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        // Fill edges from links and faces.
+        for l in &self.links {
+            edges[sym_index(l.n[0], l.n[1])] = -1;
+        }
+        for f in &self.faces {
+            edges[sym_index(f.n[0], f.n[1])] = -1;
+            edges[sym_index(f.n[1], f.n[2])] = -1;
+            edges[sym_index(f.n[2], f.n[0])] = -1;
+        }
+        // Intersect: solve each edge against the implicit surface and grow
+        // a node at the crossing, re-splitting both endpoint masses.
+        for i in 0..ncount {
+            for j in (i + 1)..ncount {
+                if edges[sym_index(i, j)] == -1 {
+                    let t = implicit_solve(ifn, self.nodes[i].x, self.nodes[j].x, accuracy);
+                    if t > 0.0 {
+                        let x = self.nodes[i].x.lerp(self.nodes[j].x, t);
+                        let v = self.nodes[i].v.lerp(self.nodes[j].v, t);
+                        let mut m = 0.0;
+                        let (ia, ib) = (self.nodes[i].im, self.nodes[j].im);
+                        if ia > 0.0 {
+                            if ib > 0.0 {
+                                let ma = 1.0 / ia;
+                                let mb = 1.0 / ib;
+                                let mc = ma + (mb - ma) * t;
+                                let f = (ma + mb) / (ma + mb + mc);
+                                self.nodes[i].im = 1.0 / (ma * f);
+                                self.nodes[j].im = 1.0 / (mb * f);
+                                m = mc * f;
+                            } else {
+                                self.nodes[i].im /= 0.5;
+                                m = 1.0 / self.nodes[i].im;
+                            }
+                        } else if ib > 0.0 {
+                            self.nodes[j].im /= 0.5;
+                            m = 1.0 / self.nodes[j].im;
+                        }
+                        let ni = self.append_node(x, m);
+                        edges[sym_index(i, j)] = ni as i64;
+                        self.nodes[ni].v = v;
+                    }
+                }
+            }
+        }
+        // Refine links: both ends old and an intersection on the edge —
+        // split in place (appended copies stay out, Bullet snapshots size).
+        let nlinks = self.links.len();
+        for i in 0..nlinks {
+            let idx = self.links[i].n;
+            if idx[0] < ncount && idx[1] < ncount {
+                let m = edges[sym_index(idx[0], idx[1])];
+                if m > 0 {
+                    let mut copy = self.links[i];
+                    self.links[i].n[1] = m as usize;
+                    copy.n[0] = m as usize;
+                    self.links.push(copy);
+                }
+            }
+        }
+        // Refine faces: the first intersected edge turns the triangle into
+        // a pair; the same face is reprocessed (other edges may carry
+        // intersections) — Bullet's `--i; break`.
+        let mut i = 0;
+        while i < self.faces.len() {
+            let idx = self.faces[i].n;
+            let mut matched = false;
+            let mut j = 2;
+            let mut k = 0;
+            while k < 3 && !matched {
+                if idx[j] < ncount && idx[k] < ncount {
+                    let m = edges[sym_index(idx[j], idx[k])];
+                    if m > 0 {
+                        let m = m as usize;
+                        let l = (k + 1) % 3;
+                        let mut copy = self.faces[i];
+                        self.faces[i].n = [idx[l], idx[j], m];
+                        copy.n = [m, idx[k], idx[l]];
+                        self.faces.push(copy);
+                        self.append_link(m, idx[l], Some(self.faces[i].mat), false);
+                        matched = true;
+                    }
+                }
+                j = k;
+                k += 1;
+            }
+            if !matched {
+                i += 1;
+            }
+        }
+        // Cut: duplicate the nodes on the negative side of the surface and
+        // redirect the surface-side links/faces onto the copies.
+        if cut {
+            let pcount = ncount;
+            let ntotal = self.nodes.len();
+            let mut cnodes = vec![0usize; ntotal];
+            // Index juggling with a `&mut self` append inside — mirrors
+            // Bullet's pointer loop verbatim.
+            #[allow(clippy::needless_range_loop)]
+            for i in 0..ntotal {
+                let x = self.nodes[i].x;
+                if i >= pcount || ifn.eval(x).abs() < accuracy {
+                    let v = self.nodes[i].v;
+                    let mut m = self.get_mass(i);
+                    if m > 0.0 {
+                        m *= 0.5;
+                        self.nodes[i].im /= 0.5;
+                    }
+                    let cn = self.append_node(x, m);
+                    cnodes[i] = cn;
+                    self.nodes[cn].v = v;
+                }
+            }
+            let nlinks = self.links.len();
+            for i in 0..nlinks {
+                let id = self.links[i].n;
+                let mut todetach = None;
+                if cnodes[id[0]] != 0 && cnodes[id[1]] != 0 {
+                    let copy = self.links[i];
+                    self.links.push(copy);
+                    todetach = Some(self.links.len() - 1);
+                } else if ifn.eval(self.nodes[id[0]].x) < accuracy
+                    && ifn.eval(self.nodes[id[1]].x) < accuracy
+                {
+                    // Bullet guards the redirect with `if (todetach)` — an
+                    // integer 0 sentinel that also swallows link index 0
+                    // (ported verbatim).
+                    if i != 0 {
+                        todetach = Some(i);
+                    }
+                }
+                if let Some(td) = todetach {
+                    for j in 0..2 {
+                        let cn = cnodes[self.links[td].n[j]];
+                        if cn != 0 {
+                            self.links[td].n[j] = cn;
+                        }
+                    }
+                }
+            }
+            let nfaces = self.faces.len();
+            for i in 0..nfaces {
+                let n = self.faces[i].n;
+                if ifn.eval(self.nodes[n[0]].x) < accuracy
+                    && ifn.eval(self.nodes[n[1]].x) < accuracy
+                    && ifn.eval(self.nodes[n[2]].x) < accuracy
+                {
+                    for j in 0..3 {
+                        let cn = cnodes[self.faces[i].n[j]];
+                        if cn != 0 {
+                            self.faces[i].n[j] = cn;
+                        }
+                    }
+                }
+            }
+            // Clean orphans: links with a rank-1 endpoint (a dangling node
+            // nothing else references) drop out.
+            let mut ranks = vec![0i64; self.nodes.len()];
+            for l in &self.links {
+                for &ni in &l.n {
+                    ranks[ni] += 1;
+                }
+            }
+            for f in &self.faces {
+                for &ni in &f.n {
+                    ranks[ni] += 1;
+                }
+            }
+            let mut i = 0;
+            while i < self.links.len() {
+                let id = self.links[i].n;
+                if ranks[id[0]] == 1 || ranks[id[1]] == 1 {
+                    ranks[id[0]] -= 1;
+                    ranks[id[1]] -= 1;
+                    let last = self.links.len() - 1;
+                    self.links.swap(i, last);
+                    self.links.pop();
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        self.update_rt_cst = true;
+    }
+}
+
+/// An implicit surface for [`SoftBody::refine`] (Bullet's
+/// `btSoftBody::ImplicitFn`): the function's sign flips across the surface.
+pub trait ImplicitFn {
+    /// Evaluate the implicit function at `x`.
+    fn eval(&self, x: Vector3) -> Real;
+}
+
+/// Bullet's `SameSign`: strict product positivity (zeros count as a sign
+/// change).
+fn same_sign(x: Real, y: Real) -> bool {
+    x * y > 0.0
+}
+
+/// Bullet's `MatchEdge`: does the undirected edge `(a, b)` equal `(ma, mb)`?
+/// Returns the matched end of the pair.
+fn match_edge(a: usize, b: usize, ma: usize, mb: usize) -> Option<usize> {
+    if a == ma && b == mb {
+        Some(0)
+    } else if a == mb && b == ma {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+/// Solve the implicit-function zero crossing along a segment (Bullet's
+/// `ImplicitSolve`, `btSoftBodyInternals.h` 1199): a secant iteration
+/// bracketed to `[0, 1]`, returning the crossing parameter or -1.
+fn implicit_solve(ifn: &dyn ImplicitFn, a: Vector3, b: Vector3, accuracy: Real) -> Real {
+    let mut span = [0.0 as Real, 1.0];
+    let mut values = [ifn.eval(a), ifn.eval(b)];
+    if values[0] > values[1] {
+        span.swap(0, 1);
+        values.swap(0, 1);
+    }
+    if values[0] > -accuracy {
+        return -1.0;
+    }
+    if values[1] < accuracy {
+        return -1.0;
+    }
+    for _ in 0..256 {
+        let t = span[0] + (span[1] - span[0]) * (values[0] / (values[0] - values[1]));
+        let v = ifn.eval(a + (b - a) * t);
+        if t <= 0.0 || t >= 1.0 {
+            break;
+        }
+        if v.abs() < accuracy {
+            return t;
+        }
+        if v < 0.0 {
+            span[0] = t;
+            values[0] = v;
+        } else {
+            span[1] = t;
+            values[1] = v;
+        }
+    }
+    -1.0
 }

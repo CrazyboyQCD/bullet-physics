@@ -324,6 +324,13 @@ impl DbvtTree {
         true
     }
 
+    /// Bullet's plain `update(leaf, volume)`: reinsert the leaf at its exact
+    /// new volume (the soft-body `transform`/`scale` path — no fat-volume
+    /// caching, unlike the per-step `update_fat`).
+    pub fn update_exact(&mut self, leaf: u32, volume: Aabb) {
+        self.update(leaf, volume, -1);
+    }
+
     /// Bullet's `sort` rotation for `optimizeIncremental`: if the child was
     /// allocated after its parent (slab-index order stands in for pointer
     /// order), swap their roles to keep the tree shallow. Returns the node

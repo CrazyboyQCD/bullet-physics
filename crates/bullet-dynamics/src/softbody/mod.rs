@@ -28,7 +28,10 @@ pub mod solver;
 #[cfg(test)]
 mod tests;
 
-pub use body::{Cluster, Face, Impulse, Link, Material, Node, Pose, Side, SoftBody, Tetra};
+pub use body::{
+    Cluster, Face, Impulse, Link, Material, Node, Pose, Side, SoftBody, Tetra,
+};
+pub use body::ImplicitFn;
 pub use cluster::solve_clusters;
 pub use collide::{Anchor, Cti, RContact, SContact};
 pub use config::{
@@ -38,5 +41,8 @@ pub use helpers::{
     create_ellipsoid, create_from_convex_hull, create_from_tri_mesh, create_patch, create_rope,
     patch_fixeds, ROPE_FIX_END, ROPE_FIX_START,
 };
-pub use joints::CJoint;
+pub use joints::{
+    AngularControl, AngularJointSpecs, AJoint, CJoint, DefaultAngularControl, JointSpecs,
+    LinearJointSpecs, LJoint, SoftJoint,
+};
 pub use rng::MsvcRand;

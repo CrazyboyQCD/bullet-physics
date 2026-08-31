@@ -9,7 +9,7 @@ use bullet_math::{Aabb, Matrix3, Real, Vector3};
 use crate::body::RigidBody;
 
 use super::body::{Cluster, SoftBody};
-use super::joints::{side_apply, CJoint};
+use super::joints::{CJoint, SoftJoint};
 
 /// `SIMD_EPSILON` gates in the cluster kernels are precision-dependent like
 /// every Bullet epsilon.
@@ -85,6 +85,23 @@ pub(crate) fn cluster_d_impulse(cluster: &mut Cluster, rpos: Vector3, impulse: V
     let li = cluster.imass * impulse;
     let ai = cluster.invwi * rpos.cross(impulse);
     cluster.dimpulses[0] += li;
+    cluster.dimpulses[1] += ai;
+    cluster.ndimpulses += 1;
+}
+
+/// Angular velocity impulse (Bullet's `clusterVAImpulse`): moves `av`
+/// immediately and records the accumulation.
+pub(crate) fn cluster_va_impulse(cluster: &mut Cluster, impulse: Vector3) {
+    let ai = cluster.invwi * impulse;
+    cluster.vimpulses[1] += ai;
+    cluster.av += ai;
+    cluster.nvimpulses += 1;
+}
+
+/// Angular drift impulse (Bullet's `clusterDAImpulse`): only the angular
+/// accumulator moves.
+pub(crate) fn cluster_da_impulse(cluster: &mut Cluster, impulse: Vector3) {
+    let ai = cluster.invwi * impulse;
     cluster.dimpulses[1] += ai;
     cluster.ndimpulses += 1;
 }
@@ -455,10 +472,16 @@ pub fn solve_clusters(softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
         return;
     }
     let iterations = softs.iter().map(|s| s.cfg.citerations).max().unwrap_or(0);
-    for s in softs.iter_mut() {
-        let sdt = s.sst.sdt;
-        for j in &mut s.joints {
-            j.prepare(sdt, iterations, bodies);
+    for si in 0..softs.len() {
+        let sdt = softs[si].sst.sdt;
+        for ji in 0..softs[si].joints.len() {
+            // The prepare pass reads frame/inertia state from any soft body
+            // (the joint's sides may live anywhere), so each joint is swapped
+            // out for a placeholder while it refreshes itself.
+            let mut joint =
+                std::mem::replace(&mut softs[si].joints[ji], SoftJoint::Contact(CJoint::default()));
+            joint.prepare(sdt, iterations, softs, bodies);
+            softs[si].joints[ji] = joint;
         }
     }
     for _ in 0..iterations {
@@ -468,13 +491,10 @@ pub fn solve_clusters(softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
             for j in 0..count {
                 // Read half: the impulse pair comes from immutable state
                 // (the joint's sides may live in any soft body).
-                let halves = CJoint::compute(&softs[i].joints[j], sor, softs, bodies);
+                let impulses = softs[i].joints[j].compute(sor, softs, bodies);
                 // Write half: applied side by side, each application
                 // borrowing one cluster or rigid body at a time.
-                if let Some((half_a, half_b)) = halves {
-                    side_apply::impulse(half_a.0, half_a.1, half_a.2, softs, bodies);
-                    side_apply::impulse(half_b.0, half_b.1, half_b.2, softs, bodies);
-                }
+                SoftJoint::apply(impulses, softs, bodies);
             }
         }
     }
@@ -483,12 +503,9 @@ pub fn solve_clusters(softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
         // joints are taken out so the per-side applies can borrow `softs`.
         let joints = std::mem::take(&mut softs[i].joints);
         for j in &joints {
-            if j.split > 0.0 {
-                side_apply::d_impulse(j.bodies[0], -j.sdrift, j.rpos[0], softs, bodies);
-                side_apply::d_impulse(j.bodies[1], j.sdrift, j.rpos[1], softs, bodies);
-            }
+            j.terminate(softs, bodies);
         }
-        softs[i].joints = joints.into_iter().filter(|j| !j.delete).collect();
+        softs[i].joints = joints.into_iter().filter(|j| !j.finished()).collect();
     }
 }
 

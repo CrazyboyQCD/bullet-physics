@@ -260,10 +260,29 @@ Bullet HullLibrary 可能不同 → links 生成顺序不同 → PBD 求解顺�
   fallback（k=0）**不装 master**（Bullet 缩进逐字）；③cluster 冲量链：joint→cluster_v_impulse（即时 lv/av +
   vimpulses 累加）→ `solve_constraints` 头 `apply_clusters(false)` 摊到节点位置；④同轴 cluster 堆叠不稳定
   （数值不对称水平滑开——demo 场景 2 改并排推开）。
-- **Phase E：软体关节 + API 收口**（~500 行）
-  LJoint/AJoint（IControl→`trait AngularControl`）/append_linear_joint/angular_joint（vs rigid/cluster/soft）；
-  transform/rotate/scale/translate/transform_to/setPose/resetLinkRestLengths/setRestLengthScale/cutLink/
-  refine（ImplicitFn→trait）；deviations §收口 + HANDOFF 更新。demo：`softbody_joints`（布料锚箱拖拽）。
+- **Phase E：软体关节 + API 收口** ✅ 完成（2026-08-31 深夜七）
+  `SoftJoint` enum（Linear/Angular/Contact 按 enum 分发 Prepare/Solve/Terminate——Bullet 虚函数三态；
+  CJoint 并入后 `solve_clusters` 统一 prepare（mem::replace 借用模式）/compute（只读半冲量）/apply/terminate）；
+  LJoint/AJoint 逐字（3587/3630：maxdrift=4/π·16 钳制、ImpulseMatrix/AngularImpulseMatrix、split 双通道）；
+  `trait AngularControl`（IControl 的 prepare(joint)/speed(joint,current)，SteerControl 改 refs 的用法保留——
+  prepare 用 take 模式解借用；`clone_box` 替代 Bullet 的 static 单例共享）+ `DefaultAngularControl`；
+  side 扩展（xform/inv_mass/inv_world_inertia/angular_velocity——cluster 侧 framepos/framerot/invwi/av，
+  rigid 侧 world transform/invInertiaTensorWorld/ω）+ side_apply 角向（cluster_va/da_impulse 逐字 1321/1330、
+  rigid `apply_torque_impulse` 新增=Bullet applyTorqueImpulse）；append_linear/angular_joint（refs=两侧
+  xform 逆变换局部化；world 便捷 `add_soft_linear/angular_joint` 用 master cluster=Bullet 单参重载）；
+  变换 API：translate/rotate/scale/transform/transform_to/get_rigid_transform（transform 精确重插 ndbvt
+  叶=新 `DbvtTree::update_exact`；updateConstants 重算 rl→缩放后链长跟几何；transform_to 的 Kabsch 旋转
+  复用 cluster 极分解 R=Wᵀ（=V·Uᵀ 满秩等价，deviations 记录）；rest_positions=m_X 构造时快照不刷新——
+  Bullet quirk 照抄）；cut_link（MatchEdge 无向匹配、link/face 边拆分、!done 回滚节点）；refine
+  （ImplicitFn trait、btSymMatrix 对称三角索引、ImplicitSolve 割线迭代 256 步、质量重分配 f 公式、
+  face 重处理循环（--i;break）、cut 复制+符号重定向+orphan 清理——`todetach==0` 哨兵 quirk 逐字）。
+  demo `softbody_joints`（第 14 个 check.py demo：LJoint 布料拖拽 follow err 0.69/AJoint 马达精确保持
+  1.500 rad/s）；测试 +8 双 feature（transform 平移/旋转/缩放、transform_to 拟合恢复、cut_link 拓扑/速度
+  继承、refine 插值/质量守恒、cut 符号语义+链清空（Bullet 逐字）、LJoint 锚定抗重力、AJoint 轴对齐收敛、
+  马达恒速、torque impulse）。**实现勘误**：①Bullet 的 `m_X` 只在构造函数快照一次（append/cut/refine 不
+  刷新）——rest_positions 照抄，append_node 后 transform_to 的拟合对新节点无采样；②refine cut 的节点复制
+  条件是 `|eval|<accuracy`（窄带）而 link 重定向条件是 `eval<accuracy`（负半空间）——两个不同判据都逐字；
+  ③cluster frame 的 xform 在 rotate/transform 后**延迟一步**（update_clusters 在 predict_motion 里跑）。
 - **Phase F（后置待定）**：soft↔mb 耦合（SDF_MDF jacobian 行，复用 `multibody/contact.rs` 管线）。
 - perf：C/D 后补 `cloth_wind`/`softbody_rain` perf 场景（双侧 runner 扩展）。
 
