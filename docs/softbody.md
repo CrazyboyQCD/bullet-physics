@@ -216,12 +216,26 @@ Bullet HullLibrary 可能不同 → links 生成顺序不同 → PBD 求解顺�
   扁箱），已记 ignored 测试 + HANDOFF 待办。
   验收：check.py 全绿（f32/f64 + 11 demo）、clippy 双 feature 清零、parity 6 场景逐数字一致、
   dbvt 13 测试绿（mb 路径 diff 为空逻辑论证跳过）。
-- **Phase C：Faces + 布料现象**（~800 行）
-  faces/update_normals/update_area；aero（V_Point/V_TwoSided(+LiftDrag)/V_OneSided/F_* 7 模型）；
-  pressure/volume（getVolume 散度定理、updatePose）；PSolve_SContacts + VF_SS（soft-soft 碰撞，5s 扩展）；
-  create_patch（fixeds 位图/gendiags/perturbation+rand 复刻）；**软体 raycast**（需 fdbvt faces，自 B 期
-  挪入）。demo：`softbody_flag`（风场飘动）、`softbody_balloon`（pressure 闭合 patch）。
-  probe：patch_catenary（四角固定 settle）、soft_soft_vf。
+- **Phase C：Faces + 布料现象** ✅ 完成（2026-08-31 深夜五）
+  faces/update_normals/update_area（update_constants 尾部并入，拓扑变化时 fdbvt 重建）；aero 全 7 模型
+  （forces.rs，V_*/F_* 双族 + lift/drag + ApplyClampedForce 反转钳制）；pressure/volume（getVolume 散度定理、
+  setPose/updatePose——PolarDecompose 延 D 期，kVC 用 setPose(true,false) 即可）；PSolve_SContacts +
+  VF_SS（collide_tt 树-树 for_each_overlapping_pair，Bullet push 序；solve_constraints 改关联函数
+  `SoftBody::solve_constraints(idx, &mut [SoftBody], bodies)` 字段级拆分——软接触内核跨 body 写双方节点）；
+  create_patch（fixeds 全位图/gendiags/perturbation+MsvcRand 复刻——rand 每节点消费 2 次仅 perturbation≠0 时
+  影响几何）；软体 raycast（SoftBody::ray_test 全 face 扫描 = Bullet bcountonly 路径 +
+  PhysicsWorld::raycast_soft_closest；fdbvt 剪枝记 perf 待办）。demo：`softbody_flag`（第 12 个 check.py demo：
+  顶角钉死迎风鼓包 0.745 + 双片缝合枕头 kPR 膨胀 19× 有界）。probe：patch_catenary（ulp 级首差 → 1.6cm
+  settle 散布，385 链运算序微差同类）、soft_soft_vf（**首触同帧 43、两片间距两侧都收敛 margin 和 0.504/0.505
+  ——VF_SS 带语义对齐**；绝对高差继承下片 plane settle 偏差）。测试 +6（patch 拓扑/面积+闭合盒体积/VF_SS 带内
+  保持/raycast 命中+fraction/aero 下风漂移/枕头膨胀）双 feature。
+  **实现要点/勘误**：①**fCollision::Default 本树 = SDF_RS 单位**（不含 VF_SS——旧记忆错误已修正），
+  soft-soft 需显式 opt-in，且 handler 的 switch 对 `cf & SVSmask` **精确匹配** VF_SS（组合位 fallthrough 无操作，
+  照抄）；②Bullet 的 fdbvt 在 predictMotion 头部拓扑变化时 clear+initializeFaceTree（VF_SS 位开才建）——
+  追加 faces 不自动建树；③CollideVF_SS 的"跳过含节点面"循环是 Bullet 无效代码（continue 错作用域），
+  逐字移植不修；④collideTV/collideTT 的 Bullet 栈序是 **childs[1] 先弹**——DbvtTree::walk_overlapping 已
+  对齐（softbody rcontacts 顺序），collideTT 新增同 push 序；⑤CreatePatch 的 rand 消费不设门
+  （perturbation 只当系数），perturbation=0 时几何确定 ✓。
 - **Phase D：Tetra + Cluster 体积软体**（~1200 行）
   tetras/体积梯度（kVST 行）、setVolumeMass/Density；pose（bvolume/bframe/m_aqq/matching kMT）；
   K-mean generate_clusters + cluster 惯量/求解/阻尼/apply；quickhull；CL_RS/CL_SS/CL_SELF（cluster 连通性）；

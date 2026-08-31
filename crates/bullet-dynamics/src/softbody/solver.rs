@@ -6,8 +6,9 @@
 use bullet_math::{Aabb, Real, Vector3};
 
 use super::body::SoftBody;
-use super::collide::impulse_matrix;
-use super::config::PSolverKind;
+use super::collide::{impulse_matrix, bary_eval};
+use super::config::{PSolverKind, SoftCollision};
+use super::geometry::project_on_plane;
 use crate::body::RigidBody;
 
 /// The bullet-source epsilon gating the link position solve
@@ -36,10 +37,16 @@ impl SoftBody {
     /// (`q = x; v += f*im*sdt; x += v*sdt`) with the per-axis
     /// `max_displacement` clamp.
     pub fn predict_motion(&mut self, dt: Real, gravity: Vector3) {
-        // Update (runtime constants).
+        // Update (runtime constants + face tree on topology changes —
+        // Bullet clears and rebuilds `m_fdbvt` whenever `m_bUpdateRtCst`,
+        // but only when VF_SS collisions are enabled).
         if self.update_rt_cst {
             self.update_rt_cst = false;
             self.update_constants();
+            self.fdbvt.clear();
+            if self.cfg.collisions.contains(SoftCollision::VF_SS) {
+                self.initialize_face_tree();
+            }
         }
 
         // Prepare.
@@ -89,116 +96,189 @@ impl SoftBody {
             let volume = Aabb::new(x - pad, x + pad);
             self.ndbvt.update_fat(leaf, volume, v * velmrg, updmrg);
         }
-        self.ndbvt.optimize_incremental(1);
+        // Faces tree (`m_fdbvt.update(leaf, VolumeOf(f, radmrg), v * velmrg,
+        // updmrg)` — the padded triangle AABB with the face-average
+        // velocity as the fat margin).
+        if !self.fdbvt.is_empty() {
+            for i in 0..self.faces.len() {
+                let (leaf, v) = {
+                    let f = &self.faces[i];
+                    let n = f.n;
+                    let v = (self.nodes[n[0]].v + self.nodes[n[1]].v + self.nodes[n[2]].v) / 3.0;
+                    (f.leaf, v)
+                };
+                let fnodes = self.faces[i].n;
+                let [x0, x1, x2] = [
+                    self.nodes[fnodes[0]].x,
+                    self.nodes[fnodes[1]].x,
+                    self.nodes[fnodes[2]].x,
+                ];
+                let min = x0.min(x1).min(x2) - Vector3::splat(radmrg);
+                let max = x0.max(x1).max(x2) + Vector3::splat(radmrg);
+                self.fdbvt.update_fat(leaf, Aabb::new(min, max), v * velmrg, updmrg);
+            }
+            self.fdbvt.optimize_incremental(1);
+        }
 
-        // Clear contacts (Bullet resizes m_rcontacts/m_scontacts to zero at
-        // the end of predictMotion).
+        // Pose (frame tracking is a cluster-phase feature; the volume
+        // conservation reads the rest volume captured by `set_pose`).
+        self.update_pose();
+        if self.pose.bframe && self.cfg.k_mt > 0.0 {
+            // Match toward the rest frame (identity pose until phase D
+            // installs PolarDecompose, which makes this exact-noop except
+            // for the rest-frame offset — kept for interface parity).
+            let com = self.pose.com;
+            for i in 0..self.nodes.len() {
+                if self.nodes[i].im > 0.0 {
+                    let x = self.pose.rot * self.pose.pos[i] + com;
+                    self.nodes[i].x = self.nodes[i].x.lerp(x, self.cfg.k_mt);
+                }
+            }
+        }
+
+        // Clear contacts.
         self.rcontacts.clear();
+        self.scontacts.clear();
+        self.ndbvt.optimize_incremental(1);
     }
 
     /// Solve the constraint set (Bullet's `solveConstraints`): assemble the
     /// per-solve link/anchor constants, run the velocity sequence, the
     /// position sequence, and the drift sequence, then write the velocities
-    /// back from the corrected positions. `bodies` is the owning world's
-    /// rigid-body slice (anchor preparation and contact impulses reach into
-    /// it, exactly like Bullet's `btRigidBody::applyImpulse` calls).
-    pub fn solve_constraints(&mut self, bodies: &mut [RigidBody]) {
+    /// back from the corrected positions.
+    ///
+    /// An associated function over the whole soft-body slice: the
+    /// soft-contact kernel reaches into the face-side body (`PSolve_SContacts`
+    /// moves nodes on both sides), so `idx` + `softs` replace `&mut self`.
+    /// `bodies` is the owning world's rigid-body slice (anchor preparation
+    /// and contact impulses reach into it, exactly like Bullet's
+    /// `btRigidBody::applyImpulse` calls).
+    pub fn solve_constraints(idx: usize, softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
+        let (before, rest) = softs.split_at_mut(idx);
+        let (this, after) = rest.split_first_mut().unwrap();
+        Self::solve_constraints_inner(this, idx, before, after, bodies);
+    }
+
+    fn solve_constraints_inner(
+        this: &mut SoftBody,
+        idx: usize,
+        before: &mut [SoftBody],
+        after: &mut [SoftBody],
+        bodies: &mut [RigidBody],
+    ) {
         // Prepare links: gradient c3 = q1 - q0 and c2 = 1/(|c3|^2 * c0).
-        for l in &mut self.links {
-            l.c3 = self.nodes[l.n[1]].q - self.nodes[l.n[0]].q;
+        for l in &mut this.links {
+            l.c3 = this.nodes[l.n[1]].q - this.nodes[l.n[0]].q;
             l.c2 = 1.0 / (l.c3.length_squared() * l.c0);
         }
         // Prepare anchors (Bullet: impulse matrix per anchor + activate the
         // body so a sleeping anchor target takes part).
-        for a in &mut self.anchors {
+        for a in &mut this.anchors {
             let body = &mut bodies[a.body];
             let ra = body.orientation * a.local;
             a.c0 = impulse_matrix(
-                self.sst.sdt,
-                self.nodes[a.node].im,
+                this.sst.sdt,
+                this.nodes[a.node].im,
                 body.inv_mass(),
                 &body.inv_inertia_world(),
                 ra,
             );
             a.c1 = ra;
-            a.c2 = self.sst.sdt * self.nodes[a.node].im;
+            a.c2 = this.sst.sdt * this.nodes[a.node].im;
             body.activate();
         }
 
-        let sdt = self.sst.sdt;
+        let sdt = this.sst.sdt;
 
         // Solve velocities.
-        if self.cfg.viterations > 0 {
-            for _ in 0..self.cfg.viterations {
-                for k in 0..self.cfg.vsequence.len() {
-                    let kind = self.cfg.vsequence[k];
-                    self.run_vsolver(kind, 1.0);
+        if this.cfg.viterations > 0 {
+            for _ in 0..this.cfg.viterations {
+                for k in 0..this.cfg.vsequence.len() {
+                    let kind = this.cfg.vsequence[k];
+                    run_vsolver(this, kind, 1.0);
                 }
             }
             // Update: re-predict positions from the solved velocities.
-            for n in &mut self.nodes {
+            for n in &mut this.nodes {
                 n.x = n.q + n.v * sdt;
             }
         }
 
         // Solve positions.
-        if self.cfg.piterations > 0 {
-            let piterations = self.cfg.piterations as Real;
-            for isolve in 0..self.cfg.piterations {
+        if this.cfg.piterations > 0 {
+            let piterations = this.cfg.piterations as Real;
+            for isolve in 0..this.cfg.piterations {
                 let ti = isolve as Real / piterations;
-                for k in 0..self.cfg.psequence.len() {
-                    let kind = self.cfg.psequence[k];
-                    self.run_psolver(kind, 1.0, ti, bodies);
+                for k in 0..this.cfg.psequence.len() {
+                    let kind = this.cfg.psequence[k];
+                    run_psolver(this, Some((idx, before, after)), kind, 1.0, ti, bodies);
                 }
             }
-            let vc = self.sst.isdt * (1.0 - self.cfg.k_dp);
-            for n in &mut self.nodes {
+            let vc = this.sst.isdt * (1.0 - this.cfg.k_dp);
+            for n in &mut this.nodes {
                 n.v = (n.x - n.q) * vc;
                 n.f = Vector3::ZERO;
             }
         }
 
         // Solve drift.
-        if self.cfg.diterations > 0 {
-            let vcf = self.cfg.k_vcf * self.sst.isdt;
-            for n in &mut self.nodes {
+        if this.cfg.diterations > 0 {
+            let vcf = this.cfg.k_vcf * this.sst.isdt;
+            for n in &mut this.nodes {
                 n.q = n.x;
             }
-            for _ in 0..self.cfg.diterations {
-                for k in 0..self.cfg.dsequence.len() {
-                    let kind = self.cfg.dsequence[k];
-                    self.run_psolver(kind, 1.0, 0.0, bodies);
+            for _ in 0..this.cfg.diterations {
+                for k in 0..this.cfg.dsequence.len() {
+                    let kind = this.cfg.dsequence[k];
+                    run_psolver(this, Some((idx, before, after)), kind, 1.0, 0.0, bodies);
                 }
             }
-            for n in &mut self.nodes {
+            for n in &mut this.nodes {
                 n.v += (n.x - n.q) * vcf;
             }
         }
     }
 
     /// Run the position kernel sequence for `iterations` rounds without the
-    /// velocity writeback (Bullet's `staticSolve`, used by refine).
+    /// velocity writeback (Bullet's `staticSolve`, used by refine). Soft
+    /// contacts are skipped — refine is a single-body relaxation.
     pub fn static_solve(&mut self, iterations: u32, bodies: &mut [RigidBody]) {
         for _ in 0..iterations {
             for k in 0..self.cfg.psequence.len() {
                 let kind = self.cfg.psequence[k];
-                self.run_psolver(kind, 1.0, 0.0, bodies);
+                run_psolver(self, None, kind, 1.0, 0.0, bodies);
             }
         }
     }
 
     /// Refresh every runtime constant (Bullet's `updateConstants` =
-    /// `resetLinkRestLengths` + `updateLinkConstants` + `updateArea`; the
-    /// face-area pass arrives with the cloth phase).
+    /// `resetLinkRestLengths` + `updateLinkConstants` + `updateArea`).
     pub fn update_constants(&mut self) {
         self.reset_link_rest_lengths();
         self.update_link_constants();
+        self.update_area(false);
     }
 
-    /// Accumulate the aero/pressure/volume forces (Bullet's `applyForces`).
-    /// Phase A stub: the default coefficients are all zero, so this is a
-    /// no-op; the models arrive with the cloth phase (phase C).
-    fn apply_forces(&mut self) {}
+    /// Refresh face and node areas (Bullet's `updateArea`; nodes accumulate
+    /// one third of their adjacent faces' doubled areas).
+    pub fn update_area(&mut self, _average_area: bool) {
+        for f in &mut self.faces {
+            let n = f.n;
+            f.ra = super::geometry::area_of(self.nodes[n[0]].x, self.nodes[n[1]].x, self.nodes[n[2]].x);
+        }
+        for n in &mut self.nodes {
+            n.area = 0.0;
+        }
+        for f in &self.faces {
+            let n = f.n;
+            for &ni in &n {
+                self.nodes[ni].area += f.ra;
+            }
+        }
+        for n in &mut self.nodes {
+            n.area *= 0.3333333;
+        }
+    }
 
     /// Recompute the world-space bounds from the node positions (Bullet's
     /// `updateBounds`): node min/max padded by the collision margin.
@@ -214,24 +294,6 @@ impl SoftBody {
             self.bounds = [mins - mrg, maxs + mrg];
         } else {
             self.bounds = [Vector3::ZERO, Vector3::ZERO];
-        }
-    }
-
-    fn run_psolver(&mut self, kind: PSolverKind, kst: Real, ti: Real, bodies: &mut [RigidBody]) {
-        match kind {
-            PSolverKind::Linear => self.solve_links(kst),
-            PSolverKind::Anchors => self.solve_anchors(kst, bodies),
-            PSolverKind::RContacts => self.solve_rigid_contacts(kst, bodies),
-            // Soft contacts arrive with the soft-soft phase.
-            PSolverKind::SContacts => {
-                let _ = ti;
-            }
-        }
-    }
-
-    fn run_vsolver(&mut self, kind: super::config::VSolverKind, kst: Real) {
-        match kind {
-            super::config::VSolverKind::Linear => self.solve_velocity_links(kst),
         }
     }
 
@@ -340,5 +402,83 @@ impl SoftBody {
             self.nodes[node].x -= impulse * c2;
             body.apply_impulse(impulse, c1);
         }
+    }
+}
+
+/// Dispatch one position kernel (Bullet's `getSolver` + the sequence loops).
+/// `soft_ctx` carries the split soft-body slices the soft-contact kernel
+/// needs to reach the face-side body; `None` skips soft contacts (the
+/// single-body `static_solve` path).
+fn run_psolver(
+    this: &mut SoftBody,
+    soft_ctx: Option<(usize, &mut [SoftBody], &mut [SoftBody])>,
+    kind: PSolverKind,
+    kst: Real,
+    _ti: Real,
+    bodies: &mut [RigidBody],
+) {
+    match kind {
+        PSolverKind::Linear => this.solve_links(kst),
+        PSolverKind::Anchors => this.solve_anchors(kst, bodies),
+        PSolverKind::RContacts => this.solve_rigid_contacts(kst, bodies),
+        PSolverKind::SContacts => {
+            if let Some((idx, before, after)) = soft_ctx {
+                solve_soft_contacts(this, idx, before, after);
+            }
+        }
+    }
+}
+
+/// Dispatch one velocity kernel.
+fn run_vsolver(this: &mut SoftBody, kind: super::config::VSolverKind, kst: Real) {
+    match kind {
+        super::config::VSolverKind::Linear => this.solve_velocity_links(kst),
+    }
+}
+
+/// Solve the soft-soft contacts (Bullet's `PSolve_SContacts`): the node and
+/// the face's barycentric point are pushed apart along the contact normal
+/// (depth `margin - (n.x - n.p).normal`) and friction damps the in-plane
+/// relative step, each side weighted by its `cfm` share. The face-side body
+/// is resolved from the split slices (its index vs `idx`).
+fn solve_soft_contacts(
+    this: &mut SoftBody,
+    idx: usize,
+    before: &mut [SoftBody],
+    after: &mut [SoftBody],
+) {
+    for c in 0..this.scontacts.len() {
+        let (node, face_body, face, weights, normal, margin, friction, cfm) = {
+            let c = &this.scontacts[c];
+            (
+                c.node,
+                c.face_body,
+                c.face,
+                c.weights,
+                c.normal,
+                c.margin,
+                c.friction,
+                c.cfm,
+            )
+        };
+        let other = if face_body < idx {
+            &mut before[face_body]
+        } else {
+            &mut after[face_body - idx - 1]
+        };
+        let fnodes = other.faces[face].n;
+        let p = bary_eval(other.nodes[fnodes[0]].x, other.nodes[fnodes[1]].x, other.nodes[fnodes[2]].x, weights);
+        let q = bary_eval(other.nodes[fnodes[0]].q, other.nodes[fnodes[1]].q, other.nodes[fnodes[2]].q, weights);
+        let vr = (this.nodes[node].x - this.nodes[node].q) - (p - q);
+        let mut corr = Vector3::ZERO;
+        if vr.dot(normal) < 0.0 {
+            let j = margin - (normal.dot(this.nodes[node].x) - normal.dot(p));
+            corr += normal * j;
+        }
+        corr -= project_on_plane(vr, normal) * friction;
+        this.nodes[node].x += corr * cfm[0];
+        other.nodes[fnodes[0]].x -= corr * (cfm[1] * weights.x);
+        other.nodes[fnodes[1]].x -= corr * (cfm[1] * weights.y);
+        other.nodes[fnodes[2]].x -= corr * (cfm[1] * weights.z);
     }
 }

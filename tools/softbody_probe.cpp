@@ -135,11 +135,59 @@ static void scene_cloth_plane(int frames)
 	}
 }
 
+// Scene 4: a 12x12 patch pinned at its four corners, released horizontally
+// — pure cloth catenary (links + gravity, no contact below).
+static void scene_patch_catenary(int frames)
+{
+	btSoftRigidDynamicsWorld* world = makeWorld();
+	btSoftBody* cloth = btSoftBodyHelpers::CreatePatch(world->getWorldInfo(),
+	                                                   btVector3(-2, 6, -2), btVector3(2, 6, -2),
+	                                                   btVector3(-2, 6, 2), btVector3(2, 6, 2),
+	                                                   12, 12, 1 + 2 + 4 + 8, true);
+	cloth->m_cfg.piterations = 4;
+	world->addSoftBody(cloth);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3 com = centerOfMass(cloth);
+		printf("%d %.6f %.6f %.6f\n", f, cloth->m_nodes[5 * 12 + 5].m_x.y(), minY(cloth), com.y());
+	}
+}
+
+// Scene 5: one patch drops onto another mid-air patch — the VF_SS
+// (vertex-vs-face soft-soft) path. Both bodies opt in (the default
+// collision flags are SDF_RS only).
+static void scene_soft_soft_vf(int frames)
+{
+	btSoftRigidDynamicsWorld* world = makeWorld();
+	addGround(world);
+	btSoftBody* upper = btSoftBodyHelpers::CreatePatch(world->getWorldInfo(),
+	                                                   btVector3(-2, 6, -2), btVector3(2, 6, -2),
+	                                                   btVector3(-2, 6, 2), btVector3(2, 6, 2),
+	                                                   12, 12, 0, true);
+	btSoftBody* lower = btSoftBodyHelpers::CreatePatch(world->getWorldInfo(),
+	                                                   btVector3(-2, 3, -2), btVector3(2, 3, -2),
+	                                                   btVector3(-2, 3, 2), btVector3(2, 3, 2),
+	                                                   12, 12, 0, true);
+	upper->m_cfg.piterations = 4;
+	lower->m_cfg.piterations = 4;
+	upper->m_cfg.collisions = btSoftBody::fCollision::Default | btSoftBody::fCollision::VF_SS;
+	lower->m_cfg.collisions = btSoftBody::fCollision::Default | btSoftBody::fCollision::VF_SS;
+	world->addSoftBody(upper);
+	world->addSoftBody(lower);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		printf("%d %.6f %.6f %.6f %.6f\n", f, minY(upper), minY(lower),
+		       centerOfMass(upper).y(), centerOfMass(lower).y());
+	}
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s <rope_pendulum|rope_ground|cloth_plane> [frames]\n", argv[0]);
+		fprintf(stderr, "usage: %s <rope_pendulum|rope_ground|cloth_plane|patch_catenary|soft_soft_vf> [frames]\n", argv[0]);
 		return 1;
 	}
 	const char* scene = argv[1];
@@ -150,6 +198,10 @@ int main(int argc, char** argv)
 		scene_rope_ground(frames);
 	else if (!strcmp(scene, "cloth_plane"))
 		scene_cloth_plane(frames);
+	else if (!strcmp(scene, "patch_catenary"))
+		scene_patch_catenary(frames);
+	else if (!strcmp(scene, "soft_soft_vf"))
+		scene_soft_soft_vf(frames);
 	else
 	{
 		fprintf(stderr, "unknown scene %s\n", scene);

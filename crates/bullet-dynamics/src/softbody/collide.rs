@@ -21,6 +21,9 @@ use crate::body::RigidBody;
 
 use super::body::SoftBody;
 use super::config::SoftCollision;
+use super::geometry::{
+    bary_coord, bary_eval_real, bary_eval_vec3, project_origin_triangle, ray_from_to_triangle,
+};
 
 /// Contact info against one rigid body (Bullet's `sCti`).
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +75,28 @@ pub struct Anchor {
     pub c1: Vector3,
     /// `sdt * node.im`.
     pub c2: Real,
+}
+
+/// A node-vs-face contact between two soft bodies (Bullet's `SContact`).
+#[derive(Clone, Copy, Debug)]
+pub struct SContact {
+    /// Node index on the node-side body.
+    pub node: usize,
+    /// Face index on the face-side body (the body itself is tracked by the
+    /// world's pair grouping, mirroring Bullet's `m_face` pointer).
+    pub face_body: usize,
+    /// Face index.
+    pub face: usize,
+    /// Barycentric weights on the face.
+    pub weights: Vector3,
+    /// Contact normal (from the face surface toward the node).
+    pub normal: Vector3,
+    /// Effective margin (both margins plus the node's step travel).
+    pub margin: Real,
+    /// Friction coefficient (`max` of both bodies' `kDF`).
+    pub friction: Real,
+    /// Node-side / face-side response weights (`ma/ms * kSHR`).
+    pub cfm: [Real; 2],
 }
 
 /// Skew (cross-product) matrix of `v`.
@@ -293,4 +318,113 @@ impl SoftBody {
             });
         }
     }
+}
+
+/// Soft-vs-soft collision for one ordered pair (Bullet's
+/// `defaultCollisionHandler(psb)` `VF_SS` branch): the node-side body's
+/// node tree walks the face-side body's face tree; each overlapping
+/// (node, face) pair closer than the combined margin plus the node's step
+/// travel lands in the node-side body's `scontacts` (solved at stage 7s).
+///
+/// Bullet runs this twice per broad-phase pair (A's nodes vs B's faces,
+/// then B's nodes vs A's faces) — the world does the same. The upstream
+/// "skip faces containing the node" loop is a no-op (it `continue`s the
+/// wrong scope) and is ported as such: the face check is intentionally
+/// absent, matching Bullet's effective behavior.
+pub fn collide_vf_ss(node_side: &mut SoftBody, face_side: &mut SoftBody, face_body: usize, pairs: &mut Vec<(usize, usize)>) {
+    let mrg = node_side.margin + face_side.margin;
+    let k_df_node = node_side.cfg.k_df;
+    let k_shr_node = node_side.cfg.k_shr;
+    let k_shr_face = face_side.cfg.k_shr;
+    let k_df_face = face_side.cfg.k_df;
+
+    pairs.clear();
+    node_side.ndbvt.for_each_overlapping_pair(&face_side.fdbvt, pairs);
+    for &(ni, fi) in &*pairs {
+        // Project the origin onto the triangle relative to the node.
+        let o = node_side.nodes[ni].x;
+        let q = node_side.nodes[ni].q;
+        let fnodes = face_side.faces[fi].n;
+        let mut p = Vector3::ZERO;
+        let mut d = Real::INFINITY;
+        project_origin_triangle(
+            face_side.nodes[fnodes[0]].x - o,
+            face_side.nodes[fnodes[1]].x - o,
+            face_side.nodes[fnodes[2]].x - o,
+            &mut p,
+            &mut d,
+        );
+        let m = mrg + (o - q).length() * 2.0;
+        if d >= m * m {
+            continue;
+        }
+        let [xa, xb, xc] = [
+            face_side.nodes[fnodes[0]].x,
+            face_side.nodes[fnodes[1]].x,
+            face_side.nodes[fnodes[2]].x,
+        ];
+        let w = bary_coord(xa, xb, xc, p + o);
+        let ma = node_side.nodes[ni].im;
+        let mut mb = bary_eval_real(
+            face_side.nodes[fnodes[0]].im,
+            face_side.nodes[fnodes[1]].im,
+            face_side.nodes[fnodes[2]].im,
+            w,
+        );
+        if face_side.nodes[fnodes[0]].im <= 0.0
+            || face_side.nodes[fnodes[1]].im <= 0.0
+            || face_side.nodes[fnodes[2]].im <= 0.0
+        {
+            mb = 0.0;
+        }
+        let ms = ma + mb;
+        if ms <= 0.0 {
+            continue;
+        }
+        node_side.scontacts.push(SContact {
+            node: ni,
+            face_body,
+            face: fi,
+            weights: w,
+            normal: p / -d.sqrt(),
+            margin: m,
+            friction: k_df_node.max(k_df_face),
+            cfm: [ma / ms * k_shr_node, mb / ms * k_shr_face],
+        });
+    }
+}
+
+impl SoftBody {
+    /// Closest-hit ray cast against the surface faces (Bullet's
+    /// `rayTest(rayFrom, rayTo, sRayCast)`): returns the hit face index and
+    /// the segment fraction. The full-face scan matches Bullet's
+    /// `bcountonly` path; the fdbvt pruning is a later perf item.
+    pub fn ray_test(&self, ray_from: Vector3, ray_to: Vector3) -> Option<(usize, Real)> {
+        let dir = ray_to - ray_from;
+        let mut mint: Real = 1.0;
+        let mut best: Option<usize> = None;
+        for i in 0..self.faces.len() {
+            let n = self.faces[i].n;
+            let t = ray_from_to_triangle(
+                ray_from,
+                ray_to,
+                dir,
+                self.nodes[n[0]].x,
+                self.nodes[n[1]].x,
+                self.nodes[n[2]].x,
+                mint,
+            );
+            if t > 0.0 {
+                mint = t;
+                best = Some(i);
+            }
+        }
+        best.map(|i| (i, mint))
+    }
+}
+
+/// Barycentric helper re-exported for the contact solver
+/// (Bullet's `BaryEval` on positions).
+pub fn bary_eval(a: Vector3, b: Vector3, c: Vector3, w: Vector3) -> Vector3 {
+    bary_eval_vec3(a, b, c, w)
 }

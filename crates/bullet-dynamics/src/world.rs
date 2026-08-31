@@ -13,6 +13,8 @@ use crate::island::UnionFind;
 use crate::multibody::body::{MultiBody, MultiBodyScratch};
 use crate::multibody::contact::{self, ContactSide, MbContactRow, PendingContact};
 use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
+use crate::softbody::collide::collide_vf_ss;
+use crate::softbody::config::SoftCollision;
 use crate::softbody::SoftBody;
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
 use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, SLOP, SPLIT_TURN_ERP};
@@ -294,6 +296,9 @@ pub struct PhysicsWorld {
     soft_proxies: Vec<usize>,
     /// Recycled leaf scratch for the soft-body SDF_RS queries.
     soft_scratch: Vec<usize>,
+    /// Recycled (node, face) leaf-pair scratch for the soft-soft VF_SS
+    /// queries.
+    soft_pair_scratch: Vec<(usize, usize)>,
     /// Cumulative per-stage step timings; zero until enabled (see
     /// [`PhysicsWorld::enable_step_timing`]).
     step_timings: StepTimings,
@@ -344,6 +349,7 @@ impl PhysicsWorld {
             soft_bodies: Vec::new(),
             soft_proxies: Vec::new(),
             soft_scratch: Vec::new(),
+            soft_pair_scratch: Vec::new(),
             step_timings: StepTimings::default(),
         }
     }
@@ -698,6 +704,30 @@ impl PhysicsWorld {
         self.raycast_closest_excluding(ray_from, ray_to, None)
     }
 
+    /// Closest ray hit against the soft bodies' surface faces (Bullet's
+    /// per-body `btSoftBody::rayTest`): returns the soft-body index, the
+    /// face index and the segment fraction. Rigid-body hits are not
+    /// considered — a combined query joins the world-API cleanup (phase E).
+    pub fn raycast_soft_closest(
+        &self,
+        ray_from: Vector3,
+        ray_to: Vector3,
+    ) -> Option<(usize, usize, Real)> {
+        let mut best: Option<(usize, usize, Real)> = None;
+        for (i, sb) in self.soft_bodies.iter().enumerate() {
+            if let Some((face, fraction)) = sb.ray_test(ray_from, ray_to) {
+                let closer = match best {
+                    Some((_, _, f)) => fraction < f,
+                    None => true,
+                };
+                if closer {
+                    best = Some((i, face, fraction));
+                }
+            }
+        }
+        best
+    }
+
     /// Like [`raycast_closest`](Self::raycast_closest) but never reports
     /// `ignore` (the raycast vehicle's wheel rays, which must not hit their
     /// own chassis). Bullet skips the chassis implicitly because its
@@ -1036,8 +1066,11 @@ impl PhysicsWorld {
                     self.soft_vs_rigid(s, j);
                     continue;
                 }
-                (ProxyOwner::Soft(_), ProxyOwner::Soft(_))
-                | (ProxyOwner::Soft(_), ProxyOwner::Collider(_))
+                (ProxyOwner::Soft(a), ProxyOwner::Soft(b)) => {
+                    self.soft_vs_soft(a, b);
+                    continue;
+                }
+                (ProxyOwner::Soft(_), ProxyOwner::Collider(_))
                 | (ProxyOwner::Collider(_), ProxyOwner::Soft(_)) => continue,
                 _ => {}
             }
@@ -1388,8 +1421,15 @@ impl PhysicsWorld {
         // rigid velocities and any impulses applied to rigid bodies land on
         // the next step — kept identical here (see `docs/softbody.md` §0/§4).
         let (soft_bodies, bodies) = (&mut self.soft_bodies, &mut self.bodies);
-        for sb in soft_bodies {
-            sb.solve_constraints(bodies);
+        for i in 0..soft_bodies.len() {
+            SoftBody::solve_constraints(i, soft_bodies, bodies);
+        }
+
+        // 8s. Soft-body normals refresh (Bullet's `updateSoftBodies` ->
+        // `integrateMotion` = `updateNormals`); the face pass joins with
+        // the cloth phase, ropes keep zero normals.
+        for sb in &mut self.soft_bodies {
+            sb.update_normals();
         }
 
         // 8. Clear accumulated forces for the next step.
@@ -1431,6 +1471,35 @@ impl PhysicsWorld {
         }
         let (soft_bodies, bodies) = (&mut self.soft_bodies, &self.bodies);
         soft_bodies[soft].collide_rigid(rigid, &bodies[rigid], &mut self.soft_scratch);
+    }
+
+    /// Soft-vs-soft collision for one broad-phase pair (Bullet's
+    /// `btSoftSoftCollisionAlgorithm` -> `defaultCollisionHandler(psb)`
+    /// `VF_SS` branch): both bodies must select vertex-face handling —
+    /// Bullet's dispatch matches `(collisions_a & collisions_b) & SVSmask`
+    /// *exactly* against `VF_SS`, so a combination like `VF_SS | CL_SELF`
+    /// falls through to nothing. Each side's nodes are tested against the
+    /// other's faces (contacts land in the node-side body, solved at 7s).
+    fn soft_vs_soft(&mut self, a: usize, b: usize) {
+        let effective = self.soft_bodies[a].cfg.collisions.0 & self.soft_bodies[b].cfg.collisions.0;
+        if effective & SoftCollision::SVS_MASK.0 != SoftCollision::VF_SS.0 {
+            return;
+        }
+        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+        let (soft_bodies, scratch) = (&mut self.soft_bodies, &mut self.soft_pair_scratch);
+        let (_before, rest) = soft_bodies.split_at_mut(lo);
+        let (sb_lo, after) = rest.split_first_mut().unwrap();
+        let sb_hi = &mut after[hi - lo - 1];
+        // Nodes of A against faces of B first, then B's nodes against A's
+        // faces (Bullet's two collideTT passes; each contact lands in the
+        // node-side body tagged with the face-side body index).
+        if a < b {
+            collide_vf_ss(&mut *sb_lo, &mut *sb_hi, b, scratch);
+            collide_vf_ss(&mut *sb_hi, &mut *sb_lo, a, scratch);
+        } else {
+            collide_vf_ss(&mut *sb_hi, &mut *sb_lo, b, scratch);
+            collide_vf_ss(&mut *sb_lo, &mut *sb_hi, a, scratch);
+        }
     }
 
     /// Build the per-step union-find islands and apply the island sleep/wake

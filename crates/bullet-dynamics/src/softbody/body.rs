@@ -8,7 +8,7 @@
 use bullet_collision::broadphase::DbvtTree;
 use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
 
-use super::collide::{Anchor, RContact};
+use super::collide::{Anchor, RContact, SContact};
 use super::config::{Config, SolverState};
 
 /// Linear/angular/volume stiffness coefficients of a material (Bullet's
@@ -91,6 +91,72 @@ pub struct Link {
     pub c3: Vector3,
 }
 
+/// A triangle of the soft surface (Bullet's `btSoftBody::Face`; the
+/// deformable-system `m_pcontact`/`m_n0`/`m_n1` fields are not ported).
+#[derive(Clone, Copy, Debug)]
+pub struct Face {
+    /// Node indices.
+    pub n: [usize; 3],
+    /// Material index.
+    pub mat: usize,
+    /// Normal (refreshed by `update_normals`).
+    pub normal: Vector3,
+    /// Rest area (doubled — Bullet's `AreaOf`, refreshed by `update_area`).
+    pub ra: Real,
+    /// Face-tree leaf handle (`DbvtTree::NONE` until inserted).
+    pub leaf: u32,
+}
+
+impl Face {
+    fn new(n: [usize; 3], mat: usize, ra: Real) -> Self {
+        Self { n, mat, normal: Vector3::ZERO, ra, leaf: DbvtTree::NONE }
+    }
+}
+
+/// Rest-pose bookkeeping (Bullet's `btSoftBody::Pose`): mass weights,
+/// rest offsets from the COM and the rest volume captured by `set_pose`.
+/// The rotation/scale fields only advance when a frame pose is enabled
+/// (phase D's cluster matching); `update_pose` keeps them at identity until
+/// then.
+#[derive(Clone, Debug)]
+pub struct Pose {
+    /// Whether the rest volume is tracked.
+    pub bvolume: bool,
+    /// Whether a rest frame is tracked.
+    pub bframe: bool,
+    /// Rest volume (set by `set_pose` when `bvolume`).
+    pub volume: Real,
+    /// Rest offsets from the COM.
+    pub pos: Vec<Vector3>,
+    /// Mass weights (fixed nodes get the huge `kmass` share).
+    pub wgh: Vec<Real>,
+    /// Rest COM (the origin `evaluate_com` reports — the zero vector unless
+    /// a frame pose is enabled, exactly like Bullet).
+    pub com: Vector3,
+    /// Pose rotation (identity until the cluster phase).
+    pub rot: Matrix3,
+    /// Pose scale (identity until the cluster phase).
+    pub scl: Matrix3,
+    /// Inverted rest covariance (used by the frame pose).
+    pub aqq: Matrix3,
+}
+
+impl Default for Pose {
+    fn default() -> Self {
+        Self {
+            bvolume: false,
+            bframe: false,
+            volume: 0.0,
+            pos: Vec::new(),
+            wgh: Vec::new(),
+            com: Vector3::ZERO,
+            rot: Matrix3::IDENTITY,
+            scl: Matrix3::IDENTITY,
+            aqq: Matrix3::IDENTITY,
+        }
+    }
+}
+
 /// A rope/cloth/volumetric soft body simulated with position-based dynamics
 /// (Bullet's `btSoftBody`, classic system). Phase A of the port covers the
 /// node/link skeleton; contacts, faces, tetras, clusters and joints follow
@@ -114,14 +180,31 @@ pub struct SoftBody {
     pub nodes: Vec<Node>,
     /// Distance constraints.
     pub links: Vec<Link>,
+    /// Surface triangles (empty for ropes).
+    pub faces: Vec<Face>,
     /// Materials.
     pub materials: Vec<Material>,
     /// Node AABB tree (Bullet's `m_ndbvt`): leaves keyed by node index,
     /// volumes padded by the collision margin and the step's velocity.
     pub ndbvt: DbvtTree,
+    /// Face AABB tree (Bullet's `m_fdbvt`), built lazily on the first face
+    /// insert and kept fat like the node tree.
+    pub fdbvt: DbvtTree,
+    /// Rest pose (Bullet's `m_pose`).
+    pub pose: Pose,
+    /// Wind velocity for the aero forces (Bullet's `m_windVelocity`, which
+    /// lives in the shared world info but is per-body in practice).
+    pub wind_velocity: Vector3,
+    /// Air density for the aero forces (Bullet's
+    /// `SoftBodyWorldInfo::air_density`, default 1.2; the water medium is
+    /// not ported — see `docs/softbody.md` §1).
+    pub air_density: Real,
     /// Contacts against rigid bodies this step (Bullet's `m_rcontacts`,
     /// cleared in `predict_motion`, filled by the collision phase).
     pub rcontacts: Vec<RContact>,
+    /// Contacts against other soft bodies' faces this step (Bullet's
+    /// `m_scontacts`, cleared in `predict_motion`).
+    pub scontacts: Vec<SContact>,
     /// Rigid-body anchors (Bullet's `m_anchors`).
     pub anchors: Vec<Anchor>,
     /// World-space bounds (nodes +/- margin), refreshed in `predict_motion`.
@@ -152,9 +235,15 @@ impl SoftBody {
             max_displacement: 1000.0,
             nodes: Vec::with_capacity(positions.len()),
             links: Vec::new(),
+            faces: Vec::new(),
             materials: vec![Material::default()],
             ndbvt: DbvtTree::new(),
+            fdbvt: DbvtTree::new(),
+            pose: Pose::default(),
+            wind_velocity: Vector3::ZERO,
+            air_density: 1.2,
             rcontacts: Vec::new(),
+            scontacts: Vec::new(),
             anchors: Vec::new(),
             bounds: [Vector3::ZERO, Vector3::ZERO],
             update_rt_cst: true,
@@ -216,6 +305,128 @@ impl SoftBody {
     pub fn set_mass(&mut self, node: usize, mass: Real) {
         self.nodes[node].im = if mass > 0.0 { 1.0 / mass } else { 0.0 };
         self.update_rt_cst = true;
+    }
+
+    /// Append a surface triangle (Bullet's `appendFace(node0, node1, node2)`;
+    /// degenerate (repeated-index) triangles are rejected like Bullet).
+    /// The face-tree leaf is inserted lazily on the next
+    /// `initialize_face_tree`/`predict_motion`.
+    pub fn append_face(&mut self, node0: usize, node1: usize, node2: usize, mat: Option<usize>) {
+        if node0 == node1 || node1 == node2 || node2 == node0 {
+            return;
+        }
+        let ra = super::geometry::area_of(
+            self.nodes[node0].x,
+            self.nodes[node1].x,
+            self.nodes[node2].x,
+        );
+        self.faces.push(Face::new([node0, node1, node2], mat.unwrap_or(0), ra));
+        self.update_rt_cst = true;
+    }
+
+    /// (Re)build the face tree from the current faces (Bullet's
+    /// `initializeFaceTree`): leaves hold the exact triangle AABBs — the
+    /// margin padding arrives with the first `predict_motion` update.
+    pub fn initialize_face_tree(&mut self) {
+        self.fdbvt.clear();
+        for i in 0..self.faces.len() {
+            let n = self.faces[i].n;
+            let [x0, x1, x2] = [self.nodes[n[0]].x, self.nodes[n[1]].x, self.nodes[n[2]].x];
+            let min = x0.min(x1).min(x2);
+            let max = x0.max(x1).max(x2);
+            self.faces[i].leaf = self.fdbvt.insert(Aabb::new(min, max), i);
+        }
+    }
+
+    /// Refresh face and node normals (Bullet's `updateNormals`: accumulate
+    /// the unnormalized cross products, then normalize — node normals stay
+    /// zero for zero-area fans).
+    pub fn update_normals(&mut self) {
+        for n in &mut self.nodes {
+            n.n = Vector3::ZERO;
+        }
+        for f in 0..self.faces.len() {
+            let n = self.faces[f].n;
+            let normal = (self.nodes[n[1]].x - self.nodes[n[0]].x)
+                .cross(self.nodes[n[2]].x - self.nodes[n[0]].x);
+            self.faces[f].normal = normal;
+            for &ni in &n {
+                self.nodes[ni].n += normal;
+            }
+        }
+        const EPS: Real = if cfg!(feature = "f64") { 2.2e-16 } else { 1.19e-7 };
+        for n in &mut self.nodes {
+            let len = n.n.length();
+            if len > EPS {
+                n.n /= len;
+            }
+        }
+    }
+
+    /// Bullet's `evaluateCom`: the pose-weighted COM when a frame pose is
+    /// enabled, otherwise the zero vector (the quirk `set_pose` builds on —
+    /// rest offsets end up in world coordinates unless a frame is tracked).
+    pub fn evaluate_com(&self) -> Vector3 {
+        let mut com = Vector3::ZERO;
+        if self.pose.bframe {
+            for i in 0..self.nodes.len() {
+                com += self.nodes[i].x * self.pose.wgh[i];
+            }
+        }
+        com
+    }
+
+    /// Capture the rest pose (Bullet's `setPose`): mass weights, rest
+    /// offsets, rest volume and the inverse rest covariance. The frame
+    /// rotation/scale tracking (and with it `PolarDecompose`) belongs to the
+    /// cluster phase; `bframe` still installs the weights and COM so the
+    /// pose is ready for it.
+    pub fn set_pose(&mut self, bvolume: bool, bframe: bool) {
+        self.pose.bvolume = bvolume;
+        self.pose.bframe = bframe;
+
+        // Weights: fixed nodes get a `kmass` share so they dominate.
+        let omass = self.get_total_mass();
+        let kmass = omass * self.nodes.len() as Real * 1000.0;
+        let mut tmass = omass;
+        for n in &self.nodes {
+            if n.im <= 0.0 {
+                tmass += kmass;
+            }
+        }
+        self.pose.wgh = self
+            .nodes
+            .iter()
+            .map(|n| if n.im > 0.0 { 1.0 / (n.im * tmass) } else { kmass / tmass })
+            .collect();
+
+        // Rest offsets and volume.
+        let com = self.evaluate_com();
+        self.pose.pos = self.nodes.iter().map(|n| n.x - com).collect();
+        self.pose.volume = if bvolume { self.get_volume() } else { 0.0 };
+        self.pose.com = com;
+        self.pose.rot = Matrix3::IDENTITY;
+        self.pose.scl = Matrix3::IDENTITY;
+
+        // Inverse rest covariance (assembled per row like Bullet:
+        // `aqq[row] += mq[row] * q`).
+        let mut aqq = Matrix3::ZERO;
+        for i in 0..self.nodes.len() {
+            let q = self.pose.pos[i];
+            let mq = q * self.pose.wgh[i];
+            aqq.x_axis.x += mq.x * q.x;
+            aqq.x_axis.y += mq.x * q.y;
+            aqq.x_axis.z += mq.x * q.z;
+            aqq.y_axis.x += mq.y * q.x;
+            aqq.y_axis.y += mq.y * q.y;
+            aqq.y_axis.z += mq.y * q.z;
+            aqq.z_axis.x += mq.z * q.x;
+            aqq.z_axis.y += mq.z * q.y;
+            aqq.z_axis.z += mq.z * q.z;
+        }
+        self.pose.aqq = aqq.inverse();
+
+        self.update_constants();
     }
 
     /// Mass of one node (0 when fixed; Bullet's `getMass`).

@@ -17,14 +17,18 @@
 pub mod body;
 pub mod collide;
 pub mod config;
+pub mod forces;
+pub mod geometry;
 pub mod helpers;
+pub mod rng;
 pub mod solver;
 #[cfg(test)]
 mod tests;
 
-pub use body::{Link, Material, Node, SoftBody};
-pub use collide::{Anchor, Cti, RContact};
+pub use body::{Face, Link, Material, Node, Pose, SoftBody};
+pub use collide::{Anchor, Cti, RContact, SContact};
 pub use config::{
     AeroModel, Config, PSolverKind, SoftCollision, SolverPreset, SolverState, VSolverKind,
 };
-pub use helpers::{create_rope, ROPE_FIX_END, ROPE_FIX_START};
+pub use helpers::{create_patch, create_rope, patch_fixeds, ROPE_FIX_END, ROPE_FIX_START};
+pub use rng::MsvcRand;

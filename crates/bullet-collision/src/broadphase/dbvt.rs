@@ -408,10 +408,59 @@ impl DbvtTree {
         }
         match &self.nodes[n as usize].as_ref().unwrap().kind {
             NodeKind::Leaf { proxy } => out.push(*proxy),
+            // Bullet's `collideTV` pushes childs[0] then childs[1] on an
+            // explicit stack, so childs[1] pops first — the right subtree is
+            // visited before the left (leaf order matters to consumers that
+            // append in visit order, e.g. the soft body's rcontacts).
             NodeKind::Internal { children } => {
-                self.walk_overlapping(children[0], volume, out);
                 self.walk_overlapping(children[1], volume, out);
+                self.walk_overlapping(children[0], volume, out);
             }
+        }
+    }
+
+    /// Bullet's `collideTT`: visit every leaf pair `(leaf-of-self,
+    /// leaf-of-other)` whose volumes overlap, in Bullet's stack order (each
+    /// internal pair pushes `(a0,b0), (a1,b0), (a0,b1), (a1,b1)` so `(a1,b1)`
+    /// pops first). The self-collision branch (`a == b`) is not ported — the
+    /// only caller (soft-soft `VF_SS`) never passes the same tree twice.
+    pub fn for_each_overlapping_pair(&self, other: &DbvtTree, out: &mut Vec<(usize, usize)>) {
+        let mut stack: Vec<[u32; 2]> = Vec::new();
+        if self.root != NONE && other.root != NONE {
+            stack.push([self.root, other.root]);
+        }
+        while let Some([a, b]) = stack.pop() {
+            if !self.volume(a).overlaps(&other.volume(b)) {
+                continue;
+            }
+            let a_children = self.children(a);
+            let b_children = other.children(b);
+            match (self.is_leaf(a), other.is_leaf(b)) {
+                (false, false) => {
+                    stack.push([a_children[0], b_children[0]]);
+                    stack.push([a_children[1], b_children[0]]);
+                    stack.push([a_children[0], b_children[1]]);
+                    stack.push([a_children[1], b_children[1]]);
+                }
+                (false, true) => {
+                    stack.push([a_children[0], b]);
+                    stack.push([a_children[1], b]);
+                }
+                (true, false) => {
+                    stack.push([a, b_children[0]]);
+                    stack.push([a, b_children[1]]);
+                }
+                (true, true) => out.push((self.leaf_payload(a), other.leaf_payload(b))),
+            }
+        }
+    }
+
+    /// Payload of a leaf node.
+    #[inline]
+    fn leaf_payload(&self, n: u32) -> usize {
+        match &self.nodes[n as usize].as_ref().unwrap().kind {
+            NodeKind::Leaf { proxy } => *proxy,
+            NodeKind::Internal { .. } => unreachable!("leaf_payload on internal node"),
         }
     }
 

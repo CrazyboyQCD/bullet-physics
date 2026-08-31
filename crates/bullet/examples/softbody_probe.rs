@@ -6,7 +6,7 @@
 //! Usage: `cargo run -p bullet --example softbody_probe -- <scene> [frames]`
 //! with scene in {rope_pendulum, rope_ground, cloth_plane}.
 
-use bullet::dynamics::{create_rope, PhysicsWorld, RigidBody, SoftBody};
+use bullet::dynamics::{create_patch, create_rope, PhysicsWorld, RigidBody};
 use bullet::math::{Real, Vector3};
 use bullet::shapes::CollisionShape;
 
@@ -19,6 +19,8 @@ fn main() {
         "rope_pendulum" => scene_rope_pendulum(dt, frames),
         "rope_ground" => scene_rope_ground(dt, frames),
         "cloth_plane" => scene_cloth_plane(dt, frames),
+        "patch_catenary" => scene_patch_catenary(dt, frames),
+        "soft_soft_vf" => scene_soft_soft_vf(dt, frames),
         other => {
             eprintln!("unknown scene {other}");
             std::process::exit(1);
@@ -39,12 +41,9 @@ fn add_ground(world: &mut PhysicsWorld) {
     ));
 }
 
-/// Minimal `btSoftBodyHelpers::CreatePatch` node/link builder for the probe
-/// (the full helper — faces, edge flags, perturbation — arrives with the
-/// cloth phase). Faces are skipped: before that phase they carry no position
-/// dynamics (aero/pressure/volume forces are disabled by default and soft-soft
-/// contact is off), so the trajectories match the Bullet twin, which builds
-/// them.
+/// Minimal `btSoftBodyHelpers::CreatePatch` wrapper (the `create_patch`
+/// helper is the canonical port now; kept for the fixeds subset the probe
+/// uses).
 fn build_patch(
     corner00: Vector3,
     corner10: Vector3,
@@ -53,53 +52,8 @@ fn build_patch(
     resx: usize,
     resy: usize,
     fixeds: u32,
-) -> SoftBody {
-    let idx = |x: usize, y: usize| y * resx + x;
-    let mut positions = Vec::with_capacity(resx * resy);
-    let masses = vec![1.0 as Real; resx * resy];
-    for iy in 0..resy {
-        let ty = iy as Real / (resy - 1) as Real;
-        let py0 = corner00.lerp(corner01, ty);
-        let py1 = corner10.lerp(corner11, ty);
-        for ix in 0..resx {
-            let tx = ix as Real / (resx - 1) as Real;
-            positions.push(py0.lerp(py1, tx));
-        }
-    }
-    let mut psb = SoftBody::new(&positions, &masses);
-    if fixeds & 1 != 0 {
-        psb.set_mass(idx(0, 0), 0.0);
-    }
-    if fixeds & 2 != 0 {
-        psb.set_mass(idx(resx - 1, 0), 0.0);
-    }
-    if fixeds & 4 != 0 {
-        psb.set_mass(idx(0, resy - 1), 0.0);
-    }
-    if fixeds & 8 != 0 {
-        psb.set_mass(idx(resx - 1, resy - 1), 0.0);
-    }
-    for iy in 0..resy {
-        for ix in 0..resx {
-            let mdx = ix + 1 < resx;
-            let mdy = iy + 1 < resy;
-            // Bullet's naming: node01 = x+1, node10 = y+1. Same append order
-            // as CreatePatch (PBD is order-sensitive): horizontal, vertical,
-            // then the two faces (skipped here), then the diagonal link.
-            let (n00, n01, n10, n11) =
-                (idx(ix, iy), idx(ix + 1, iy), idx(ix, iy + 1), idx(ix + 1, iy + 1));
-            if mdx {
-                psb.append_link(n00, n01, None, false);
-            }
-            if mdy {
-                psb.append_link(n00, n10, None, false);
-            }
-            if mdx && mdy {
-                psb.append_link(n00, n11, None, false);
-            }
-        }
-    }
-    psb
+) -> bullet::dynamics::SoftBody {
+    create_patch(corner00, corner10, corner01, corner11, resx, resy, fixeds, true, 0.0)
 }
 
 fn scene_rope_pendulum(dt: Real, frames: usize) {
@@ -159,5 +113,80 @@ fn scene_cloth_plane(dt: Real, frames: usize) {
         let min_y = sb.nodes.iter().map(|n| n.x.y).fold(Real::INFINITY, Real::min);
         let com = sb.get_center_of_mass();
         println!("{f} {:.6} {:.6} {:.6} {:.6}", min_y, com.y, com.x, com.z);
+    }
+}
+
+fn scene_patch_catenary(dt: Real, frames: usize) {
+    let mut world = make_world();
+    let cloth = world.add_soft_body(create_patch(
+        Vector3::new(-2.0, 6.0, -2.0),
+        Vector3::new(2.0, 6.0, -2.0),
+        Vector3::new(-2.0, 6.0, 2.0),
+        Vector3::new(2.0, 6.0, 2.0),
+        12,
+        12,
+        1 | 2 | 4 | 8,
+        true,
+        0.0,
+    ));
+    world.soft_body_mut(cloth).cfg.piterations = 4;
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let sb = world.soft_body(cloth);
+        let min_y = sb.nodes.iter().map(|n| n.x.y).fold(Real::INFINITY, Real::min);
+        let center_y = sb.nodes[5 * 12 + 5].x.y;
+        let com_y = sb.get_center_of_mass().y;
+        println!("{f} {:.6} {:.6} {:.6}", center_y, min_y, com_y);
+    }
+}
+
+fn scene_soft_soft_vf(dt: Real, frames: usize) {
+    use bullet::dynamics::SoftCollision;
+    let mut world = make_world();
+    add_ground(&mut world);
+    let upper = world.add_soft_body(create_patch(
+        Vector3::new(-2.0, 6.0, -2.0),
+        Vector3::new(2.0, 6.0, -2.0),
+        Vector3::new(-2.0, 6.0, 2.0),
+        Vector3::new(2.0, 6.0, 2.0),
+        12,
+        12,
+        0,
+        true,
+        0.0,
+    ));
+    let lower = world.add_soft_body(create_patch(
+        Vector3::new(-2.0, 3.0, -2.0),
+        Vector3::new(2.0, 3.0, -2.0),
+        Vector3::new(-2.0, 3.0, 2.0),
+        Vector3::new(2.0, 3.0, 2.0),
+        12,
+        12,
+        0,
+        true,
+        0.0,
+    ));
+    for i in [upper, lower] {
+        let sb = world.soft_body_mut(i);
+        sb.cfg.piterations = 4;
+        sb.cfg.collisions = SoftCollision::SDF_RS.union(SoftCollision::VF_SS);
+    }
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let (min_upper, com_upper) = {
+            let sb = world.soft_body(upper);
+            (
+                sb.nodes.iter().map(|n| n.x.y).fold(Real::INFINITY, Real::min),
+                sb.get_center_of_mass().y,
+            )
+        };
+        let (min_lower, com_lower) = {
+            let sb = world.soft_body(lower);
+            (
+                sb.nodes.iter().map(|n| n.x.y).fold(Real::INFINITY, Real::min),
+                sb.get_center_of_mass().y,
+            )
+        };
+        println!("{f} {:.6} {:.6} {:.6} {:.6}", min_upper, min_lower, com_upper, com_lower);
     }
 }

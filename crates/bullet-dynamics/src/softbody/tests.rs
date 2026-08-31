@@ -39,7 +39,7 @@ fn free_rope_falls_with_closed_form_com() {
     let mut com_x = start_com;
     for step in 1..=120 {
         rope.predict_motion(DT, GRAVITY);
-        rope.solve_constraints(&mut []);
+        SoftBody::solve_constraints(0, core::slice::from_mut(&mut rope), &mut []);
         node_v += GRAVITY * DT;
         node_x += node_v * DT;
         let n = rope.nodes[3];
@@ -92,7 +92,7 @@ fn rope_pendulum_swings_through_bottom() {
     let mut tip_peak_y: Real = 0.0;
     for _ in 0..400 {
         rope.predict_motion(DT, GRAVITY);
-        rope.solve_constraints(&mut []);
+        SoftBody::solve_constraints(0, core::slice::from_mut(&mut rope), &mut []);
         let mid = &rope.nodes[8];
         min_mid_y = min_mid_y.min(mid.x.y);
         // The free end sweeps past x=0 to the far side.
@@ -132,7 +132,7 @@ fn two_pinned_rope_sags() {
     let mut sag: Real = 0.0;
     for _ in 0..500 {
         rope.predict_motion(DT, GRAVITY);
-        rope.solve_constraints(&mut []);
+        SoftBody::solve_constraints(0, core::slice::from_mut(&mut rope), &mut []);
         let mid = rope.nodes[16].x;
         sag = 5.0 - mid.y;
     }
@@ -247,7 +247,7 @@ fn world_stepping_matches_manual_loop() {
     for step in 0..300 {
         world.step_simulation(DT);
         manual.predict_motion(DT, GRAVITY);
-        manual.solve_constraints(&mut []);
+        SoftBody::solve_constraints(0, core::slice::from_mut(&mut manual), &mut []);
         for i in 0..manual.nodes.len() {
             let a = world.soft_body(handle).nodes[i].x;
             let b = manual.nodes[i].x;
@@ -521,4 +521,302 @@ fn remove_body_cascades_anchors() {
     for _ in 0..10 {
         world.step_simulation(DT);
     }
+}
+
+// ---------------------------------------------------------------------
+// Cloth phase (faces, aero/pressure/volume, VF_SS, raycast).
+
+#[test]
+fn patch_topology_matches_create_patch() {
+    use super::helpers::{create_patch, patch_fixeds};
+    let psb = create_patch(
+        Vector3::ZERO,
+        Vector3::X,
+        Vector3::Z,
+        Vector3::new(1.0, 0.0, 1.0),
+        4,
+        3,
+        patch_fixeds::CORNER_00 | patch_fixeds::CORNER_11,
+        true,
+        0.0,
+    );
+    // 4x3 nodes, per-cell: 1 horizontal + 1 vertical + 1 diagonal link and
+    // 2 faces (Bullet's CreatePatch layout).
+    assert_eq!(psb.nodes.len(), 12);
+    assert_eq!(psb.links.len(), 3 * 3 + 4 * 2 + 3 * 2);
+    assert_eq!(psb.faces.len(), 3 * 2 * 2);
+    // Pinned corners.
+    assert_eq!(psb.nodes[0].im, 0.0);
+    assert_eq!(psb.nodes[2 * 4 + 3].im, 0.0);
+    assert!(psb.nodes[1].im > 0.0);
+    // Degenerate faces rejected.
+    let mut b = create_patch(
+        Vector3::ZERO,
+        Vector3::X,
+        Vector3::Z,
+        Vector3::new(1.0, 0.0, 1.0),
+        2,
+        2,
+        0,
+        false,
+        0.0,
+    );
+    let before = b.faces.len();
+    b.append_face(0, 0, 1, None);
+    assert_eq!(b.faces.len(), before);
+}
+
+#[test]
+fn face_area_and_volume() {
+    use super::helpers::create_patch;
+    // A 2x2 patch of unit cells: 2 faces, each with doubled area 1.
+    let mut psb = create_patch(
+        Vector3::ZERO,
+        Vector3::X,
+        Vector3::Z,
+        Vector3::new(1.0, 0.0, 1.0),
+        2,
+        2,
+        0,
+        false,
+        0.0,
+    );
+    psb.update_constants(); // resets rest lengths + areas
+    for f in &psb.faces {
+        assert!((f.ra - 1.0).abs() < 1e-6, "face ra {}", f.ra);
+    }
+    // Corners 0/3 sit on both faces (area 2/3), corners 1/2 on one (1/3) —
+    // the single cell's diagonal splits the adjacency.
+    assert!((psb.nodes[0].area - 2.0 / 3.0).abs() < 1e-5, "area0 {}", psb.nodes[0].area);
+    assert!((psb.nodes[3].area - 2.0 / 3.0).abs() < 1e-5, "area3 {}", psb.nodes[3].area);
+    assert!((psb.nodes[1].area - 1.0 / 3.0).abs() < 1e-5, "area1 {}", psb.nodes[1].area);
+    assert!((psb.nodes[2].area - 1.0 / 3.0).abs() < 1e-5, "area2 {}", psb.nodes[2].area);
+    // A closed axis-aligned box from two triangles per side: unit volume.
+    let mut boxy = SoftBody::new(
+        &[
+            Vector3::ZERO,
+            Vector3::X,
+            Vector3::new(1.0, 0.0, 1.0),
+            Vector3::Z,
+            Vector3::Y,
+            Vector3::new(1.0, 1.0, 0.0),
+            Vector3::new(1.0, 1.0, 1.0),
+            Vector3::new(0.0, 1.0, 1.0),
+        ],
+        &[1.0; 8],
+    );
+    let q = |i: usize| i;
+    // Bottom (-Y): 0-2-1, 0-3-2; top (+Y): 4-5-6, 4-6-7.
+    boxy.append_face(q(0), q(2), q(1), None);
+    boxy.append_face(q(0), q(3), q(2), None);
+    boxy.append_face(q(4), q(6), q(5), None);
+    boxy.append_face(q(4), q(7), q(6), None);
+    // Sides.
+    boxy.append_face(q(0), q(5), q(1), None);
+    boxy.append_face(q(0), q(4), q(5), None);
+    boxy.append_face(q(1), q(6), q(2), None);
+    boxy.append_face(q(1), q(5), q(6), None);
+    boxy.append_face(q(2), q(7), q(3), None);
+    boxy.append_face(q(2), q(6), q(7), None);
+    boxy.append_face(q(3), q(4), q(0), None);
+    boxy.append_face(q(3), q(7), q(4), None);
+    assert!((boxy.get_volume() - 1.0).abs() < 1e-6, "volume {}", boxy.get_volume());
+}
+
+#[test]
+fn soft_soft_vf_separates_overlapping_patches() {
+    use super::config::SoftCollision;
+    use super::helpers::create_patch;
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    // Two parallel horizontal patches starting inside the VF_SS band (the
+    // margin sum is 0.5): the contact holds them margin-sum apart while
+    // they fall together (starting deeply inter-penetrating instead blasts
+    // them apart — the same violent recovery Bullet's kernel has).
+    let a = world.add_soft_body(create_patch(
+        Vector3::new(-1.0, 1.0, -1.0),
+        Vector3::new(1.0, 1.0, -1.0),
+        Vector3::new(-1.0, 1.0, 1.0),
+        Vector3::new(1.0, 1.0, 1.0),
+        6,
+        6,
+        0,
+        true,
+        0.0,
+    ));
+    let b = world.add_soft_body(create_patch(
+        Vector3::new(-1.0, 0.55, -1.0),
+        Vector3::new(1.0, 0.55, -1.0),
+        Vector3::new(-1.0, 0.55, 1.0),
+        Vector3::new(1.0, 0.55, 1.0),
+        6,
+        6,
+        0,
+        true,
+        0.0,
+    ));
+    for i in [a, b] {
+        let sb = world.soft_body_mut(i);
+        sb.cfg.piterations = 4;
+        sb.cfg.collisions = SoftCollision::VF_SS;
+    }
+    let mut min_gap = Real::INFINITY;
+    for _ in 0..240 {
+        world.step_simulation(DT);
+        // A is the upper sheet: its lowest node minus B's highest.
+        let gap = {
+            let sa = world.soft_body(a);
+            let sb = world.soft_body(b);
+            let min_a = sa.nodes.iter().map(|n| n.x.y).fold(Real::INFINITY, Real::min);
+            let max_b = sb.nodes.iter().map(|n| n.x.y).fold(Real::NEG_INFINITY, Real::max);
+            min_a - max_b
+        };
+        min_gap = min_gap.min(gap);
+    }
+    // They never crossed (the band keeps the lower sheet below the upper
+    // one) and stay within a hand's reach of the margin-sum equilibrium.
+    assert!(min_gap > 0.0, "patches crossed: gap {min_gap}");
+    assert!(min_gap < 1.0, "patches blasted apart: gap {min_gap}");
+    assert!(
+        world.soft_body(a).nodes.iter().all(|n| n.x.is_finite()),
+        "VF_SS exploded"
+    );
+}
+
+#[test]
+fn soft_body_raycast_hits_faces() {
+    use super::helpers::create_patch;
+    let mut world = PhysicsWorld::new();
+    let cloth = world.add_soft_body(create_patch(
+        Vector3::new(-1.0, 3.0, -1.0),
+        Vector3::new(1.0, 3.0, -1.0),
+        Vector3::new(-1.0, 3.0, 1.0),
+        Vector3::new(1.0, 3.0, 1.0),
+        4,
+        4,
+        0,
+        true,
+        0.0,
+    ));
+    // Straight down through the patch center: fraction = 2/5 (from y=5 to
+    // the y=3 sheet over the 5 m segment).
+    let hit = world
+        .raycast_soft_closest(Vector3::new(0.0, 5.0, 0.0), Vector3::new(0.0, 0.0, 0.0))
+        .expect("ray missed the cloth");
+    assert_eq!(hit.0, cloth);
+    assert!((hit.2 - 2.0 / 5.0).abs() < 1e-4, "fraction {}", hit.2);
+    // Parallel ray misses.
+    assert!(world
+        .raycast_soft_closest(Vector3::new(-5.0, 3.0, 0.0), Vector3::new(5.0, 3.0, 0.0))
+        .is_none());
+}
+
+#[test]
+fn vertex_aero_pushes_downwind() {
+    use super::config::AeroModel;
+    use super::helpers::create_patch;
+    // A free patch flying in a crosswind: after a few steps the nodes drift
+    // downwind (the aero force points along the relative wind on the
+    // leeward side of the sail).
+    let mut psb = create_patch(
+        Vector3::new(-1.0, 10.0, -1.0),
+        Vector3::new(1.0, 10.0, -1.0),
+        Vector3::new(-1.0, 10.0, 1.0),
+        Vector3::new(1.0, 10.0, 1.0),
+        6,
+        6,
+        0,
+        true,
+        0.0,
+    );
+    psb.cfg.piterations = 4;
+    psb.cfg.aeromodel = AeroModel::VTwoSided;
+    psb.cfg.k_lf = 0.3;
+    psb.cfg.k_dg = 0.1;
+    psb.wind_velocity = Vector3::new(8.0, 0.0, 0.0);
+    let mut com_x0 = Vector3::ZERO;
+    for (i, n) in psb.nodes.iter().enumerate() {
+        com_x0 += n.x * if n.im > 0.0 { 1.0 } else { 0.0 };
+        let _ = i;
+    }
+    let mut world = PhysicsWorld::new();
+    let handle = world.add_soft_body(psb);
+    for _ in 0..90 {
+        world.step_simulation(DT);
+    }
+    let sb = world.soft_body(handle);
+    let mut com = Vector3::ZERO;
+    for n in &sb.nodes {
+        if n.im > 0.0 {
+            com += n.x;
+        }
+    }
+    assert!(com.x > com_x0.x + 0.2, "aero did not carry the sheet: {}", com.x - com_x0.x);
+}
+
+#[test]
+fn pressure_inflates_closed_pillow() {
+    // Two sewn sheets (the demo's pillow, smaller): the volume grows under
+    // kPR without exploding.
+    let res = 6usize;
+    let mut positions = Vec::new();
+    let masses = vec![1.0 as Real; 2 * res * res];
+    for iy in 0..res {
+        for ix in 0..res {
+            let (tx, tz) = (ix as Real / (res - 1) as Real, iy as Real / (res - 1) as Real);
+            positions.push(Vector3::new(tx, 4.0, tz));
+        }
+    }
+    for iy in 0..res {
+        for ix in 0..res {
+            let (tx, tz) = (ix as Real / (res - 1) as Real, iy as Real / (res - 1) as Real);
+            positions.push(Vector3::new(tx, 3.94, tz));
+        }
+    }
+    let mut psb = SoftBody::new(&positions, &masses);
+    let idx = |s: usize, x: usize, y: usize| s * res * res + y * res + x;
+    for sheet in 0..2 {
+        for iy in 0..res {
+            for ix in 0..res {
+                if ix + 1 < res {
+                    psb.append_link(idx(sheet, ix, iy), idx(sheet, ix + 1, iy), None, false);
+                }
+                if iy + 1 < res {
+                    psb.append_link(idx(sheet, ix, iy), idx(sheet, ix, iy + 1), None, false);
+                }
+                if ix + 1 < res && iy + 1 < res {
+                    let (n00, n01, n10, n11) = (
+                        idx(sheet, ix, iy),
+                        idx(sheet, ix + 1, iy),
+                        idx(sheet, ix, iy + 1),
+                        idx(sheet, ix + 1, iy + 1),
+                    );
+                    if sheet == 0 {
+                        psb.append_face(n00, n01, n11, None);
+                        psb.append_face(n11, n10, n00, None);
+                    } else {
+                        psb.append_face(n00, n10, n11, None);
+                        psb.append_face(n11, n01, n00, None);
+                    }
+                }
+            }
+        }
+    }
+    for i in 0..res {
+        psb.append_link(idx(0, i, 0), idx(1, i, 0), None, false);
+        psb.append_link(idx(0, i, res - 1), idx(1, i, res - 1), None, false);
+        psb.append_link(idx(0, 0, i), idx(1, 0, i), None, false);
+        psb.append_link(idx(0, res - 1, i), idx(1, res - 1, i), None, false);
+    }
+    psb.cfg.piterations = 4;
+    psb.cfg.k_pr = 2.0;
+    let initial = psb.get_volume().abs();
+    let mut world = PhysicsWorld::new();
+    let handle = world.add_soft_body(psb);
+    for _ in 0..300 {
+        world.step_simulation(DT);
+    }
+    let volume = world.soft_body(handle).get_volume().abs();
+    assert!(volume > initial * 2.0, "no inflation: {volume} vs {initial}");
+    assert!(volume < initial * 40.0, "explosion: {volume} vs {initial}");
 }

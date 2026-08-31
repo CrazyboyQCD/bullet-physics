@@ -6,8 +6,10 @@
 
 use bullet_math::Real;
 
-/// Aerodynamic force model (Bullet's `eAeroModel`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Aerodynamic force model (Bullet's `eAeroModel`). The declaration order
+/// matches Bullet's enum so `aeromodel >= FTwoSided` selects the face
+/// kernels like `applyForces` does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AeroModel {
     /// Vertex normals are oriented toward velocity.
     #[default]
@@ -83,7 +85,10 @@ impl SoftCollision {
     pub const CL_SELF: Self = Self(0x0040);
     /// Soft-versus-soft mask.
     pub const SVS_MASK: Self = Self(0x00f0);
-    /// Bullet's `fCollision::Default`.
+    /// Bullet's `fCollision::Default` = `SDF_RS` alone in this tree —
+    /// soft-soft (`VF_SS`) is opt-in per body pair, and the handler
+    /// dispatch matches the masked flags *exactly* (a combination like
+    /// `VF_SS | CL_SELF` falls through to nothing upstream).
     pub const DEFAULT: Self = Self(0x0001);
 
     #[inline]
