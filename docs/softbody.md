@@ -44,7 +44,8 @@ helpers（Rope/Patch/Ellipsoid/FromTriMesh/FromConvexHull + quickhull）；锚�
 
 **不做（记 HANDOFF 待办 + deviations）**：`btDeformable*` 新体系（NeoHookean/Corotated/LinearElasticity 力模型、
 backward Euler、CG/CR/预条件、deformable 接触投影）；`BulletReducedDeformableBody`；SparseSDF（精确距离替代）；
-soft↔multibody 耦合（`SDF_MDF`/`btSoftMultiBodyDynamicsWorld`——后置 Phase F，复用 mb 接触 jacobian 管线）；
+soft↔multibody 耦合的 **deformable 形态**（`SDF_MDF`/`btSoftMultiBodyDynamicsWorld`——经典形态的
+`CO_FEATHERSTONE_LINK` 分支已在 Phase F 落地）；
 Serialize（btSoftBodyData）；GPU solver 接口；debug draw；Note/RenderNode（渲染网格细化 `interpolateRenderMesh`）；
 windVelocity 存 worldInfo（并入 body 字段，同 Bullet 实际语义）。
 
@@ -61,8 +62,8 @@ Bullet 用 `Node*` 指针网格 + 运行时 `Body{Cluster*|btRigidBody*}` 包装
 | `Face` | `Face { n: [u32;3], mat: u32, normal, ra, leaf }` | m_pcontact/m_n0/m_n1 deformable 专用不移植 |
 | `Tetra` | `Tetra { n: [u32;4], mat: u32, rv, leaf, c0:[Vector3;4], c1, c2 }` | `m_Dm_inverse/m_F/P_inv` 是 deformable 力模型字段，经典 kVST 只用 c0/c1/c2 |
 | `Anchor` | `Anchor { node, body: usize, local, influence, c0, c1, c2 }` | body=RigidBody 索引 |
-| `RContact` | `RContact { cti: Cti, node, c0: Matrix3, c1, c2, c3, c4 }` | mb jacobian 字段后置 Phase F |
-| `Cti` | `Cti { body: usize, normal, offset }` | m_impulse 仅 multibody 分支用，后置 |
+| `RContact` | `RContact { cti: Cti, node, c0: Matrix3, c1, c2, c3, c4 }` | mb 侧 jacobian 通过 solve 期 `MbSolveContext` 现算（Phase F） |
+| `Cti` | `Cti { body: ContactOwner, normal, offset }` | `ContactOwner::{Rigid(usize), Link{mb, link}}`（Phase F，= `m_colObj` 指针的索引版） |
 | `SContact` | `SContact { node, face, weights, normal, margin, friction, cfm: [Real;2] }` | |
 | `Pose` | `Pose { bvolume, bframe, volume, pos, wgh, com, rot, scl, aqq }` | |
 | `Cluster` | `Cluster { masses, nodes, framerefs, framexform, idmass, imass, locii, invwi, com, vimpulses, dimpulses, lv, av, leaf, ndamping, ldamping, adamping, matching, contains_anchor, collide, index }` | btTransform framexform → (Vector3, Quaternion) |
@@ -283,7 +284,21 @@ Bullet HullLibrary 可能不同 → links 生成顺序不同 → PBD 求解顺�
   刷新）——rest_positions 照抄，append_node 后 transform_to 的拟合对新节点无采样；②refine cut 的节点复制
   条件是 `|eval|<accuracy`（窄带）而 link 重定向条件是 `eval<accuracy`（负半空间）——两个不同判据都逐字；
   ③cluster frame 的 xform 在 rotate/transform 后**延迟一步**（update_clusters 在 predict_motion 里跑）。
-- **Phase F（后置待定）**：soft↔mb 耦合（SDF_MDF jacobian 行，复用 `multibody/contact.rs` 管线）。
+- **Phase F：soft↔multibody 经典耦合** ✅ 完成（2026-09-01）
+  经典 `CollideSDF_RS` 的 `CO_FEATHERSTONE_LINK` 分支（非 deformable 体系的 SDF_MDF）：`ContactOwner` enum
+  （Rigid/Link{mb,link}）替代 `Cti.body: usize`；`collide_rigid` 重构出共享内核 `collide_body`（DoNode 参数化：
+  shape/位姿/imb/inv_inertia/velocity_at/friction/is_static）；`collide_multibody` 按 kinematic 装配
+  （`m_rigidBody` upcast 失败语义：imb=0、iwiStatic、va=0——btSoftBodyInternals.h 1613-1653 逐字）；
+  求解侧 `MbSolveContext`（multibodies + scratch + jac/delta 池）传入 `solve_constraints`；
+  RContacts 位置内核 Link 分支：`fill_constraint_jacobian` → `vel·jac` 算 va → 位置修正后
+  `apply_delta_vee(delta, −impulse.length()·0.5)` writeback（PSolve_RContacts 3894-3966 逐字，
+  含 `impulse.length()` quirk）；world 5s pair 分发 (Soft, Collider) → `soft_vs_mb`（睡 mb 跳过 +
+  RVS_MASK 精确匹配 SDF_RS + FK 位姿）；CL_RS 对 mb 不支持（Bullet cluster 路径对 link collider
+  退化成无质量单侧推——deviations 记录）。测试 +4 双 feature（绳压摆球 writeback、摆球扫绳、
+  睡 mb 被软接触唤醒、CL_RS 忽略 mb）。probe 场景 `rope_ball_tunnel`（双侧：带内偏置长绳压球摆动
+  + 快速冲击隧穿对照——**两引擎共限**，deviations "SDF_RS band capacity" 台账量化）。
+  **关键实测**：短绳 3.9 m/s 落球在 Bullet 原版同样穿透（−186.8 vs −181.0 @400 帧，前 23 帧逐位）——
+  经典每帧部分纠正的体系容量限制，非移植偏差；draped 版双侧定性一致（撑 ~30 帧→滑落，相位差 ~3 帧）。
 - perf：C/D 后补 `cloth_wind`/`softbody_rain` perf 场景（双侧 runner 扩展）。
 
 ## 11. 偏差预记（deviations 草稿，落地时并入 docs/bullet-deviations.md）
@@ -294,7 +309,8 @@ Bullet HullLibrary 可能不同 → links 生成顺序不同 → PBD 求解顺�
    我们 settle 在 margin+3mm）——deviations §1 "Soft body: node-vs-rigid distance" 落地。
 2. **静态 mesh 不走 extruded hull**：点-三角形精确距离 + margin 带（Bullet 三角形 ±0.04 挤出 + SDF）。
 3. **soft 不休眠**（对齐 Bullet 实际管线，非我们简化）。
-4. **mb 耦合后置**（Phase F 前软体不与 mb link collider 交互——broadphase pair 过滤）。
+4. **mb 耦合**（已落地，2026-09-01 Phase F：经典 `CO_FEATHERSTONE_LINK` 分支 + jacobian writeback；
+   CL_RS 对 mb 不支持——Bullet 同为无质量单侧推，deviations 记录）。
 5. **quickhull 顶点序差异** → links 顺序 → settle 同类散布。
 6. **rand 复刻仅保证 MSVC 工具链 probe 一致**。
 7. soft 求解对 rigid 的冲量一步滞后（对齐 Bullet 顺序，勿"改进"为同步）。
