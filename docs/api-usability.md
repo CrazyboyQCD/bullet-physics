@@ -52,11 +52,19 @@ gap. Behavior semantics are out of scope here — see
   lines while any other renderer implements the same closure. Bullet's
   OpenGL debug visualization is a big part of its tuning workflow;
   today we only have dumps and prints.
-- **P4 — callbacks** (larger, post-release): contact-added,
-  contact-processed and tick callbacks are how Bullet games wire
-  damage/sound/particles. Design note: prefer an explicit post-step
-  event drain (`contact_events() -> &[...]`) or a user-supplied trait
-  object over Bullet's process-global function pointers.
+- **P4 — callbacks** (larger, post-release): follow the Rapier event
+  model rather than Bullet's process-global function pointers —
+  post-step event drain (`contact_events() -> &[Event]`) with
+  **Started/Stopped pair semantics** (state transitions, like Rapier's
+  `CollisionEvent::Started/Stopped`; game code wants enter/exit, not a
+  per-contact-point callback storm), **per-body opt-in** flags
+  (Rapier's `ActiveEvents`) so quiet scenes pay nothing, an optional
+  contact-force event with a magnitude threshold, and sensors
+  (no-response volumes that still emit events — Rapier's `sensor`,
+  Bullet's ghost-object use case). Bullet's `setInternalTickCallback`
+  needs no counterpart: callers own the step loop. Per-pair hooks
+  (Rapier's `PhysicsHooks`: pair filtering, solver-contact tweaks) map
+  onto our existing `no_collision_pairs` / future filter system.
 - **P5 — typed handles** (breaking; schedule before 1.0):
   `add_body` / `add_multibody` / `add_soft_body` all return `usize`, so
   a confused index compiles fine and fails at runtime (or silently).
