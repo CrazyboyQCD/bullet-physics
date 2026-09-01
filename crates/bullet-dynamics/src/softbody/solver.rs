@@ -6,10 +6,26 @@
 use bullet_math::{Aabb, Real, Vector3};
 
 use super::body::SoftBody;
-use super::collide::{impulse_matrix, bary_eval};
+use super::collide::{impulse_matrix, bary_eval, ContactOwner};
 use super::config::{PSolverKind, SoftCollision};
 use super::geometry::project_on_plane;
 use crate::body::RigidBody;
+use crate::multibody::body::{MultiBody, MultiBodyScratch};
+
+/// Multibody context for the soft position kernels (phase F): link
+/// contacts read their jacobians and unit-impulse responses through the
+/// scratch and write the generalized velocities back. `None` on the
+/// single-body paths (`static_solve`) skips the multibody branches.
+pub struct MbSolveContext<'a> {
+    /// The owning world's multibody slice.
+    pub multibodies: &'a mut [MultiBody],
+    /// The world's pooled multibody scratch (jacobian assembly).
+    pub scratch: &'a mut MultiBodyScratch,
+    /// Recycled jacobian buffer (one contact at a time).
+    pub jac: &'a mut Vec<Real>,
+    /// Recycled unit-impulse-response buffer (one contact at a time).
+    pub delta: &'a mut Vec<Real>,
+}
 
 /// The bullet-source epsilon gating the link position solve
 /// (`l.m_c1 + len > SIMD_EPSILON`): below it the pair is treated as
@@ -158,10 +174,15 @@ impl SoftBody {
     /// `bodies` is the owning world's rigid-body slice (anchor preparation
     /// and contact impulses reach into it, exactly like Bullet's
     /// `btRigidBody::applyImpulse` calls).
-    pub fn solve_constraints(idx: usize, softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
+    pub fn solve_constraints(
+        idx: usize,
+        softs: &mut [SoftBody],
+        bodies: &mut [RigidBody],
+        mbs: Option<&mut MbSolveContext<'_>>,
+    ) {
         let (before, rest) = softs.split_at_mut(idx);
         let (this, after) = rest.split_first_mut().unwrap();
-        Self::solve_constraints_inner(this, idx, before, after, bodies);
+        Self::solve_constraints_inner(this, idx, before, after, bodies, mbs);
     }
 
     fn solve_constraints_inner(
@@ -170,6 +191,7 @@ impl SoftBody {
         before: &mut [SoftBody],
         after: &mut [SoftBody],
         bodies: &mut [RigidBody],
+        mut mbs: Option<&mut MbSolveContext<'_>>,
     ) {
         // Apply clusters (Bullet opens the solve by spreading the velocity
         // impulses accumulated by the cluster joints).
@@ -219,7 +241,7 @@ impl SoftBody {
                 let ti = isolve as Real / piterations;
                 for k in 0..this.cfg.psequence.len() {
                     let kind = this.cfg.psequence[k];
-                    run_psolver(this, Some((idx, before, after)), kind, 1.0, ti, bodies);
+                    run_psolver(this, Some((idx, before, after)), kind, 1.0, ti, bodies, mbs.as_deref_mut());
                 }
             }
             let vc = this.sst.isdt * (1.0 - this.cfg.k_dp);
@@ -238,7 +260,7 @@ impl SoftBody {
             for _ in 0..this.cfg.diterations {
                 for k in 0..this.cfg.dsequence.len() {
                     let kind = this.cfg.dsequence[k];
-                    run_psolver(this, Some((idx, before, after)), kind, 1.0, 0.0, bodies);
+                    run_psolver(this, Some((idx, before, after)), kind, 1.0, 0.0, bodies, mbs.as_deref_mut());
                 }
             }
             for n in &mut this.nodes {
@@ -258,7 +280,9 @@ impl SoftBody {
         for _ in 0..iterations {
             for k in 0..self.cfg.psequence.len() {
                 let kind = self.cfg.psequence[k];
-                run_psolver(self, None, kind, 1.0, 0.0, bodies);
+                // No multibody context: refine is a single-body relaxation,
+                // link contacts (if any linger) skip their writeback.
+                run_psolver(self, None, kind, 1.0, 0.0, bodies, None);
             }
         }
     }
@@ -378,11 +402,23 @@ impl SoftBody {
     /// `dp = min(dot(x, n) + offset, margin)`, the node moves by
     /// `impulse * c2` and the body receives `+impulse` at the contact
     /// anchor (sign-flipped vs the anchor — the source is written that way).
-    fn solve_rigid_contacts(&mut self, kst: Real, bodies: &mut [RigidBody]) {
+    ///
+    /// Against a multibody link (Bullet's `CO_FEATHERSTONE_LINK` branch,
+    /// btSoftBody.cpp 3908-3960) the contact-point velocity is the normal
+    /// projection of the jacobian contraction `dot(velocities, jac)` and
+    /// the reaction returns as `|impulse| * 0.5` scaled along the unit
+    /// response (`applyDeltaVeeMultiDof` with Bullet's hardcoded
+    /// multiplier) — a scalar feedback, not a per-component impulse.
+    fn solve_rigid_contacts(
+        &mut self,
+        kst: Real,
+        bodies: &mut [RigidBody],
+        mut mbs: Option<&mut MbSolveContext<'_>>,
+    ) {
         let sdt = self.sst.sdt;
         let mrg = self.margin;
         for c in 0..self.rcontacts.len() {
-            let (node, body_idx, c0, c1, c2, c3, c4, normal, offset) = {
+            let (node, owner, c0, c1, c2, c3, c4, normal, offset) = {
                 let c = &self.rcontacts[c];
                 (
                     c.node,
@@ -396,11 +432,40 @@ impl SoftBody {
                     c.cti.offset,
                 )
             };
-            let body = &mut bodies[body_idx];
-            let va = body.velocity_at_local_point(c1) * sdt;
             let (x, q) = {
                 let n = &self.nodes[node];
                 (n.x, n.q)
+            };
+            let va = match owner {
+                ContactOwner::Rigid(body_idx) => {
+                    bodies[body_idx].velocity_at_local_point(c1) * sdt
+                }
+                ContactOwner::Link { mb: mi, link } => {
+                    let Some(ctx) = mbs.as_deref_mut() else {
+                        continue;
+                    };
+                    let mb = &ctx.multibodies[mi];
+                    let ndof = 6 + mb.num_dofs();
+                    ctx.jac.clear();
+                    ctx.jac.resize(ndof, 0.0);
+                    ctx.delta.clear();
+                    ctx.delta.resize(ndof, 0.0);
+                    mb.fill_constraint_jacobian(
+                        link,
+                        x,
+                        Vector3::ZERO,
+                        normal,
+                        ctx.jac,
+                        ctx.scratch,
+                    );
+                    let vel = mb.velocity_vector();
+                    let mut vel_jac = 0.0;
+                    for (v, jv) in vel.iter().zip(ctx.jac.iter()) {
+                        vel_jac += v * jv;
+                    }
+                    mb.calc_acceleration_deltas(ctx.jac, ctx.delta, ctx.scratch);
+                    normal * vel_jac * sdt
+                }
             };
             let vb = x - q;
             let vr = vb - va;
@@ -412,7 +477,14 @@ impl SoftBody {
             let fv = vr - normal * dn;
             let impulse = c0 * ((vr - fv * c3 + normal * (dp * c4)) * kst);
             self.nodes[node].x -= impulse * c2;
-            body.apply_impulse(impulse, c1);
+            match owner {
+                ContactOwner::Rigid(body_idx) => bodies[body_idx].apply_impulse(impulse, c1),
+                ContactOwner::Link { mb: mi, link: _ } => {
+                    if let Some(ctx) = mbs.as_deref_mut() {
+                        ctx.multibodies[mi].apply_delta_vee(ctx.delta, -impulse.length() * 0.5);
+                    }
+                }
+            }
         }
     }
 }
@@ -428,11 +500,12 @@ fn run_psolver(
     kst: Real,
     _ti: Real,
     bodies: &mut [RigidBody],
+    mbs: Option<&mut MbSolveContext<'_>>,
 ) {
     match kind {
         PSolverKind::Linear => this.solve_links(kst),
         PSolverKind::Anchors => this.solve_anchors(kst, bodies),
-        PSolverKind::RContacts => this.solve_rigid_contacts(kst, bodies),
+        PSolverKind::RContacts => this.solve_rigid_contacts(kst, bodies, mbs),
         PSolverKind::SContacts => {
             if let Some((idx, before, after)) = soft_ctx {
                 solve_soft_contacts(this, idx, before, after);

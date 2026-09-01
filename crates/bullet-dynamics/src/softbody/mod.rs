@@ -33,7 +33,7 @@ pub use body::{
 };
 pub use body::ImplicitFn;
 pub use cluster::solve_clusters;
-pub use collide::{Anchor, Cti, RContact, SContact};
+pub use collide::{Anchor, ContactOwner, Cti, RContact, SContact};
 pub use config::{
     AeroModel, Config, PSolverKind, SoftCollision, SolverPreset, SolverState, VSolverKind,
 };

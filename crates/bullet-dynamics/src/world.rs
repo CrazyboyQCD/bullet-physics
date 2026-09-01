@@ -15,6 +15,7 @@ use crate::multibody::contact::{self, ContactSide, MbContactRow, PendingContact}
 use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
 use crate::softbody::cluster::solve_clusters;
 use crate::softbody::collide::collide_vf_ss;
+use crate::softbody::solver::MbSolveContext;
 use crate::softbody::config::SoftCollision;
 use crate::softbody::{AngularJointSpecs, LinearJointSpecs, Side, SoftBody};
 use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
@@ -300,6 +301,12 @@ pub struct PhysicsWorld {
     /// Recycled (node, face) leaf-pair scratch for the soft-soft VF_SS
     /// queries.
     soft_pair_scratch: Vec<(usize, usize)>,
+    /// Recycled jacobian buffer for the soft-vs-multibody link contacts
+    /// (phase F; one contact at a time).
+    soft_mb_jac: Vec<Real>,
+    /// Recycled unit-impulse-response buffer for the soft-vs-multibody
+    /// link contacts (phase F).
+    soft_mb_delta: Vec<Real>,
     /// Cumulative per-stage step timings; zero until enabled (see
     /// [`PhysicsWorld::enable_step_timing`]).
     step_timings: StepTimings,
@@ -351,6 +358,8 @@ impl PhysicsWorld {
             soft_proxies: Vec::new(),
             soft_scratch: Vec::new(),
             soft_pair_scratch: Vec::new(),
+            soft_mb_jac: Vec::new(),
+            soft_mb_delta: Vec::new(),
             step_timings: StepTimings::default(),
         }
     }
@@ -1111,8 +1120,14 @@ impl PhysicsWorld {
                     self.soft_vs_soft(a, b);
                     continue;
                 }
-                (ProxyOwner::Soft(_), ProxyOwner::Collider(_))
-                | (ProxyOwner::Collider(_), ProxyOwner::Soft(_)) => continue,
+                // Phase F: soft-vs-multibody link collider through the
+                // SDF_RS node contacts (Bullet's `CollideSDF_RS` on a
+                // `CO_FEATHERSTONE_LINK` colObj).
+                (ProxyOwner::Soft(s), ProxyOwner::Collider(e))
+                | (ProxyOwner::Collider(e), ProxyOwner::Soft(s)) => {
+                    self.soft_vs_mb(s, e);
+                    continue;
+                }
                 _ => {}
             }
             let (ProxyOwner::Body(i), ProxyOwner::Body(j)) = (owner_a, owner_b) else {
@@ -1462,11 +1477,25 @@ impl PhysicsWorld {
         // rigid velocities and any impulses applied to rigid bodies land on
         // the next step — kept identical here (see `docs/softbody.md` §0/§4).
         // The cluster contact joints solve globally first (Bullet's static
-        // `btSoftBody::solveClusters` over all bodies).
-        let (soft_bodies, bodies) = (&mut self.soft_bodies, &mut self.bodies);
+        // `btSoftBody::solveClusters` over all bodies). The multibody
+        // context carries the link contacts' jacobian buffers (phase F).
+        let (soft_bodies, bodies, multibodies, mb_scratch, soft_mb_jac, soft_mb_delta) = (
+            &mut self.soft_bodies,
+            &mut self.bodies,
+            &mut self.multibodies,
+            &mut self.mb_scratch,
+            &mut self.soft_mb_jac,
+            &mut self.soft_mb_delta,
+        );
         solve_clusters(soft_bodies, bodies);
+        let mut mb_ctx = MbSolveContext {
+            multibodies,
+            scratch: mb_scratch,
+            jac: soft_mb_jac,
+            delta: soft_mb_delta,
+        };
         for i in 0..soft_bodies.len() {
-            SoftBody::solve_constraints(i, soft_bodies, bodies);
+            SoftBody::solve_constraints(i, soft_bodies, bodies, Some(&mut mb_ctx));
         }
 
         // 7t. Soft-body self collisions (Bullet's per-body
@@ -1537,6 +1566,50 @@ impl PhysicsWorld {
         } else if mode == SoftCollision::SDF_RS.0 {
             soft_bodies[soft].collide_rigid(rigid, &bodies[rigid], &mut self.soft_scratch);
         }
+    }
+
+    /// Soft-vs-multibody collision for one broad-phase pair (phase F):
+    /// the SDF_RS node contacts against a link collider at its current FK
+    /// pose. A sleeping multibody only pairs with a soft body through
+    /// broad-phase margin artifacts (the island pass unions the pair and
+    /// pins the multibody awake whenever they truly overlap), so like
+    /// `soft_vs_rigid` the sleeping case is skipped. `CL_RS` against a
+    /// multibody stays unsupported (Bullet's cluster path treats the link
+    /// collider as massless — a degenerate one-sided push; recorded in
+    /// deviations).
+    fn soft_vs_mb(&mut self, soft: usize, entry: usize) {
+        if !self.multibodies[self.collider_entries[entry].mb].is_awake() {
+            return;
+        }
+        let mode = self.soft_bodies[soft].cfg.collisions.0 & SoftCollision::RVS_MASK.0;
+        if mode != SoftCollision::SDF_RS.0 {
+            return;
+        }
+        let ent = self.collider_entries[entry];
+        let mb = &self.multibodies[ent.mb];
+        let Some(col) = (if ent.link < 0 {
+            mb.base_collider()
+        } else {
+            mb.link_collider(ent.link as usize)
+        }) else {
+            return;
+        };
+        let (position, orientation) = if ent.link < 0 {
+            (mb.base_pos(), mb.base_world_orientation())
+        } else {
+            let l = ent.link as usize;
+            (mb.link_world_position(l), mb.link_world_orientation(l))
+        };
+        let (soft_bodies, scratch) = (&mut self.soft_bodies, &mut self.soft_scratch);
+        soft_bodies[soft].collide_multibody(
+            ent.mb,
+            ent.link,
+            &col.shape,
+            position,
+            orientation,
+            col.friction,
+            scratch,
+        );
     }
 
     /// Soft-vs-soft collision for one broad-phase pair (Bullet's

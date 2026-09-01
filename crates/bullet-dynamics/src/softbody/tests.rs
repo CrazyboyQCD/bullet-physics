@@ -39,7 +39,7 @@ fn free_rope_falls_with_closed_form_com() {
     let mut com_x = start_com;
     for step in 1..=120 {
         rope.predict_motion(DT, GRAVITY);
-        SoftBody::solve_constraints(0, core::slice::from_mut(&mut rope), &mut []);
+        SoftBody::solve_constraints(0, core::slice::from_mut(&mut rope), &mut [], None);
         node_v += GRAVITY * DT;
         node_x += node_v * DT;
         let n = rope.nodes[3];
@@ -92,7 +92,7 @@ fn rope_pendulum_swings_through_bottom() {
     let mut tip_peak_y: Real = 0.0;
     for _ in 0..400 {
         rope.predict_motion(DT, GRAVITY);
-        SoftBody::solve_constraints(0, core::slice::from_mut(&mut rope), &mut []);
+        SoftBody::solve_constraints(0, core::slice::from_mut(&mut rope), &mut [], None);
         let mid = &rope.nodes[8];
         min_mid_y = min_mid_y.min(mid.x.y);
         // The free end sweeps past x=0 to the far side.
@@ -132,7 +132,7 @@ fn two_pinned_rope_sags() {
     let mut sag: Real = 0.0;
     for _ in 0..500 {
         rope.predict_motion(DT, GRAVITY);
-        SoftBody::solve_constraints(0, core::slice::from_mut(&mut rope), &mut []);
+        SoftBody::solve_constraints(0, core::slice::from_mut(&mut rope), &mut [], None);
         let mid = rope.nodes[16].x;
         sag = 5.0 - mid.y;
     }
@@ -247,7 +247,7 @@ fn world_stepping_matches_manual_loop() {
     for step in 0..300 {
         world.step_simulation(DT);
         manual.predict_motion(DT, GRAVITY);
-        SoftBody::solve_constraints(0, core::slice::from_mut(&mut manual), &mut []);
+        SoftBody::solve_constraints(0, core::slice::from_mut(&mut manual), &mut [], None);
         for i in 0..manual.nodes.len() {
             let a = world.soft_body(handle).nodes[i].x;
             let b = manual.nodes[i].x;
@@ -1469,4 +1469,204 @@ fn torque_impulse_updates_angular_velocity() {
     );
     stat.apply_torque_impulse(Vector3::ONE);
     assert_eq!(stat.angular_velocity, Vector3::ZERO);
+}
+
+// ---------------------------------------------------------------------------
+// Phase F: soft-vs-multibody coupling.
+// ---------------------------------------------------------------------------
+
+use crate::multibody::MultiBody;
+use bullet_math::Quaternion;
+
+/// One fixed-base pendulum link with a sphere collider: pivot at
+/// `(0, pivot_y, 0)`, the link COM hanging 1 m below along -Y (Bullet's
+/// demo geometry — `this_pivot_to_this_com_offset = (0, -1, 0)`), so the
+/// ball rests at `(0, pivot_y - 1, 0)`.
+fn pendulum_mb(pivot_y: Real, can_sleep: bool) -> MultiBody {
+    let mut mb = MultiBody::new(1, 1.0, Vector3::ONE, true, can_sleep);
+    mb.setup_revolute(
+        0,
+        1.0,
+        Vector3::ONE,
+        None,
+        Quaternion::IDENTITY,
+        Vector3::Z,
+        Vector3::ZERO,
+        Vector3::new(0.0, -1.0, 0.0),
+    );
+    mb.finalize_multidof();
+    mb.set_link_collider(0, CollisionShape::sphere(0.7), 0.5, 0.0);
+    mb.base_pos = Vector3::new(0.0, pivot_y, 0.0);
+    mb
+}
+
+/// A rope draped across the pendulum ball is held on the contact band and
+/// its weight swings the link — the SDF_RS link contacts support the rope
+/// while the jacobian writeback pushes the multibody (phase F).
+///
+/// The rope starts inside the band (zero impact) and is offset to one side
+/// so its weight produces a swing torque. Verified against the real library
+/// (probe scene `rope_ball_tunnel`): Bullet's classic SDF_RS holds the
+/// middle nodes on the band for ~30 frames, then the rope slides off the
+/// side and falls — our port matches frame-for-frame (~3-frame phase slip),
+/// so the assertions only cover the supported window and the swing, never
+/// a permanent rest (a short rope DROPPED onto a sphere tunnels through in
+/// both engines — the classic solve only partially corrects each frame).
+#[test]
+fn rope_rests_on_mb_ball() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    let mbi = world.add_multibody(pendulum_mb(5.7, false));
+    // Ball top at y = 5.4, band up to 5.65: the rope starts inside the band,
+    // spanning the ball and overhanging it to the right (+0.5 offset).
+    let rope = world.add_soft_body(create_rope(
+        Vector3::new(-0.4, 5.55, 0.0),
+        Vector3::new(1.6, 5.55, 0.0),
+        16,
+        0,
+    ));
+    world.soft_body_mut(rope).cfg.piterations = 4;
+    // Nodes 3..=9 sit above the ball (x in [-0.025, 0.775]). While the band
+    // holds them the middle stays above the surface, and even once the rope
+    // slides off the side its nodes stay outside the sphere (the phase slip
+    // vs the probe is frames, not penetration).
+    let mut min_center_dist = Real::INFINITY;
+    let mut supported_max: Real = 0.0;
+    let mut max_joint_speed: Real = 0.0;
+    for step in 0..300 {
+        world.step_simulation(DT);
+        let sb = world.soft_body(rope);
+        if step < 30 {
+            for n in &sb.nodes[3..=9] {
+                min_center_dist = min_center_dist.min((n.x - Vector3::new(0.0, 4.7, 0.0)).length());
+            }
+            if step < 20 {
+                supported_max = supported_max.max(sb.nodes[3..=9].iter().map(|n| n.x.y).fold(0.0, Real::max));
+            }
+        }
+        let qd = world.multibody(mbi).velocity_vector()[6];
+        max_joint_speed = max_joint_speed.max(qd.abs());
+    }
+    assert!(
+        min_center_dist > 0.65,
+        "the rope went through the ball: {min_center_dist}"
+    );
+    assert!(
+        supported_max > 5.5,
+        "the band never held the rope above the surface: {supported_max}"
+    );
+    // The rope's weight dragged the ball to the right (probe: COM x 0.6 ->
+    // 1.0+ in both engines — a symmetric rope would only press along the
+    // swing axis and leave the joint still).
+    let com = world.soft_body(rope).get_center_of_mass();
+    assert!(
+        com.x > 1.0,
+        "the rope never dragged the ball aside: com.x = {}",
+        com.x
+    );
+    assert!(
+        max_joint_speed > 0.02,
+        "the link never felt the rope: {max_joint_speed}"
+    );
+    let sb = world.soft_body(rope);
+    assert!(sb.nodes.iter().all(|n| n.x.is_finite()), "rope blew up");
+    assert!(
+        world.multibody(mbi).velocity_vector()[6].is_finite(),
+        "the link velocity blew up"
+    );
+}
+
+/// A swinging pendulum ball sweeps a hanging rope aside — the contact
+/// pushes nodes through the mb velocity term while the rope damps the
+/// swing (the writeback side of the coupling).
+#[test]
+fn mb_pendulum_sweeps_hanging_rope() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    let mut mb = pendulum_mb(6.0, false);
+    mb.set_joint_vel_multidof(0, &[2.0]);
+    let mbi = world.add_multibody(mb);
+    // A rope pinned just where the swinging ball passes (ball center
+    // (0, 5, 0), radius 0.7 — the swing reaches x ≈ 0.9 at ~0.5 rad).
+    let rope = world.add_soft_body(create_rope(
+        Vector3::new(0.8, 5.0, 0.0),
+        Vector3::new(0.8, 3.8, 0.0),
+        6,
+        ROPE_FIX_START,
+    ));
+    world.soft_body_mut(rope).cfg.piterations = 4;
+    let mut max_x: Real = 0.0;
+    for _ in 0..300 {
+        world.step_simulation(DT);
+        let sb = world.soft_body(rope);
+        for n in &sb.nodes {
+            max_x = max_x.max(n.x.x);
+        }
+    }
+    // The free nodes hang at x ≈ 0.8; the swinging ball must have pushed
+    // some past 1.0.
+    assert!(max_x > 1.0, "the swing never moved the rope: {max_x}");
+    let sb = world.soft_body(rope);
+    assert!(sb.nodes.iter().all(|n| n.x.is_finite()), "rope blew up");
+    assert!(
+        world.multibody(mbi).velocity_vector()[6].is_finite(),
+        "the link velocity blew up"
+    );
+}
+
+/// A sleeping multibody under a newly-added overlapping soft body wakes
+/// up: the island pass unions the pair and the never-sleeping soft body
+/// pins the island awake.
+#[test]
+fn sleeping_mb_wakes_under_soft_contact() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::ZERO);
+    let mb = pendulum_mb(5.7, true);
+    let mbi = world.add_multibody(mb);
+    for _ in 0..150 {
+        world.step_simulation(DT);
+    }
+    assert!(!world.multibody(mbi).is_awake(), "precondition: asleep");
+    // Drop a rope node region right onto the ball.
+    let rope = world.add_soft_body(create_rope(
+        Vector3::new(0.0, 5.4, 0.0),
+        Vector3::new(0.6, 5.4, 0.0),
+        4,
+        0,
+    ));
+    world.soft_body_mut(rope).cfg.piterations = 4;
+    world.step_simulation(DT);
+    assert!(world.multibody(mbi).is_awake(), "soft contact did not wake the mb");
+}
+
+/// A `CL_RS`-mode soft body does not interact with multibody colliders
+/// (Bullet's cluster path against a link collider degenerates to a
+/// massless one-sided push — unsupported, the rope free-falls through).
+#[test]
+fn cl_rs_mode_ignores_mb_collider() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+    let _mbi = world.add_multibody(pendulum_mb(5.7, false));
+    let rope = world.add_soft_body(create_rope(
+        Vector3::new(0.3, 6.4, 0.0),
+        Vector3::new(0.9, 6.4, 0.0),
+        4,
+        0,
+    ));
+    {
+        let sb = world.soft_body_mut(rope);
+        sb.cfg.collisions = crate::softbody::SoftCollision::CL_RS;
+        sb.generate_clusters(4, 32);
+    }
+    let mut min_y: Real = 10.0;
+    for _ in 0..400 {
+        world.step_simulation(DT);
+        for n in &world.soft_body(rope).nodes {
+            min_y = min_y.min(n.x.y);
+        }
+    }
+    assert!(
+        min_y < 4.6,
+        "CL_RS mode should not hold the rope on the mb ball: {min_y}"
+    );
 }

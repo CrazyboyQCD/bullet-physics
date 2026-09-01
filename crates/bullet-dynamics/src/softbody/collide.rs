@@ -27,11 +27,21 @@ use super::geometry::{
 };
 use super::joints::{impulse_matrix_two, CJoint, SoftJoint};
 
+/// What a soft-body contact hits (Bullet's `sCti::m_colObj` pointer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContactOwner {
+    /// A rigid body index.
+    Rigid(usize),
+    /// A multibody link collider: `(multibody index, link index)` with
+    /// `-1` for the base (phase F).
+    Link { mb: usize, link: i32 },
+}
+
 /// Contact info against one rigid body (Bullet's `sCti`).
 #[derive(Clone, Copy, Debug)]
 pub struct Cti {
-    /// Rigid body index.
-    pub body: usize,
+    /// The body the contact is against.
+    pub body: ContactOwner,
     /// Outward surface normal (body surface toward the node, world space).
     pub normal: Vector3,
     /// Plane offset such that `dot(x, normal) + offset` equals the
@@ -41,7 +51,10 @@ pub struct Cti {
 }
 
 /// One node-vs-rigid contact with its precomputed impulse-matrix row
-/// (Bullet's `RContact`; the multibody jacobian fields arrive with phase F).
+/// (Bullet's `RContact`; against a multibody link the assembly treats the
+/// collider as kinematic — `imb = 0`, zero inertia, zero contact-point
+/// velocity — and the multibody only reacts through the solve-side
+/// jacobian writeback, exactly like Bullet's classic `CollideSDF_RS`).
 #[derive(Clone, Debug)]
 pub struct RContact {
     /// Contact info.
@@ -252,16 +265,75 @@ impl SoftBody {
     ///
     /// `scratch` is a caller-recycled buffer for the overlapping leaves.
     pub fn collide_rigid(&mut self, body_idx: usize, body: &RigidBody, scratch: &mut Vec<usize>) {
+        self.collide_body(
+            ContactOwner::Rigid(body_idx),
+            &body.shape,
+            body.position,
+            body.orientation,
+            body.inv_mass(),
+            &body.inv_inertia_world(),
+            |ra| body.velocity_at_local_point(ra),
+            body.friction,
+            body.is_static(),
+            scratch,
+        );
+    }
+
+    /// SDF_RS collision against one multibody link collider (phase F).        
+    /// The classic-system assembly is Bullet's exact behavior for a
+    /// `CO_FEATHERSTONE_LINK` colObj through `CollideSDF_RS`: the rigid       
+    /// upcast fails, so the impulse row is built kinematic (`imb = 0`, zero   
+    /// inertia, zero contact-point velocity — the node solves against an      
+    /// infinitely heavy partner) and the multibody only receives its
+    /// reaction through the solve-side jacobian writeback. The anchor
+    /// `ra = x - collider_origin` feeds the tangent directions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn collide_multibody(
+        &mut self,
+        mb: usize,
+        link: i32,
+        shape: &CollisionShape,
+        position: Vector3,
+        orientation: Quaternion,
+        friction: Real,
+        scratch: &mut Vec<usize>,
+    ) {
+        self.collide_body(
+            ContactOwner::Link { mb, link },
+            shape,
+            position,
+            orientation,
+            0.0,
+            &Matrix3::ZERO,
+            |_| Vector3::ZERO,
+            friction,
+            false,
+            scratch,
+        );
+    }
+
+    /// The shared `CollideSDF_RS::DoNode` kernel.
+    #[allow(clippy::too_many_arguments)]
+    fn collide_body(
+        &mut self,
+        owner: ContactOwner,
+        shape: &CollisionShape,
+        position: Vector3,
+        orientation: Quaternion,
+        imb: Real,
+        inv_inertia: &Matrix3,
+        velocity_at: impl Fn(Vector3) -> Vector3,
+        friction: Real,
+        is_static: bool,
+        scratch: &mut Vec<usize>,
+    ) {
         if !self.cfg.collisions.contains(SoftCollision::SDF_RS) {
             return;
         }
         let basemargin = self.margin;
         // Bullet's `timemargin` (interpolation delta) is dead code upstream
         // (both transforms are the same object), so dynmargin == stamargin.
-        let volume = body
-            .shape
-            .world_aabb(body.position, body.orientation)
-            .expanded(basemargin);
+        let volume = shape.world_aabb(position, orientation).expanded(basemargin);
         scratch.clear();
         self.ndbvt.for_each_overlapping(&volume, scratch);
 
@@ -279,35 +351,34 @@ impl SoftBody {
             // ones; both equal basemargin here.
             let m = basemargin;
             let Some((normal, dst)) =
-                point_shape_distance(&body.shape, body.position, body.orientation, x, m)
+                point_shape_distance(shape, position, orientation, x, m)
             else {
                 continue;
             };
-            let imb = body.inv_mass();
             if ima + imb <= 0.0 {
                 continue;
             }
-            let ra = x - body.position;
-            let va = body.velocity_at_local_point(ra) * sdt;
+            let ra = x - position;
+            let va = velocity_at(ra) * sdt;
             let vb = x - q;
             let vr = vb - va;
             let dn = vr.dot(normal);
             let fv = vr - normal * dn;
-            let fc = self.cfg.k_df * body.friction;
+            let fc = self.cfg.k_df * friction;
             let c3 = if fv.length_squared() < (dn * fc) * (dn * fc) {
                 0.0
             } else {
                 1.0 - fc
             };
-            let c4 = if body.is_static() {
+            let c4 = if is_static {
                 self.cfg.k_khr
             } else {
                 self.cfg.k_chr
             };
-            let c0 = impulse_matrix(sdt, ima, imb, &body.inv_inertia_world(), ra);
+            let c0 = impulse_matrix(sdt, ima, imb, inv_inertia, ra);
             self.rcontacts.push(RContact {
                 cti: Cti {
-                    body: body_idx,
+                    body: owner,
                     normal,
                     offset: -normal.dot(x - normal * dst),
                 },
