@@ -108,9 +108,13 @@ hull/compound, vertex point masses for meshes (matching Bullet).
      GImpact-plane path, reduced to 4 points.
    - compound shapes recurse into children.
 3. **Manifold**: `ContactPoint { position, normal, penetration, impulses }`
-   collected into a `ContactManifold`. Unlike Bullet's persistent manifolds,
-   manifolds are rebuilt every step; a normal-impulse cache keyed by body pair
-   provides warm starting (see §7).
+   collected into a `ContactManifold`, then merged into a per-pair
+   `PersistentManifold` with Bullet's `btPersistentManifold` semantics
+   (matched points replace and inherit their normal impulse, new points
+   append, undetected points survive until the re-projection refresh prunes
+   them; capacity 4). Fresh detections seed the merge; slow pairs are served
+   from the re-projected anchors without re-running the narrow phase (see
+   the refresh guards in `world.rs`).
 
 ## 6. Queries
 
