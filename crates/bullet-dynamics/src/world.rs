@@ -1422,6 +1422,12 @@ impl PhysicsWorld {
                     if other.is_removed() {
                         continue;
                     }
+                    // Joint-linked pairs with suppressed collisions skip the
+                    // sweep as well (Bullet's dispatcher `needsCollision` →
+                    // `checkCollideWithOverride` gates the CCD sweep too).
+                    if self.no_collision_pairs.contains(&(i.min(j), i.max(j))) {
+                        continue;
+                    }
                     if let Some(hit) = narrowphase::swept_sphere_cast(
                         from,
                         to,
@@ -2560,6 +2566,38 @@ mod tests {
         // Per-step motion 5/60 < threshold 1.0: plain integration, no clamp.
         world.step_simulation(1.0 / 60.0);
         assert_relative_eq!(world.body(1).position.y, 1.0 - 5.0 / 60.0, epsilon = 1e-5);
+    }
+
+    /// CCD skips pairs with suppressed collisions: Bullet's dispatcher
+    /// `needsCollision` (`checkCollideWithOverride`) gates the sweep too, so a
+    /// fast body is not clamped against its joint-linked partner. The joint's
+    /// impulse is clamped to a token value so the ball's motion stays intact
+    /// and the sweep filter is the only thing under test.
+    #[test]
+    fn ccd_skips_collision_suppressed_pairs() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        // Thin static wall in the fast ball's path, joint-linked to it.
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        let mut joint = Constraint::point2point(0, 1, Vector3::new(0.0, 0.5, 0.0), Vector3::new(0.0, -0.5, 0.0));
+        joint.kind_mut().point2point_mut().set_impulse_clamp(0.001);
+        world.add_constraint(joint);
+        // The suppressed pair is not swept: the ball crosses the wall (the
+        // unsuppressed control is `ccd_clamps_fast_bodies_at_the_impact`).
+        world.step_simulation(1.0 / 60.0);
+        assert!(world.body(1).position.y < -0.5);
     }
 
     /// A fixed-base pendulum with a sphere collider on the link: the collider
