@@ -102,7 +102,9 @@ def build_perf():
     cmd = ["cl", "/nologo", "/O2", "/EHsc", "/std:c++17",
            f"/Fo{obj}", f"/I{os.path.join(ROOT, 'refs', 'bullet3', 'src')}",
            f"/I{gimpact_inc}",
-           PERF_SRC, f"/Fe:{PERF_EXE}", "/link", *libs("f32")]
+           PERF_SRC, f"/Fe:{PERF_EXE}", "/link", *libs("f32"),
+           # The soft-body perf scenes run through btSoftRigidDynamicsWorld.
+           os.path.join(lib_dir("f32"), "BulletSoftBody.lib")]
     print("+", " ".join(cmd))
     r = subprocess.run(cmd, env=full_env)
     if os.path.exists(obj):

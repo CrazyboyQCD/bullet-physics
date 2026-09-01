@@ -42,8 +42,14 @@
 #include "btBulletDynamicsCommon.h"
 #include <BulletCollision/BroadphaseCollision/btAxisSweep3.h>
 #include <BulletCollision/BroadphaseCollision/btDbvtBroadphase.h>
+#include <BulletCollision/CollisionShapes/btStaticPlaneShape.h>
 #include <BulletCollision/Gimpact/btGImpactShape.h>
 #include <BulletCollision/Gimpact/btGImpactCollisionAlgorithm.h>
+
+#include <BulletSoftBody/btSoftBody.h>
+#include <BulletSoftBody/btSoftBodyHelpers.h>
+#include <BulletSoftBody/btSoftBodyRigidBodyCollisionConfiguration.h>
+#include <BulletSoftBody/btSoftRigidDynamicsWorld.h>
 
 #include <BulletDynamics/Featherstone/btMultiBody.h>
 #include <BulletDynamics/Featherstone/btMultiBodyDynamicsWorld.h>
@@ -66,6 +72,8 @@ btCollisionShape* make_shape(const PerfBodySpec& b, bool is_static,
       // btCapsuleShape(radius, height) with height = 2 * half_height, axis Y
       // (matches this crate's capsule(radius, half_height)).
       return new btCapsuleShape(p[0], btScalar(2.0) * p[1]);
+    case PERF_SHAPE_PLANE:
+      return new btStaticPlaneShape(btVector3(p[0], p[1], p[2]), p[3]);
     case PERF_SHAPE_MESH: {
       btTriangleMesh* tm = new btTriangleMesh();
       const btScalar* v = b.mesh->vertices;
@@ -93,7 +101,11 @@ btCollisionShape* make_shape(const PerfBodySpec& b, bool is_static,
 // Owns everything the world references; destroyed (and so unregistered)
 // before the world member goes away.
 struct SceneRun {
-  btDefaultCollisionConfiguration config;
+  // Registers the soft-vs-rigid collision algorithms (the default
+  // configuration would silently drop every soft pair - the nodes fall
+  // straight through the ground); a superset of the default config, so
+  // non-soft scenes dispatch exactly as before.
+  btSoftBodyRigidBodyCollisionConfiguration config;
   btCollisionDispatcher dispatcher;
   std::unique_ptr<btBroadphaseInterface> broadphase;  // per-scene: AxisSweep3 or Dbvt
   btMultiBodyConstraintSolver solver;   // plain scenes: solves rigid rows too
@@ -102,9 +114,13 @@ struct SceneRun {
   std::vector<std::unique_ptr<btMotionState>> motions;
   std::vector<std::unique_ptr<btRigidBody>> bodies;
   std::vector<std::unique_ptr<btMultiBody>> multibodies;
-  // Declared last so it is destroyed first, while the bodies and multibodies
-  // it references are still alive (unregistration happens in its destructor).
-  btMultiBodyDynamicsWorld world;       // plain scenes: behaves like the discrete world
+  // Soft scenes run btSoftRigidDynamicsWorld (soft + rigid stages); every
+  // other scene keeps btMultiBodyDynamicsWorld (its mb stages are no-ops
+  // without multibodies). Both derive from btDiscreteDynamicsWorld; the
+  // scene kinds never mix (the generator validates softs/chains as
+  // mutually exclusive).
+  std::unique_ptr<btDiscreteDynamicsWorld> world;
+  std::vector<btSoftBody*> softs;       // borrowed (owned by the world)
   long frame = 0;                       // total stepped frames (warmup included)
   const bool arena;                     // per-frame arena tick (launcher + dozer)
 
@@ -116,11 +132,22 @@ struct SceneRun {
                                       btVector3(spec.bp_min[0], spec.bp_min[1], spec.bp_min[2]),
                                       btVector3(spec.bp_max[0], spec.bp_max[1], spec.bp_max[2])))),
         solver(),
-        world(&dispatcher, broadphase.get(), &solver, &config),
         arena(spec.script == 1) {
-    world.setGravity(btVector3(spec.gravity[0], spec.gravity[1], spec.gravity[2]));
+    const bool soft_scene = spec.softs.count > 0;
+    if (soft_scene) {
+      world = std::make_unique<btSoftRigidDynamicsWorld>(&dispatcher, broadphase.get(), &solver, &config);
+    } else {
+      world = std::make_unique<btMultiBodyDynamicsWorld>(&dispatcher, broadphase.get(), &solver, &config);
+    }
+    world->setGravity(btVector3(spec.gravity[0], spec.gravity[1], spec.gravity[2]));
+    // The soft world info carries its own gravity default and setGravity
+    // does not sync it (predictMotion reads worldInfo); sync explicitly.
+    if (soft_scene) {
+      static_cast<btSoftRigidDynamicsWorld*>(world.get())->getWorldInfo().m_gravity =
+          btVector3(spec.gravity[0], spec.gravity[1], spec.gravity[2]);
+    }
     // Reproducibility precondition (docs/parity-harness.md).
-    btContactSolverInfo& info = world.getSolverInfo();
+    btContactSolverInfo& info = world->getSolverInfo();
     info.m_solverMode &= ~SOLVER_RANDMIZE_ORDER;
     info.m_numIterations = spec.iterations;
     // Registers on this run's dispatcher (the table lives per dispatcher
@@ -144,10 +171,11 @@ struct SceneRun {
       btRigidBody* body = bodies.back().get();
       body->setFriction(b.friction);
       body->setRestitution(b.restitution);
-      world.addRigidBody(body);
+      world->addRigidBody(body);
     }
 
     if (spec.chains.count > 0) add_chains(spec.chains);
+    if (spec.softs.count > 0) add_softs(spec.softs);
   }
 
   // A grid of fixed-base revolute pendulums, matching the Rust runner's
@@ -170,7 +198,7 @@ struct SceneRun {
       body->finalizeMultiDof();
       body->setBasePos(btVector3(x, c.base_height, z));
       for (int i = 0; i < c.links; ++i) body->setJointPosMultiDof(i, &c.initial_angle);
-      world.addMultiBody(body);
+      static_cast<btMultiBodyDynamicsWorld*>(world.get())->addMultiBody(body);
       multibodies.push_back(std::unique_ptr<btMultiBody>(body));
 
       // Colliders must exist (island solver precondition) and be registered
@@ -187,17 +215,47 @@ struct SceneRun {
       btMultiBodyLinkCollider* baseCol = new btMultiBodyLinkCollider(body, -1);
       baseCol->setCollisionShape(s);
       baseCol->setWorldTransform(body->getBaseWorldTransform());
-      world.addCollisionObject(baseCol, btBroadphaseProxy::DefaultFilter,
+      world->addCollisionObject(baseCol, btBroadphaseProxy::DefaultFilter,
                                btBroadphaseProxy::DefaultFilter | btBroadphaseProxy::StaticFilter);
       body->setBaseCollider(baseCol);
       for (int i = 0; i < c.links; ++i) {
         btMultiBodyLinkCollider* col = new btMultiBodyLinkCollider(body, i);
         col->setCollisionShape(s);
         col->setWorldTransform(body->getLink(i).m_cachedWorldTransform);
-        world.addCollisionObject(col, btBroadphaseProxy::DefaultFilter,
-                                 btBroadphaseProxy::DefaultFilter | btBroadphaseProxy::StaticFilter);
+        world->addCollisionObject(col, btBroadphaseProxy::DefaultFilter,
+                                  btBroadphaseProxy::DefaultFilter | btBroadphaseProxy::StaticFilter);
         body->getLink(i).m_collider = col;
       }
+    }
+  }
+
+  // A grid of cloth patches laid out like the Rust runner's add_softs (patch
+  // corners on a deterministic grid, identical material/iteration settings);
+  // each patch is built by btSoftBodyHelpers::CreatePatch - the same helper
+  // the Rust create_patch was ported from (byte-exact, perturbation 0).
+  void add_softs(const PerfSoftSpec& c) {
+    const int rows = (c.count + c.cols - 1) / c.cols;
+    for (int k = 0; k < c.count; ++k) {
+      const int col = k % c.cols;
+      const int row = k / c.cols;
+      const btScalar x0 = c.origin[0] + btScalar(col) * (c.size_x + c.gap);
+      const btScalar z0 = c.origin[2] + btScalar(row) * (c.size_z + c.gap);
+      const btScalar y = c.origin[1];
+      btSoftBody* psb = btSoftBodyHelpers::CreatePatch(
+          static_cast<btSoftRigidDynamicsWorld*>(world.get())->getWorldInfo(),
+          btVector3(x0, y, z0),
+          btVector3(x0 + c.size_x, y, z0),
+          btVector3(x0, y, z0 + c.size_z),
+          btVector3(x0 + c.size_x, y, z0 + c.size_z),
+          c.resx, c.resy, c.fixeds, true);
+      psb->m_cfg.piterations = c.piterations;
+      psb->m_cfg.kDF = c.k_df;
+      psb->m_materials[0]->m_kLST = c.k_lst;
+      psb->m_cfg.aeromodel = c.aero == 1 ? btSoftBody::eAeroModel::V_TwoSided
+                                         : btSoftBody::eAeroModel::V_Point;
+      psb->setWindVelocity(btVector3(c.wind[0], c.wind[1], c.wind[2]));
+      static_cast<btSoftRigidDynamicsWorld*>(world.get())->addSoftBody(psb);
+      softs.push_back(psb);
     }
   }
 
@@ -224,7 +282,7 @@ struct SceneRun {
         btRigidBody* b = new btRigidBody(ci);
         b->setFriction(btScalar(0.5));
         b->setLinearVelocity(dir * btScalar(12));
-        world.addRigidBody(b);
+        world->addRigidBody(b);
         bodies.push_back(std::unique_ptr<btRigidBody>(b));
       }
       // Dozer (bodies[1], mass 50): velocity-driven along
@@ -238,7 +296,7 @@ struct SceneRun {
              std::cos(btScalar(2) * SIMD_PI * frame / btScalar(240)));
       dozer->setLinearVelocity(v);
     }
-    world.stepSimulation(dt, 1, dt);
+    world->stepSimulation(dt, 1, dt);
     ++frame;
   }
 };
@@ -270,8 +328,25 @@ void run_dump(const PerfSceneSpec& spec, btScalar dt) {
         if (v > max_v) max_v = v;
         if (b->isActive()) ++awake;
       }
-      std::printf("dump frame %d bodies %d sum_y %.4f sum_v %.5f max_v %.5f awake %d\n",
-                  f, count, sum_y, sum_v, max_v, awake);
+      // Soft-body aggregate: node count, lowest node, fastest node (the
+      // settle/activity health of the cloth grid).
+      int soft_nodes = 0;
+      double soft_min_y = 0.0, soft_max_v = 0.0;
+      for (int i = 0; i < int(run.softs.size()); ++i) {
+        const btSoftBody* psb = run.softs[i];
+        for (int j = 0; j < psb->m_nodes.size(); ++j) {
+          const btSoftBody::Node& n = psb->m_nodes[j];
+          if (soft_nodes == 0 || double(n.m_x.getY()) < soft_min_y)
+            soft_min_y = double(n.m_x.getY());
+          const double v = double(n.m_v.length());
+          if (v > soft_max_v) soft_max_v = v;
+          ++soft_nodes;
+        }
+      }
+      std::printf("dump frame %d bodies %d sum_y %.4f sum_v %.5f max_v %.5f awake %d "
+                  "soft_nodes %d soft_min_y %.4f soft_max_v %.5f\n",
+                  f, count, sum_y, sum_v, max_v, awake,
+                  soft_nodes, soft_min_y, soft_max_v);
     }
   }
 }
@@ -299,7 +374,8 @@ int main(int argc, char** argv) {
     return 0;
   }
   const int repeats = argc > 2 ? std::atoi(argv[2]) : 5;
-  const int bodies = spec->num_bodies + (spec->chains.count > 0 ? spec->chains.count : 0);
+  const int bodies = spec->num_bodies + (spec->chains.count > 0 ? spec->chains.count : 0)
+                     + spec->softs.count;
   std::printf("perf scene %s bodies %d frames %d warmup %d\n", spec->name, bodies,
               spec->frames, spec->warmup);
 

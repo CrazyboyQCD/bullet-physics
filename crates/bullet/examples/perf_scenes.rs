@@ -26,7 +26,7 @@
 
 use std::time::Instant;
 
-use bullet::dynamics::{MultiBody, PhysicsWorld, RigidBody, StepStage, STEP_STAGES};
+use bullet::dynamics::{create_patch, MultiBody, PhysicsWorld, RigidBody, StepStage, STEP_STAGES};
 use bullet::math::{Quaternion, Real, Vector3, PI};
 use bullet::shapes::CollisionShape;
 use bullet::collision::broadphase::{BroadPhaseBackend, DbvtBroadPhase};
@@ -36,7 +36,7 @@ use bullet::collision::broadphase::{BroadPhaseBackend, DbvtBroadPhase};
 #[path = "../src/perf_scenes_table.rs"]
 mod perf_scenes_table;
 
-use perf_scenes_table::{PerfChainSpec, PerfSceneSpec, PerfShapeSpec, PERF_SCENES};
+use perf_scenes_table::{PerfChainSpec, PerfSceneSpec, PerfShapeSpec, PerfSoftSpec, PERF_SCENES};
 
 fn build_world(spec: &PerfSceneSpec) -> PhysicsWorld {
     // The backend mirrors the C++ runner's per-scene broad phase choice
@@ -62,6 +62,10 @@ fn build_world(spec: &PerfSceneSpec) -> PhysicsWorld {
             )),
             PerfShapeSpec::Sphere(r) => CollisionShape::sphere(r as Real),
             PerfShapeSpec::Capsule(r, hh) => CollisionShape::capsule(r as Real, hh as Real),
+            PerfShapeSpec::Plane(n, c) => CollisionShape::plane(
+                Vector3::new(n[0] as Real, n[1] as Real, n[2] as Real),
+                c as Real,
+            ),
             PerfShapeSpec::Mesh(verts, idx) => {
                 let vertices: Vec<Vector3> = verts
                     .chunks(3)
@@ -88,6 +92,9 @@ fn build_world(spec: &PerfSceneSpec) -> PhysicsWorld {
 
     if let Some(c) = &spec.chains {
         add_chains(&mut world, c);
+    }
+    if let Some(s) = &spec.softs {
+        add_softs(&mut world, s);
     }
     world
 }
@@ -133,6 +140,41 @@ fn add_chains(world: &mut PhysicsWorld, c: &PerfChainSpec) {
             mb.set_link_collider(i, collider.clone(), 0.5, 0.0);
         }
         world.add_multibody(mb);
+    }
+}
+
+/// A grid of cloth patches laid out like the C++ runner's add_softs (patch
+/// corners on a deterministic grid, identical material/iteration settings);
+/// each patch is built by `create_patch` - the byte-exact port of
+/// `btSoftBodyHelpers::CreatePatch` (perturbation 0).
+fn add_softs(world: &mut PhysicsWorld, c: &PerfSoftSpec) {
+    for k in 0..c.count {
+        let (col, row) = (k % c.cols, k / c.cols);
+        let x0 = c.origin[0] as Real + col as Real * (c.size_x + c.gap) as Real;
+        let z0 = c.origin[2] as Real + row as Real * (c.size_z + c.gap) as Real;
+        let y = c.origin[1] as Real;
+        let cloth = create_patch(
+            Vector3::new(x0, y, z0),
+            Vector3::new(x0 + c.size_x as Real, y, z0),
+            Vector3::new(x0, y, z0 + c.size_z as Real),
+            Vector3::new(x0 + c.size_x as Real, y, z0 + c.size_z as Real),
+            c.resx,
+            c.resy,
+            c.fixeds,
+            true,
+            0.0,
+        );
+        let handle = world.add_soft_body(cloth);
+        let sb = world.soft_body_mut(handle);
+        sb.cfg.piterations = c.piterations;
+        sb.cfg.k_df = c.k_df as Real;
+        sb.materials[0].k_lst = c.k_lst as Real;
+        sb.cfg.aeromodel = if c.aero == 1 {
+            bullet::dynamics::AeroModel::VTwoSided
+        } else {
+            bullet::dynamics::AeroModel::VPoint
+        };
+        sb.wind_velocity = Vector3::new(c.wind[0] as Real, c.wind[1] as Real, c.wind[2] as Real);
     }
 }
 
@@ -251,8 +293,20 @@ fn run_dump(spec: &PerfSceneSpec, dt: Real) {
                     awake += 1;
                 }
             }
+            // Soft-body aggregate: node count, lowest node, fastest node.
+            let mut soft_nodes = 0usize;
+            let mut soft_min_y = f64::INFINITY;
+            let mut soft_max_v = 0.0f64;
+            for sb in world.soft_bodies() {
+                for n in &sb.nodes {
+                    soft_min_y = soft_min_y.min(to_f64(n.x.y));
+                    soft_max_v = soft_max_v.max(to_f64(n.v.length()));
+                    soft_nodes += 1;
+                }
+            }
             println!(
-                "dump frame {f} bodies {count} sum_y {sum_y:.4} sum_v {sum_v:.5} max_v {max_v:.5} awake {awake}"
+                "dump frame {f} bodies {count} sum_y {sum_y:.4} sum_v {sum_v:.5} max_v {max_v:.5} awake {awake} \
+                 soft_nodes {soft_nodes} soft_min_y {soft_min_y:.4} soft_max_v {soft_max_v:.5}"
             );
         }
     }
@@ -287,7 +341,9 @@ fn main() {
         std::process::exit(2);
     };
     let dt: Real = spec.dt_num as Real / spec.dt_den as Real;
-    let bodies = spec.bodies.len() + spec.chains.as_ref().map_or(0, |c| c.count);
+    let bodies = spec.bodies.len()
+        + spec.chains.as_ref().map_or(0, |c| c.count)
+        + spec.softs.as_ref().map_or(0, |s| s.count);
     println!(
         "perf scene {} bodies {} frames {} warmup {}",
         name, bodies, spec.frames, spec.warmup

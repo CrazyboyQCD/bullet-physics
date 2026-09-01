@@ -32,9 +32,11 @@ C_HEADER = os.path.join(ROOT, "tools", "bullet_perf_scenes.h")
 RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "perf_scenes_table.rs")
 
 GENERATOR_TYPES = {"box_grid", "mixed_rain", "mesh_rain"}
-SHAPE_TYPES = {"box", "sphere", "capsule", "mesh"}
+SHAPE_TYPES = {"box", "sphere", "capsule", "mesh", "plane"}
 SHAPE_ENUM = {"box": "PERF_SHAPE_BOX", "sphere": "PERF_SHAPE_SPHERE",
-              "capsule": "PERF_SHAPE_CAPSULE", "mesh": "PERF_SHAPE_MESH"}
+              "capsule": "PERF_SHAPE_CAPSULE", "mesh": "PERF_SHAPE_MESH",
+              "plane": "PERF_SHAPE_PLANE"}
+AERO_ENUM = {"v_point": 0, "v_two_sided": 1}
 
 # Closed 12-triangle box shell (outward winding): the dynamic-mesh (GImpact)
 # body template shared by the mesh_rain/mesh_grid generators. Closed so the
@@ -162,6 +164,8 @@ def shape_params(shape):
         return t, [shape["radius"]]
     if t == "capsule":
         return t, [shape["radius"], shape["half_height"]]
+    if t == "plane":
+        return t, list(shape["normal"]) + [shape["constant"]]
     if t == "mesh":
         return t, [0.0] * 6
     raise ValueError(f"unknown shape type {t!r}")
@@ -174,7 +178,7 @@ def gen_c(scenes):
         "",
         '#include "btBulletDynamicsCommon.h"',
         "",
-        "enum PerfShapeType { PERF_SHAPE_BOX, PERF_SHAPE_SPHERE, PERF_SHAPE_CAPSULE, PERF_SHAPE_MESH };",
+        "enum PerfShapeType { PERF_SHAPE_BOX, PERF_SHAPE_SPHERE, PERF_SHAPE_CAPSULE, PERF_SHAPE_MESH, PERF_SHAPE_PLANE };",
         "",
         "struct PerfMeshSpec {",
         "  int num_vertices;",
@@ -197,6 +201,16 @@ def gen_c(scenes):
         "  btScalar initial_angle, collider_radius;  // radians / sphere radius",
         "};",
         "",
+        "struct PerfSoftSpec {  // grid of cloth patches, expanded by CreatePatch/create_patch in the runners",
+        "  int count, cols, resx, resy;   // resx x resy nodes per patch (res+2 actually built by the helpers)",
+        "  int fixeds, piterations;       // corner pins bitmask (1+2+4+8 = all four)",
+        "  int aero;                      // 0: v_point, 1: v_two_sided",
+        "  btScalar size_x, size_z, gap;  // patch plane size and inter-patch gap",
+        "  btScalar origin[3];            // patch (0,0) corner00 position",
+        "  btScalar k_lst, k_df;          // linear stiffness / dynamic friction",
+        "  btScalar wind[3];              // world wind velocity (worldInfo / per-body)",
+        "};",
+        "",
         "struct PerfSceneSpec {",
         "  const char* name;",
         "  int dt_num, dt_den, frames, warmup, iterations;",
@@ -207,6 +221,7 @@ def gen_c(scenes):
         "  int num_bodies;",
         "  const PerfBodySpec* bodies;",
         "  PerfChainSpec chains;",
+        "  PerfSoftSpec softs;",
         "};",
         "",
     ]
@@ -253,6 +268,17 @@ def gen_c(scenes):
                       f"btScalar({fmt(angle)}), btScalar({fmt(ch['collider_radius'])}) }}")
         else:
             chains = "{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }"
+        so = sc.get("softs")
+        if so:
+            w = ", ".join(fmt(x) for x in so["wind"])
+            org = ", ".join(fmt(x) for x in so["origin"])
+            softs = (f"{{ {so['count']}, {so['cols']}, {so['resx']}, {so['resy']}, "
+                     f"{so['fixeds']}, {so['piterations']}, {AERO_ENUM[so['aero']]}, "
+                     f"btScalar({fmt(so['size'][0])}), btScalar({fmt(so['size'][1])}), "
+                     f"btScalar({fmt(so['gap'])}), {{{org}}}, "
+                     f"btScalar({fmt(so['k_lst'])}), btScalar({fmt(so['k_df'])}), {{{w}}} }}")
+        else:
+            softs = "{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, 0, 0}, 0, 0, {0, 0, 0} }"
         dt_num, dt_den = sc["dt"]
         g = ", ".join(fmt(x) for x in sc["gravity"])
         lo = ", ".join(fmt(x) for x in sc["broadphase_aabb"][0])
@@ -260,7 +286,8 @@ def gen_c(scenes):
         lines.append(f"static const PerfSceneSpec k{name} = {{\"{name}\", {dt_num}, {dt_den}, "
                      f"{sc['frames']}, {sc['warmup']}, {sc['iterations']}, {{{g}}}, "
                      f"{{{lo}}}, {{{hi}}}, {1 if sc['broadphase'] == 'dbvt' else 0}, "
-                     f"{1 if sc['script'] == 'arena' else 0}, {len(bodies)}, k{name}_bodies, {chains}}};")
+                     f"{1 if sc['script'] == 'arena' else 0}, {len(bodies)}, k{name}_bodies, "
+                     f"{chains}, {softs}}};")
         lines.append("")
     lines.append("static const PerfSceneSpec* kPerfScenes[] = {")
     for name in scenes:
@@ -284,6 +311,7 @@ def gen_rs(scenes):
         "    Sphere(f32),",
         "    Capsule(f32, f32),",
         "    Mesh(&'static [f32], &'static [u32]),",
+        "    Plane([f32; 3], f32),",
         "}",
         "",
         "pub struct PerfBodySpec {",
@@ -307,6 +335,23 @@ def gen_rs(scenes):
         "    pub collider_radius: f32,",
         "}",
         "",
+        "pub struct PerfSoftSpec {",
+        "    pub count: usize,",
+        "    pub cols: usize,",
+        "    pub resx: usize,",
+        "    pub resy: usize,",
+        "    pub fixeds: u32,",
+        "    pub piterations: u32,",
+        "    pub aero: u32,  // 0: v_point, 1: v_two_sided",
+        "    pub size_x: f32,",
+        "    pub size_z: f32,",
+        "    pub gap: f32,",
+        "    pub origin: [f32; 3],",
+        "    pub k_lst: f32,",
+        "    pub k_df: f32,",
+        "    pub wind: [f32; 3],",
+        "}",
+        "",
         "pub struct PerfSceneSpec {",
         "    pub dt_num: u32,",
         "    pub dt_den: u32,",
@@ -318,6 +363,7 @@ def gen_rs(scenes):
         "    pub arena_script: bool,",
         "    pub bodies: &'static [PerfBodySpec],",
         "    pub chains: Option<PerfChainSpec>,",
+        "    pub softs: Option<PerfSoftSpec>,",
         "}",
         "",
         "pub const PERF_SCENES: &[(&str, PerfSceneSpec)] = &[",
@@ -334,6 +380,9 @@ def gen_rs(scenes):
                 shape = f"PerfShapeSpec::Sphere({fmt(params[0])})"
             elif t == "capsule":
                 shape = f"PerfShapeSpec::Capsule({fmt(params[0])}, {fmt(params[1])})"
+            elif t == "plane":
+                shape = (f"PerfShapeSpec::Plane([{', '.join(fmt(x) for x in params[:3])}], "
+                         f"{fmt(params[3])})")
             else:  # mesh
                 verts, idx = mesh_geometry(b["shape"])
                 vs = ", ".join(fmt(x) for x in verts)
@@ -359,6 +408,19 @@ def gen_rs(scenes):
                          f"collider_radius: {fmt(ch['collider_radius'])} }}),")
         else:
             lines.append("        chains: None,")
+        so = sc.get("softs")
+        if so:
+            w = ", ".join(fmt(x) for x in so["wind"])
+            org = ", ".join(fmt(x) for x in so["origin"])
+            lines.append(f"        softs: Some(PerfSoftSpec {{ count: {so['count']}, "
+                         f"cols: {so['cols']}, resx: {so['resx']}, resy: {so['resy']}, "
+                         f"fixeds: {so['fixeds']}, piterations: {so['piterations']}, "
+                         f"aero: {AERO_ENUM[so['aero']]}, size_x: {fmt(so['size'][0])}, "
+                         f"size_z: {fmt(so['size'][1])}, gap: {fmt(so['gap'])}, "
+                         f"origin: [{org}], k_lst: {fmt(so['k_lst'])}, k_df: {fmt(so['k_df'])}, "
+                         f"wind: [{w}] }}),")
+        else:
+            lines.append("        softs: None,")
         dt_num, dt_den = sc["dt"]
         g = ", ".join(fmt(x) for x in sc["gravity"])
         lines.append(f"        dt_num: {dt_num}, dt_den: {dt_den},")
@@ -409,6 +471,21 @@ def validate(scenes):
             if g["type"] not in GENERATOR_TYPES:
                 print(f"error: {name}: bad generator type {g['type']!r}", file=sys.stderr)
                 return False
+        if "softs" in sc:
+            so = sc["softs"]
+            if so.get("kind") != "patch":
+                print(f"error: {name}: bad softs kind {so.get('kind')!r} (want 'patch')",
+                      file=sys.stderr)
+                return False
+            if so.get("aero") not in AERO_ENUM:
+                print(f"error: {name}: bad softs aero {so.get('aero')!r}", file=sys.stderr)
+                return False
+            if so.get("count", 0) < 1 or so.get("cols", 0) < 1 or so["cols"] > so["count"]:
+                print(f"error: {name}: bad softs count/cols", file=sys.stderr)
+                return False
+        if "chains" in sc and "softs" in sc:
+            print(f"error: {name}: chain and soft scenes must not mix", file=sys.stderr)
+            return False
         if "chains" in sc and sc.get("bodies"):
             print(f"error: {name}: chain scenes must not mix with rigid bodies", file=sys.stderr)
             return False
@@ -417,7 +494,7 @@ def validate(scenes):
         except (ValueError, KeyError) as e:
             print(f"error: {name}: {e}", file=sys.stderr)
             return False
-        if not bodies and "chains" not in sc:
+        if not bodies and "chains" not in sc and "softs" not in sc:
             print(f"error: {name}: empty scene", file=sys.stderr)
             return False
     return True
@@ -434,7 +511,9 @@ def main():
     with open(RS_TABLE, "w", encoding="utf-8", newline="\n") as f:
         f.write(gen_rs(scenes))
     for name, sc in scenes.items():
-        n = len(expand_scene(sc)) + (sc["chains"]["count"] if "chains" in sc else 0)
+        n = (len(expand_scene(sc))
+             + (sc["chains"]["count"] if "chains" in sc else 0)
+             + (sc["softs"]["count"] if "softs" in sc else 0))
         print(f"scene {name}: {n} dynamic objects")
     print(f"generated {C_HEADER}")
     print(f"generated {RS_TABLE}")

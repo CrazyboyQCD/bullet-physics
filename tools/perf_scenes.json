@@ -108,7 +108,7 @@
       "warmup": 10,
       "iterations": 10,
       "gravity": [0, -9.81, 0],
-      "broadphase": "dbvt",
+      "broadphase": "sweep",
       "broadphase_aabb": [[-25, -2, -25], [25, 20, 25]],
       "bodies": [
         {
@@ -186,6 +186,70 @@
           "shell_half": [0.35, 0.35, 0.35]
         }
       ]
+    },
+    "cloth_wind": {
+      "comment": "Soft-body core stress (links + faces PBD + aerodynamics): a 4x4 grid of 16 pinned cloths (12x12 nodes each, ~2700 nodes / ~4600 triangles total) under a constant wind with the V_TwoSided aero model. The cloths are pinned at all four corners and hang in the air (no ground below), so the wind keeps every node active the whole run - a steady-state full-rate soft-body load with zero contact work. Per-cloth corners are laid out on a deterministic grid (origin + col/row * (size + gap)); the 'softs' spec is passed to both runners and expanded by CreatePatch/create_patch (the byte-exact helpers already probe-verified in the softbody phases).",
+      "dt": [1, 60],
+      "frames": 300,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-20, -2, -20], [20, 12, 20]],
+      "bodies": [],
+      "softs": {
+        "kind": "patch",
+        "count": 16,
+        "cols": 4,
+        "resx": 12,
+        "resy": 12,
+        "size": [3.0, 3.0],
+        "origin": [-7.5, 3.0, -7.5],
+        "gap": 1.2,
+        "fixeds": 15,
+        "piterations": 3,
+        "k_lst": 0.1,
+        "k_df": 0.2,
+        "aero": "v_two_sided",
+        "wind": [4.0, 0.0, 1.5]
+      }
+    },
+    "softbody_rain": {
+      "comment": "Soft-body contact stress (SDF_RS node-vs-rigid at scale): 64 free cloths (8x8 grid of 6x6 patches, ~3100 nodes total) settle onto a static ground plane from a low drop (y=0.5, ~2.2 m/s - a faster drop tunnels Bullet's own cloths through the plane, the rope_ball_tunnel catch-leak class, and the two workloads diverge). After touchdown every cloth node sits in the contact band and the classic per-node SDF_RS route runs at full rate for the rest of the run (soft bodies never sleep). Nodes are laid out identically to cloth_wind (deterministic grid, CreatePatch/create_patch).",
+      "dt": [1, 60],
+      "frames": 300,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase": "sweep",
+      "broadphase_aabb": [[-20, -2, -20], [20, 10, 20]],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "plane",
+            "normal": [0, 1, 0],
+            "constant": 0
+          },
+          "position": [0, 0, 0],
+          "mass": 0
+        }
+      ],
+      "softs": {
+        "kind": "patch",
+        "count": 64,
+        "cols": 8,
+        "resx": 6,
+        "resy": 6,
+        "size": [1.6, 1.6],
+        "origin": [-8.4, 0.5, -8.4],
+        "gap": 1.0,
+        "fixeds": 0,
+        "piterations": 3,
+        "k_lst": 0.1,
+        "k_df": 0.2,
+        "aero": "v_point",
+        "wind": [0.0, 0.0, 0.0]
+      }
     },
     "game_arena": {
       "comment": "Game-realistic load profile: the point is not body count (the rain/stack scenes already cover 500-2000 bodies) but sustained activity - a launcher throws a ball into the box tower every 0.5 s (20 balls over the run) while a heavy driven ball (mass 50, body #1, velocity-scripted along x = 4*sin(2*pi*t/240)) plows back and forth through the props. Typical games keep ~100-300 active bodies; this runs ~67 initial props (48-box tower + 25 scattered boxes + 9 shells + 9 mixed props) growing to ~88 with the stream, so contacts stay hot the whole run instead of settling like a one-shot rain. The 'script' field selects the deterministic per-frame arena tick both runners implement (launcher + dozer velocity); bodies[1] must stay the dozer (mass 50 sphere).",
