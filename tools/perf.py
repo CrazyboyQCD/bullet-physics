@@ -216,8 +216,8 @@ def update_ledger(scene, report_md):
     # The generated report ends at the next hand-written analysis
     # paragraph ("\n**"), the next heading, or the scene section's end —
     # whichever comes first. The old end-only fallback silently ate the
-    # hand-written analysis paragraphs under the numbers (pit 5 in
-    # HANDOFF.md, three recurrences).
+    # hand-written analysis paragraphs under the numbers (three past
+    # recurrences of that bug).
     candidates = [pos for pos in (text.find("\n### ", sec_start),
                                   text.find("\n**", sec_start))
                    if 0 <= pos <= end]

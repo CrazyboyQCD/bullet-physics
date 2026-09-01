@@ -475,7 +475,7 @@ fn impulse_matrix_reduces_to_scalar() {
 /// the soft-body work began). Recorded here as a known rigid-side bug;
 /// skip-worthy until the plane-vs-wide-box narrow phase is fixed.
 #[test]
-#[ignore = "known rigid bug: wide flat box on plane (see HANDOFF)"]
+#[ignore = "known rigid bug: wide flat box on plane"]
 fn wide_flat_box_on_plane_known_bug() {
     let mut world = PhysicsWorld::new();
     world.set_gravity(GRAVITY);
