@@ -138,6 +138,9 @@ const REDRIFT_TRANSLATION: Real = 0.005;
 const REDRIFT_TRANSLATION_SQUARED: Real = REDRIFT_TRANSLATION * REDRIFT_TRANSLATION;
 const REDRIFT_ANGLE: Real = 0.01;
 
+/// Persistent-manifold capacity (Bullet's `MANIFOLD_CACHE_SIZE`).
+const MANIFOLD_CACHE_SIZE: usize = 4;
+
 /// Rotation angle of a unit quaternion (`2 * acos(w)`, clamped).
 #[inline]
 fn rotation_angle(q: Quaternion) -> Real {
@@ -167,9 +170,6 @@ pub struct PersistentManifold {
     /// Step counter stamp of the last broad-phase pair sighting, for the
     /// lifecycle prune (entries whose pair disappeared are dropped).
     touched: u32,
-    /// Spare buffer for [`PersistentManifold::capture`]'s double-buffer
-    /// rebuild (kept alive so repeated captures allocate nothing).
-    spare: Vec<PersistentPoint>,
 }
 
 impl PersistentManifold {
@@ -202,7 +202,6 @@ impl PersistentManifold {
             initialized: false,
             threshold: CONTACT_BREAKING_THRESHOLD,
             touched: 0,
-            spare: Vec::new(),
         }
     }
 
@@ -256,7 +255,11 @@ impl PersistentManifold {
                 return false;
             }
             p.penetration = penetration;
-            out.push(ContactPoint::new(wb, p.normal, penetration));
+            let mut cp = ContactPoint::new(wb, p.normal, penetration);
+            // Carry the accumulated impulse so the solver warm-starts from
+            // it (the writeback stores it back after the solve).
+            cp.normal_impulse = p.normal_impulse;
+            out.push(cp);
             true
         });
         // The refreshed points line up with the surviving cache entries:
@@ -286,11 +289,17 @@ impl PersistentManifold {
         rotation_angle(rot_a) + rotation_angle(rot_b) > REDRIFT_ANGLE
     }
 
-    /// Replace the cached points with a freshly detected manifold,
-    /// anchoring each detection point in both local frames. A new point
-    /// within the breaking threshold of a cached one with a compatible
-    /// normal is the same physical contact and inherits its accumulated
-    /// normal impulse (Bullet's `getCacheEntry` + `replaceContactPoint`).
+    /// Merge a freshly detected manifold into the cached points (Bullet's
+    /// `addManifoldPoint`): a detection point matching a cached one (local
+    /// anchor within the breaking threshold, compatible normal) replaces it
+    /// in place and inherits the accumulated normal impulse; an unmatched
+    /// point is appended; cached points with no detection counterpart are
+    /// KEPT — they die only in `refresh` (separated or drifted past the
+    /// threshold) or when the capacity overflows, in which case the deepest
+    /// four survive (Bullet's `sortCachedPoints`). This accumulation is what
+    /// grows a resting flat box from its single first-touch point to the
+    /// full four-corner support set: `btConvexPlaneCollisionAlgorithm`
+    /// reports one point per frame and relies on exactly this merge.
     /// Friction impulses are deliberately not inherited: the tangent basis
     /// is rebuilt from the current normal every step, and stale tangential
     /// impulses along a rotated basis made resting bodies oscillate (see
@@ -308,12 +317,6 @@ impl PersistentManifold {
         self.threshold = threshold;
         let inv_a = ori_a.inverse();
         let inv_b = ori_b.inverse();
-        // Double-buffer rebuild: move the current points into the spare
-        // buffer and reuse `points`' allocation for the new set, so repeated
-        // captures (every redetect frame of every pair) allocate nothing.
-        let mut old = std::mem::take(&mut self.spare);
-        old.clear();
-        old.append(&mut self.points);
         let threshold_sq = threshold * threshold;
         for cp in &manifold.points {
             // Reconstruct the A-side witness from the reported contact
@@ -329,16 +332,23 @@ impl PersistentManifold {
                 penetration: cp.penetration,
                 normal_impulse: 0.0,
             };
-            if let Some(old_point) = old.iter().find(|o| {
+            if let Some(slot) = self.points.iter_mut().find(|o| {
                 (o.local_a - point.local_a).length_squared() < threshold_sq
                     && o.normal.dot(point.normal) >= 0.9
             }) {
-                point.normal_impulse = old_point.normal_impulse;
+                point.normal_impulse = slot.normal_impulse;
+                *slot = point;
+            } else {
+                self.points.push(point);
             }
-            self.points.push(point);
         }
-        old.clear();
-        self.spare = old;
+        // Capacity: keep the deepest points when the manifold overflows
+        // (Bullet's `sortCachedPoints`).
+        if self.points.len() > MANIFOLD_CACHE_SIZE {
+            self.points
+                .sort_by(|a, b| b.penetration.total_cmp(&a.penetration));
+            self.points.truncate(MANIFOLD_CACHE_SIZE);
+        }
         self.detect_pos_a = pos_a;
         self.detect_ori_a = ori_a;
         self.detect_pos_b = pos_b;
@@ -480,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_inherits_the_impulse_of_persisting_points_only() {
+    fn capture_merges_and_inherits_the_impulse_of_matching_points() {
         let (manifold, pos_a, pos_b) = resting_contact(0.01);
         let mut cache = PersistentManifold::new();
         cache.capture(
@@ -505,8 +515,10 @@ mod tests {
         );
         assert_relative_eq!(cache.points()[0].normal_impulse, 5.0);
 
-        // Re-detection with a flipped normal: the point is a different
-        // contact and starts from zero.
+        // Re-detection with a flipped normal: a different contact —
+        // appended, starting from zero, while the unmatched old point is
+        // KEPT alive (Bullet's `addManifoldPoint`); the refresh prunes it
+        // once it separates or drifts.
         let flipped = ContactManifold::from_points(vec![ContactPoint::new(
             Vector3::ZERO,
             -Vector3::Y,
@@ -520,7 +532,9 @@ mod tests {
             Quaternion::IDENTITY,
             CONTACT_BREAKING_THRESHOLD,
         );
-        assert_relative_eq!(cache.points()[0].normal_impulse, 0.0);
+        assert_eq!(cache.points().len(), 2);
+        assert_relative_eq!(cache.points()[0].normal_impulse, 5.0);
+        assert_relative_eq!(cache.points()[1].normal_impulse, 0.0);
     }
 
     #[test]

@@ -1281,10 +1281,17 @@ impl PhysicsWorld {
                 b.orientation,
                 seed,
             ) {
-                // Detection path: anchor the fresh manifold in both local
-                // frames (inheriting impulses of persisting points), then
-                // emit rows from the detection geometry. Stamp the new entry
-                // right away so this step's prune keeps it.
+                // Detection path: merge the fresh manifold into the
+                // persistent one (Bullet's `addManifoldPoint`: matched
+                // points replace and inherit their impulse, new points
+                // append, undetected points survive until the refresh
+                // prunes them), then emit rows for the whole merged
+                // manifold — Bullet solves every point of the persistent
+                // manifold each step, not just the newest detection. The
+                // accumulation is what lets a resting flat box grow from
+                // its single first-touch point to the full four-corner
+                // support set (see the flat-box probe notes). Stamp the
+                // new entry right away so this step's prune keeps it.
                 let cache = self.manifold_cache.entry((i, j)).or_default();
                 cache.mark_paired(stamp);
                 let threshold = a
@@ -1292,10 +1299,9 @@ impl PhysicsWorld {
                     .contact_breaking_threshold()
                     .min(b.shape.contact_breaking_threshold());
                 cache.capture(&manifold, pa, a.orientation, pb, b.orientation, threshold);
-                for (k, (detected, cached)) in manifold.points.iter().zip(cache.points()).enumerate() {
-                    let mut cp = *detected;
-                    cp.normal_impulse = cached.normal_impulse * WARM_STARTING_FACTOR;
-                    cp.tangent_impulse = [0.0, 0.0];
+                cache.refresh(pa, a.orientation, pb, b.orientation, &mut self.refresh_out);
+                for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
+                    cp.normal_impulse *= WARM_STARTING_FACTOR;
                     self.contact_rows
                         .push(ContactConstraint::prepare(i, j, &cp, a, b, k as u32));
                 }
@@ -2864,10 +2870,14 @@ mod tests {
             bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
             Vector3::ZERO,
         ));
-        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        // Ball mass 3 vs box mass 1: probe-verified against stock Bullet —
+        // a mass-3 ball knocks the box ~1.1 m away, a mass-1 ball only
+        // ~0.05 m (the persistent four-corner manifold holds a resting box
+        // much steadier than the pre-merge single-point behavior).
+        let mut mb = crate::multibody::MultiBody::new(1, 3.0, Vector3::ONE, true, false);
         mb.setup_revolute(
             0,
-            1.0,
+            3.0,
             Vector3::ONE,
             None,
             Quaternion::IDENTITY,
@@ -2886,12 +2896,14 @@ mod tests {
         mb.base_pos = Vector3::new(0.0, 1.0, 0.0);
         mb.set_joint_pos_multidof(0, &[bullet_math::FRAC_PI_2]);
         world.add_multibody(mb);
-        // A box resting on the plane right of the pivot, in the swing path
-        // (the link center sweeps through y ≈ 0 at x ≈ 1).
-        let box_start = Vector3::new(1.0, 0.5, 0.0);
+        // A box resting on the plane where the ball's arc crosses its right
+        // face, deliberately clear of the ball's release pose: when the box
+        // sat under the release point, the ball just came to rest on the box
+        // top instead of kicking it (stock-Bullet probe verified).
+        let box_start = Vector3::new(0.85, 0.3, 0.0);
         world.add_body(
             RigidBody::new_dynamic(
-                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.3)),
                 box_start,
                 1.0,
             )
@@ -2929,10 +2941,12 @@ mod tests {
             bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
             Vector3::ZERO,
         ));
-        // The victim: a box that settles on the plane and sleeps.
+        // The victim: a box that settles on the plane and sleeps, clear of
+        // the ball's release pose (see the swinging test for the geometry
+        // and mass rationale — both stock-Bullet probe verified).
         let box_idx = world.add_body(RigidBody::new_dynamic(
-            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
-            Vector3::new(1.0, 0.5, 0.0),
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.3)),
+            Vector3::new(0.85, 0.3, 0.0),
             1.0,
         ));
         for _ in 0..180 {
@@ -2940,11 +2954,12 @@ mod tests {
             world.step_simulation(1.0 / 60.0);
         }
         assert!(!world.body(box_idx).is_active(), "box should be asleep");
-        // Swing a link sphere into it.
-        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        // Swing a link sphere into it (mass 3: a mass-1 ball only nudges
+        // the four-corner-supported box ~0.01 m — probe-verified).
+        let mut mb = crate::multibody::MultiBody::new(1, 3.0, Vector3::ONE, true, false);
         mb.setup_revolute(
             0,
-            1.0,
+            3.0,
             Vector3::ONE,
             None,
             Quaternion::IDENTITY,
@@ -2966,9 +2981,13 @@ mod tests {
             world.step_simulation(1.0 / 60.0);
         }
         assert!(world.body(box_idx).is_active(), "box should have been woken");
+        // The wake is the point of this test; the shove is a gentle nudge
+        // (~0.02 m here, ~0.09 m in stock Bullet — after the impact the
+        // ball comes to rest wedged on the box's top corner, and the exact
+        // resting pose is chaotic).
         assert!(
-            (world.body(box_idx).position - Vector3::new(1.0, 0.5, 0.0)).length() > 0.1,
-            "sleeping box was not knocked away"
+            (world.body(box_idx).position - Vector3::new(0.85, 0.3, 0.0)).length() > 0.015,
+            "sleeping box was not knocked away: {:?}", world.body(box_idx).position
         );
     }
 

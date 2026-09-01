@@ -444,11 +444,15 @@ fn rope_pushes_dynamic_box() {
     assert!(max_box_v < 12.0, "box blasted away: {max_box_v}");
     // Nothing sank through the ground.
     assert!(min_node_y > 0.0, "rope sank through: {min_node_y}");
-    // The rope's weight visibly presses the box into its contact band:
-    // without the rope the box rests at ~0.5 - slop.
+    // The box stays grounded under the rope's weight. Since the
+    // persistent-manifold merge (Bullet's four-corner accumulation) the
+    // resting box is far sturdier: a 2 kg rope cannot press a 5 kg
+    // four-corner-supported box down any more — stock Bullet behaves the
+    // same way (rope_press_probe: box_y stays at 0.5000 for all 600
+    // frames, vs the old single-point era where the box sank to ~0.47).
     let box_y = world.body(box_body).position.y;
-    assert!(box_y < 0.47, "box not pressed down: {box_y}");
-    assert!(box_y > 0.2, "box sank: {box_y}");
+    assert!(box_y > 0.45, "box sank: {box_y}");
+    assert!(box_y < 0.51, "box floated away: {box_y}");
 }
 
 /// The impulse matrix reduces to the scalar effective mass for the
@@ -470,12 +474,12 @@ fn impulse_matrix_reduces_to_scalar() {
     assert!((m - expect).abs_diff_eq(Matrix3::ZERO, 1e-4), "m = {m:?}");
 }
 
-/// A wide flat box on a ground plane blows up on HEAD *without any soft
-/// body* (single-corner contact, spin-up, sink-through — reproduced before
-/// the soft-body work began). Recorded here as a known rigid-side bug;
-/// skip-worthy until the plane-vs-wide-box narrow phase is fixed.
+/// Regression test for the persistent-manifold merge: with the old
+/// replace-on-capture semantics the plane-vs-box manifold was a single
+/// corner point that flipped between frames, and the solver torque pumped
+/// the box through the plane (y reached −14 by frame 120; stock Bullet
+/// settles this scene at y = 0.1 via the same accumulation).
 #[test]
-#[ignore = "known rigid bug: wide flat box on plane"]
 fn wide_flat_box_on_plane_known_bug() {
     let mut world = PhysicsWorld::new();
     world.set_gravity(GRAVITY);
