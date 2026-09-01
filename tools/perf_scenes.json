@@ -251,6 +251,50 @@
         "wind": [0.0, 0.0, 0.0]
       }
     },
+"softbody_mesh": {
+      "comment": "Soft-body contact stress on a triangulated terrain (the SDF cache's home turf): the softbody_rain workload with the analytic ground plane swapped for the same wavy 40x40 static mesh the other scenes use (~3200 triangles). Bullet's soft-vs-concave route pays its sparse-SDF voxel pipeline here by design (this is the workload the 0.25 m voxel cache was built for), while our node-vs-triangle distance walks the local BVH every query - so this scene decomposes the softbody_rain lead into the SDF-pipeline share (visible as the gap against softbody_rain's plane number) and the shared implementation share. Same 64 cloths, same drop (y = 0.5; the terrain peaks at y = 0.2 so the first touch is ~2.4 m/s), never sleeps.",
+      "dt": [1, 60],
+      "frames": 300,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase": "sweep",
+      "broadphase_aabb": [[-25, -2, -25], [25, 10, 25]],
+      "bodies": [
+        {
+          "name": "terrain",
+          "shape": {
+            "type": "mesh",
+            "grid": [40, 40],
+            "origin": [-19.5, -19.5],
+            "cell": [1.0, 1.0],
+            "heights_expr": {
+              "amp": 0.2,
+              "ax": 0.7,
+              "az": 0.6
+            }
+          },
+          "position": [0, 0, 0],
+          "mass": 0
+        }
+      ],
+"softs": {
+        "kind": "patch",
+        "count": 64,
+        "cols": 8,
+        "resx": 6,
+        "resy": 6,
+        "size": [1.6, 1.6],
+        "origin": [-8.4, 0.5, -8.4],
+        "gap": 1.0,
+        "fixeds": 0,
+        "piterations": 3,
+        "k_lst": 0.1,
+        "k_df": 0.2,
+        "aero": "v_point",
+        "wind": [0.0, 0.0, 0.0]
+      }
+    },
     "game_arena": {
       "comment": "Game-realistic load profile: the point is not body count (the rain/stack scenes already cover 500-2000 bodies) but sustained activity - a launcher throws a ball into the box tower every 0.5 s (20 balls over the run) while a heavy driven ball (mass 50, body #1, velocity-scripted along x = 4*sin(2*pi*t/240)) plows back and forth through the props. Typical games keep ~100-300 active bodies; this runs ~67 initial props (48-box tower + 25 scattered boxes + 9 shells + 9 mixed props) growing to ~88 with the stream, so contacts stay hot the whole run instead of settling like a one-shot rain. The 'script' field selects the deterministic per-frame arena tick both runners implement (launcher + dozer velocity); bodies[1] must stay the dozer (mass 50 sphere).",
       "dt": [1, 60],
