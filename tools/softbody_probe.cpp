@@ -254,11 +254,44 @@ static void scene_cluster_pair(int frames)
 	}
 }
 
+// Scene 8: a 18-node rope draped inside the SDF_RS band across a static
+// sphere (r = 0.7 at (0, 4.7, 0)), offset +0.5 to one side so its weight
+// swings the ball if the contact couples. Both engines hold the middle
+// nodes on the band ~30 frames, then the rope slides off the side and
+// falls (the port matches within a few frames of phase slip). A short
+// rope DROPPED onto the sphere at ~3.9 m/s tunnels through in BOTH
+// engines (measured: bullet min_y -186.8 vs ours -181.0 over 400 frames;
+// the classic position solve only partially corrects each frame), so the
+// scene uses the draped variant for a meaningful comparison.
+static void scene_rope_ball_tunnel(int frames)
+{
+	btSoftRigidDynamicsWorld* world = makeWorld();
+	btSphereShape* shape = new btSphereShape(btScalar(0.7));
+	btRigidBody* ball = new btRigidBody(0, nullptr, shape);
+	ball->getWorldTransform().setOrigin(btVector3(0, btScalar(4.7), 0));
+	world->addRigidBody(ball);
+	btSoftBody* rope = btSoftBodyHelpers::CreateRope(world->getWorldInfo(),
+	                                                 btVector3(btScalar(-0.4), btScalar(5.55), 0),
+	                                                 btVector3(btScalar(1.6), btScalar(5.55), 0),
+	                                                 16, 0);
+	rope->m_cfg.piterations = 4;
+	world->addSoftBody(rope);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3 com = centerOfMass(rope);
+		printf("%d %.6f %.6f %.6f", f, minY(rope), com.y(), com.x());
+		for (int i = 0; i < rope->m_nodes.size(); ++i)
+			printf(" %.6f", rope->m_nodes[i].m_x.y());
+		printf("\n");
+	}
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s <rope_pendulum|rope_ground|cloth_plane|patch_catenary|soft_soft_vf|ellipsoid_ground|cluster_pair> [frames]\n", argv[0]);
+		fprintf(stderr, "usage: %s <rope_pendulum|rope_ground|cloth_plane|patch_catenary|soft_soft_vf|ellipsoid_ground|cluster_pair|rope_ball_tunnel> [frames]\n", argv[0]);
 		return 1;
 	}
 	const char* scene = argv[1];
@@ -277,6 +310,8 @@ int main(int argc, char** argv)
 		scene_ellipsoid_ground(frames);
 	else if (!strcmp(scene, "cluster_pair"))
 		scene_cluster_pair(frames);
+	else if (!strcmp(scene, "rope_ball_tunnel"))
+		scene_rope_ball_tunnel(frames);
 	else
 	{
 		fprintf(stderr, "unknown scene %s\n", scene);

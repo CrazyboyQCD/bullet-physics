@@ -25,6 +25,7 @@ fn main() {
         "soft_soft_vf" => scene_soft_soft_vf(dt, frames),
         "ellipsoid_ground" => scene_ellipsoid_ground(dt, frames),
         "cluster_pair" => scene_cluster_pair(dt, frames),
+        "rope_ball_tunnel" => scene_rope_ball_tunnel(dt, frames),
         other => {
             eprintln!("unknown scene {other}");
             std::process::exit(1);
@@ -277,5 +278,40 @@ fn scene_cluster_pair(dt: Real, frames: usize) {
             min_a.min(min_b),
             ca.x
         );
+    }
+}
+
+/// A 18-node rope draped inside the SDF_RS band across a static sphere
+/// (r = 0.7 at (0, 4.7, 0)), offset +0.5 to one side so its weight swings
+/// the ball if the contact couples. Both engines hold the middle nodes on
+/// the band ~30 frames, then the rope slides off the side and falls (the
+/// port matches within a few frames of phase slip). A short rope DROPPED
+/// onto the sphere at ~3.9 m/s tunnels through in BOTH engines (measured:
+/// bullet min_y -186.8 vs ours -181.0 over 400 frames; the classic
+/// position solve only partially corrects each frame), so the scene uses
+/// the draped variant for a meaningful comparison.
+fn scene_rope_ball_tunnel(dt: Real, frames: usize) {
+    let mut world = make_world();
+    world.add_body(RigidBody::new_static(
+        CollisionShape::sphere(0.7),
+        Vector3::new(0.0, 4.7, 0.0),
+    ));
+    let rope = world.add_soft_body(create_rope(
+        Vector3::new(-0.4, 5.55, 0.0),
+        Vector3::new(1.6, 5.55, 0.0),
+        16,
+        0,
+    ));
+    world.soft_body_mut(rope).cfg.piterations = 4;
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let sb = world.soft_body(rope);
+        let min_y = sb.nodes.iter().map(|n| n.x.y).fold(Real::INFINITY, Real::min);
+        let com = sb.get_center_of_mass();
+        print!("{f} {:.6} {:.6} {:.6}", min_y, com.y, com.x);
+        for n in &sb.nodes {
+            print!(" {:.6}", n.x.y);
+        }
+        println!();
     }
 }
