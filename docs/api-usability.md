@@ -43,11 +43,15 @@ gap. Behavior semantics are out of scope here — see
   (`v *= pow(1 - damping, dt)` inside `btRigidBody::applyDamping`) into
   the velocity-integration stage. Missing entirely today
   (`bullet-deviations.md` §3, rigid-body property surface).
-- **P3 — minimal debug draw** (medium): a `DebugDraw` trait (line /
-  pose / point sink) injected into the world to render AABBs, contact
-  points, manifold normals and wheel rays; the caller implements the
-  backend. Bullet's OpenGL debug visualization is a big part of its
-  tuning workflow; today we only have dumps and prints.
+- **P3 — minimal debug draw** (medium): a debug-primitives output —
+  `world.debug_primitives(&mut impl FnMut(DebugPrim))` — emitting AABBs,
+  contact points, manifold normals and wheel rays, with a category mask
+  mirroring Bullet's `DBG_*` flags. This is the *producer* role of
+  Bullet's `btIDebugDraw`; the consumer stays caller-side, so a Bevy
+  user bridges it to `Gizmos` (the immediate-mode line buffer) in a few
+  lines while any other renderer implements the same closure. Bullet's
+  OpenGL debug visualization is a big part of its tuning workflow;
+  today we only have dumps and prints.
 - **P4 — callbacks** (larger, post-release): contact-added,
   contact-processed and tick callbacks are how Bullet games wire
   damage/sound/particles. Design note: prefer an explicit post-step
