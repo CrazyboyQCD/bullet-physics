@@ -99,10 +99,7 @@ fn main() {
         Vector3::ZERO,
         Vector3::Z,
     );
-    door_hinge
-        .kind_mut()
-        .hinge_mut()
-        .set_limit(-0.7, 0.7);
+    door_hinge.hinge_mut().set_limit(-0.7, 0.7);
     world.add_constraint(door_hinge);
 
     // A welded pair (fixed joint) at z = -4: two boxes joined rigidly hang
@@ -163,7 +160,7 @@ fn main() {
         JointFrame::new(Vector3::ZERO, bullet::math::Matrix3::IDENTITY),
         JointFrame::new(Vector3::ZERO, bullet::math::Matrix3::IDENTITY),
     );
-    slider.kind_mut().slider_mut().enable_lin_motor(1.5, 100.0);
+    slider.slider_mut().enable_lin_motor(1.5, 100.0);
     world.add_constraint(slider);
 
     // A generic 6DOF at z = 12: linear locked, angular Z limited to ±30°;
@@ -183,7 +180,7 @@ fn main() {
         JointFrame::new(Vector3::ZERO, bullet::math::Matrix3::IDENTITY),
         JointFrame::new(Vector3::ZERO, bullet::math::Matrix3::IDENTITY),
     );
-    dof.kind_mut().generic_6dof_mut().set_angular_limits(
+    dof.generic_6dof_mut().set_angular_limits(
         Vector3::new(-1.0, -1.0, -0.52),
         Vector3::new(1.0, 1.0, 0.52),
     );

@@ -64,103 +64,141 @@ pub enum ConstraintKind {
 }
 
 impl ConstraintKind {
-    /// Mutable access to the [`Point2PointConstraint`] parameters.
+    /// Name of this kind, used by the accessors' panic messages.
+    fn kind_name(&self) -> &'static str {
+        match self {
+            ConstraintKind::Point2Point(_) => "point-to-point",
+            ConstraintKind::Hinge(_) => "hinge",
+            ConstraintKind::Fixed(_) => "fixed",
+            ConstraintKind::ConeTwist(_) => "cone-twist",
+            ConstraintKind::Slider(_) => "slider",
+            ConstraintKind::Generic6Dof(_) => "generic 6DOF",
+        }
+    }
+
+    /// Access to the [`Point2PointConstraint`] parameters (panics on any
+    /// other kind).
+    pub fn point2point(&self) -> &Point2PointConstraint {
+        match self {
+            ConstraintKind::Point2Point(p2p) => p2p,
+            other => panic!(
+                "not a point-to-point constraint (found {})",
+                other.kind_name()
+            ),
+        }
+    }
+
+    /// Mutable access to the [`Point2PointConstraint`] parameters (panics on
+    /// any other kind).
     pub fn point2point_mut(&mut self) -> &mut Point2PointConstraint {
         match self {
             ConstraintKind::Point2Point(p2p) => p2p,
-            ConstraintKind::Hinge(_) => panic!("not a point-to-point constraint"),
-            ConstraintKind::Fixed(_) | ConstraintKind::ConeTwist(_) | ConstraintKind::Slider(_) => {
-                panic!("not a point-to-point constraint")
-            }
-            ConstraintKind::Generic6Dof(_) => panic!("not a point-to-point constraint"),
+            other => panic!(
+                "not a point-to-point constraint (found {})",
+                other.kind_name()
+            ),
         }
     }
 
-    /// Access to the [`HingeConstraint`] parameters.
+    /// Access to the [`HingeConstraint`] parameters (panics on any other
+    /// kind).
     pub fn hinge(&self) -> &HingeConstraint {
         match self {
             ConstraintKind::Hinge(hinge) => hinge,
-            ConstraintKind::Point2Point(_) => panic!("not a hinge constraint"),
-            ConstraintKind::Fixed(_) | ConstraintKind::ConeTwist(_) | ConstraintKind::Slider(_) => {
-                panic!("not a hinge constraint")
-            }
-            ConstraintKind::Generic6Dof(_) => panic!("not a hinge constraint"),
+            other => panic!("not a hinge constraint (found {})", other.kind_name()),
         }
     }
 
-    /// Mutable access to the [`HingeConstraint`] parameters.
+    /// Mutable access to the [`HingeConstraint`] parameters (panics on any
+    /// other kind).
     pub fn hinge_mut(&mut self) -> &mut HingeConstraint {
         match self {
             ConstraintKind::Hinge(hinge) => hinge,
-            ConstraintKind::Point2Point(_) => panic!("not a hinge constraint"),
-            ConstraintKind::Fixed(_) | ConstraintKind::ConeTwist(_) | ConstraintKind::Slider(_) => {
-                panic!("not a hinge constraint")
-            }
-            ConstraintKind::Generic6Dof(_) => panic!("not a hinge constraint"),
+            other => panic!("not a hinge constraint (found {})", other.kind_name()),
         }
     }
 
-    /// Access to the [`FixedConstraint`] parameters.
+    /// Access to the [`FixedConstraint`] parameters (panics on any other
+    /// kind).
     pub fn fixed(&self) -> &FixedConstraint {
         match self {
             ConstraintKind::Fixed(fixed) => fixed,
-            _ => panic!("not a fixed constraint"),
+            other => panic!("not a fixed constraint (found {})", other.kind_name()),
         }
     }
 
-    /// Mutable access to the [`FixedConstraint`] parameters.
+    /// Mutable access to the [`FixedConstraint`] parameters (panics on any
+    /// other kind).
     pub fn fixed_mut(&mut self) -> &mut FixedConstraint {
         match self {
             ConstraintKind::Fixed(fixed) => fixed,
-            _ => panic!("not a fixed constraint"),
+            other => panic!("not a fixed constraint (found {})", other.kind_name()),
         }
     }
 
-    /// Access to the [`ConeTwistConstraint`] parameters.
+    /// Access to the [`ConeTwistConstraint`] parameters (panics on any other
+    /// kind).
     pub fn cone_twist(&self) -> &ConeTwistConstraint {
         match self {
             ConstraintKind::ConeTwist(ct) => ct,
-            _ => panic!("not a cone-twist constraint"),
+            other => panic!(
+                "not a cone-twist constraint (found {})",
+                other.kind_name()
+            ),
         }
     }
 
-    /// Mutable access to the [`ConeTwistConstraint`] parameters.
+    /// Mutable access to the [`ConeTwistConstraint`] parameters (panics on
+    /// any other kind).
     pub fn cone_twist_mut(&mut self) -> &mut ConeTwistConstraint {
         match self {
             ConstraintKind::ConeTwist(ct) => ct,
-            _ => panic!("not a cone-twist constraint"),
+            other => panic!(
+                "not a cone-twist constraint (found {})",
+                other.kind_name()
+            ),
         }
     }
 
-    /// Access to the [`SliderConstraint`] parameters.
+    /// Access to the [`SliderConstraint`] parameters (panics on any other
+    /// kind).
     pub fn slider(&self) -> &SliderConstraint {
         match self {
             ConstraintKind::Slider(slider) => slider,
-            _ => panic!("not a slider constraint"),
+            other => panic!("not a slider constraint (found {})", other.kind_name()),
         }
     }
 
-    /// Mutable access to the [`SliderConstraint`] parameters.
+    /// Mutable access to the [`SliderConstraint`] parameters (panics on any
+    /// other kind).
     pub fn slider_mut(&mut self) -> &mut SliderConstraint {
         match self {
             ConstraintKind::Slider(slider) => slider,
-            _ => panic!("not a slider constraint"),
+            other => panic!("not a slider constraint (found {})", other.kind_name()),
         }
     }
 
-    /// Access to the [`Generic6DofConstraint`] parameters.
+    /// Access to the [`Generic6DofConstraint`] parameters (panics on any
+    /// other kind).
     pub fn generic_6dof(&self) -> &Generic6DofConstraint {
         match self {
             ConstraintKind::Generic6Dof(dof) => dof,
-            _ => panic!("not a generic 6DOF constraint"),
+            other => panic!(
+                "not a generic 6DOF constraint (found {})",
+                other.kind_name()
+            ),
         }
     }
 
-    /// Mutable access to the [`Generic6DofConstraint`] parameters.
+    /// Mutable access to the [`Generic6DofConstraint`] parameters (panics on
+    /// any other kind).
     pub fn generic_6dof_mut(&mut self) -> &mut Generic6DofConstraint {
         match self {
             ConstraintKind::Generic6Dof(dof) => dof,
-            _ => panic!("not a generic 6DOF constraint"),
+            other => panic!(
+                "not a generic 6DOF constraint (found {})",
+                other.kind_name()
+            ),
         }
     }
 }
@@ -332,6 +370,46 @@ impl Constraint {
 
     pub fn kind_mut(&mut self) -> &mut ConstraintKind {
         &mut self.kind
+    }
+
+    // Parameter accessors delegating to the kind, so tuning code stays one
+    // dispatch away instead of `kind_mut().xxx_mut()` (Bullet calls the
+    // setters directly on its constraint subclasses). Reads go through
+    // `kind()` — each kind's constructor owns that name here. All of these
+    // panic with the found kind on a mismatch.
+
+    /// Mutable access to the [`Point2PointConstraint`] parameters (Bullet's
+    /// `btPoint2PointConstraint` setters, e.g. `setMaxImpulseClamp` / ERP).
+    pub fn point2point_mut(&mut self) -> &mut Point2PointConstraint {
+        self.kind_mut().point2point_mut()
+    }
+
+    /// Mutable access to the [`HingeConstraint`] parameters (limits, motor).
+    pub fn hinge_mut(&mut self) -> &mut HingeConstraint {
+        self.kind_mut().hinge_mut()
+    }
+
+    /// Mutable access to the [`FixedConstraint`] parameters.
+    pub fn fixed_mut(&mut self) -> &mut FixedConstraint {
+        self.kind_mut().fixed_mut()
+    }
+
+    /// Mutable access to the [`ConeTwistConstraint`] parameters (limits,
+    /// motor).
+    pub fn cone_twist_mut(&mut self) -> &mut ConeTwistConstraint {
+        self.kind_mut().cone_twist_mut()
+    }
+
+    /// Mutable access to the [`SliderConstraint`] parameters (limits,
+    /// motors).
+    pub fn slider_mut(&mut self) -> &mut SliderConstraint {
+        self.kind_mut().slider_mut()
+    }
+
+    /// Mutable access to the [`Generic6DofConstraint`] parameters (limits,
+    /// motors).
+    pub fn generic_6dof_mut(&mut self) -> &mut Generic6DofConstraint {
+        self.kind_mut().generic_6dof_mut()
     }
 
     pub fn enabled(&self) -> bool {
@@ -2855,7 +2933,7 @@ mod tests {
             Vector3::ZERO,
             Vector3::Z,
         );
-        hinge.kind_mut().hinge_mut().set_limit(-0.3, 0.3);
+        hinge.hinge_mut().set_limit(-0.3, 0.3);
         world.add_constraint(hinge);
         let mut min_angle: Real = 0.0;
         for _ in 0..600 {
@@ -2897,7 +2975,7 @@ mod tests {
             Vector3::ZERO,
             Vector3::Z,
         );
-        hinge.kind_mut().hinge_mut().enable_motor(1.0, 1000.0);
+        hinge.hinge_mut().enable_motor(1.0, 1000.0);
         world.add_constraint(hinge);
         for _ in 0..180 {
             world.step_simulation(DT);
@@ -2971,7 +3049,7 @@ mod tests {
             ));
             // The joint pins the bob centre to the anchor at the origin.
             let mut c = Constraint::point2point(bob, anchor, Vector3::ZERO, Vector3::ZERO);
-            c.kind_mut().point2point_mut().set_impulse_clamp(clamp);
+            c.point2point_mut().set_impulse_clamp(clamp);
             world.add_constraint(c);
             for _ in 0..300 {
                 world.step_simulation(DT);
@@ -3262,7 +3340,7 @@ mod tests {
             JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
             JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
         );
-        slider.kind_mut().slider_mut().set_lin_limits(-0.3, 0.3);
+        slider.slider_mut().set_lin_limits(-0.3, 0.3);
         world.add_constraint(slider);
         // Push the box hard along the axis toward the upper limit. The
         // slider limit is a velocity bias (Bullet's `m_constraintError =
@@ -3308,10 +3386,7 @@ mod tests {
             JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
             JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
         );
-        slider
-            .kind_mut()
-            .slider_mut()
-            .enable_lin_motor(1.5, 100.0);
+        slider.slider_mut().enable_lin_motor(1.5, 100.0);
         world.add_constraint(slider);
         // 1.5 m/s is above the sleeping threshold (0.8), so the motorized
         // box keeps sliding instead of deactivating after 2 s.
@@ -3352,7 +3427,7 @@ mod tests {
             JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
             JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
         );
-        slider.kind_mut().slider_mut().set_ang_limits(-0.4, 0.4);
+        slider.slider_mut().set_ang_limits(-0.4, 0.4);
         world.add_constraint(slider);
         // Spin the box around the slider axis.
         world.body_mut(box_body).angular_velocity = Vector3::new(3.0, 0.0, 0.0);
@@ -3389,7 +3464,7 @@ mod tests {
             JointFrame::new(Vector3::new(0.0, 0.5, 0.0), Matrix3::IDENTITY),
             JointFrame::new(Vector3::new(0.0, 1.5, 0.0), Matrix3::IDENTITY),
         );
-        dof.kind_mut()
+        dof
             .generic_6dof_mut()
             .set_angular_limits(Vector3::ZERO, Vector3::ZERO);
         world.add_constraint(dof);
@@ -3435,7 +3510,7 @@ mod tests {
             JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
             JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
         );
-        dof.kind_mut()
+        dof
             .generic_6dof_mut()
             .set_angular_limits(Vector3::new(-0.4, -1.0, -1.0), Vector3::new(0.4, 1.0, 1.0));
         world.add_constraint(dof);
@@ -3473,7 +3548,7 @@ mod tests {
             JointFrame::new(Vector3::ZERO, Matrix3::IDENTITY),
         );
         // Angular Z motor at 1 rad/s (axis 5 = angular Z).
-        dof.kind_mut().generic_6dof_mut().enable_motor(5, 1.0, 100.0);
+        dof.generic_6dof_mut().enable_motor(5, 1.0, 100.0);
         world.add_constraint(dof);
         for _ in 0..180 {
             world.step_simulation(DT);
@@ -3509,7 +3584,7 @@ mod tests {
         );
         // Linear X limited to ±0.3, Y/Z locked (default), angular free
         // (default).
-        dof.kind_mut()
+        dof
             .generic_6dof_mut()
             .set_linear_limits(Vector3::new(-0.3, 0.0, 0.0), Vector3::new(0.3, 0.0, 0.0));
         world.add_constraint(dof);
@@ -3527,5 +3602,29 @@ mod tests {
             "box did not return inside the limits: {:?}",
             world.body(box_body).position
         );
+    }
+
+    /// The delegating [`Constraint`] accessors reach the kind parameters in
+    /// one dispatch, and reads go back through `kind()`.
+    #[test]
+    fn kind_accessors_tune_parameters() {
+        let mut c = Constraint::point2point(0, 1, Vector3::ZERO, Vector3::ZERO);
+        c.point2point_mut().set_impulse_clamp(0.001);
+        assert_eq!(c.kind().point2point().impulse_clamp, 0.001);
+    }
+
+    /// A mismatched accessor panics naming the found kind.
+    #[test]
+    #[should_panic = "not a point-to-point constraint (found hinge)"]
+    fn wrong_kind_accessor_panics() {
+        let mut h = Constraint::hinge(
+            0,
+            1,
+            Vector3::ZERO,
+            Vector3::Y,
+            Vector3::ZERO,
+            Vector3::Y,
+        );
+        h.point2point_mut();
     }
 }
