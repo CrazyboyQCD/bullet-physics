@@ -403,6 +403,8 @@ fn apply_push(a: &mut RigidBody, b: &mut RigidBody, c: &ContactConstraint, j: Re
 }
 
 fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Real) {
+    // One split serves the whole solve (the ten-iteration hot path used to
+    // re-split for every tangent block — pure control-flow overhead).
     let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
 
     let va = a.linear_velocity + a.angular_velocity.cross(c.r_a);
@@ -446,7 +448,6 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
 
     // Tangent 1.
     {
-        let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
         let va = a.linear_velocity + a.angular_velocity.cross(c.r_a);
         let vb = b.linear_velocity + b.angular_velocity.cross(c.r_b);
         let vt = (vb - va).dot(c.tangent1);
@@ -459,7 +460,6 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
 
     // Tangent 2.
     {
-        let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
         let va = a.linear_velocity + a.angular_velocity.cross(c.r_a);
         let vb = b.linear_velocity + b.angular_velocity.cross(c.r_b);
         let vt = (vb - va).dot(c.tangent2);
