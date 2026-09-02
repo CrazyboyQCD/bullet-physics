@@ -11,18 +11,20 @@
 
 /// Union-find with path compression and union by size (Bullet's `btUnionFind`
 /// built with `USE_PATH_COMPRESSION`).
+#[derive(Default)]
 pub(crate) struct UnionFind {
     parent: Vec<usize>,
     size: Vec<usize>,
 }
 
 impl UnionFind {
-    /// `n` singleton sets `0..n`.
-    pub(crate) fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n).collect(),
-            size: vec![1; n],
-        }
+    /// Rebuild to `n` singleton sets `0..n` on the pooled arrays (the
+    /// capacity survives for the next step).
+    pub(crate) fn reset(&mut self, n: usize) {
+        self.parent.clear();
+        self.parent.extend(0..n);
+        self.size.clear();
+        self.size.resize(n, 1);
     }
 
     /// The representative (island root) of `x`.
@@ -51,20 +53,35 @@ impl UnionFind {
     }
 }
 
+/// Pooled island-pass scratch owned by `PhysicsWorld` (Bullet rebuilds its
+/// `btUnionFind` per `buildAndProcessIslands`): the union-find arrays plus
+/// the awake-flag vectors, grown to the node count on demand so steady-state
+/// steps allocate nothing (the 1000-body stack profile billed five per-step
+/// heap allocations here).
+#[derive(Default)]
+pub(crate) struct IslandScratch {
+    pub(crate) uf: UnionFind,
+    pub(crate) island_awake: Vec<bool>,
+    pub(crate) body_awake: Vec<bool>,
+    pub(crate) mb_awake: Vec<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn singletons_are_their_own_root() {
-        let mut uf = UnionFind::new(3);
+        let mut uf = UnionFind::default();
+        uf.reset(3);
         assert_eq!(uf.find(0), 0);
         assert_eq!(uf.find(2), 2);
     }
 
     #[test]
     fn unite_merges_and_find_is_stable() {
-        let mut uf = UnionFind::new(4);
+        let mut uf = UnionFind::default();
+        uf.reset(4);
         uf.unite(0, 1);
         uf.unite(2, 3);
         assert_eq!(uf.find(0), uf.find(1));
@@ -76,7 +93,8 @@ mod tests {
 
     #[test]
     fn unite_of_the_same_set_is_a_noop() {
-        let mut uf = UnionFind::new(2);
+        let mut uf = UnionFind::default();
+        uf.reset(2);
         uf.unite(0, 1);
         let root = uf.find(0);
         uf.unite(1, 0);

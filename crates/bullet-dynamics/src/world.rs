@@ -9,7 +9,7 @@ use bullet_collision::narrowphase::{self, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
 use crate::body::{CollisionFlags, RigidBody};
 use crate::constraint::{self, Constraint};
-use crate::island::UnionFind;
+use crate::island::IslandScratch;
 use crate::multibody::body::{MultiBody, MultiBodyScratch};
 use crate::multibody::contact::{self, ContactSide, MbContactRow, PendingContact};
 use crate::multibody::constraint::{MultiBodyConstraint, SolverData, SolverRow};
@@ -321,6 +321,9 @@ pub struct PhysicsWorld {
     /// Reused per-sweep buffer for the contact rows' normal-impulse
     /// snapshot (kept across steps so the solve sweeps do not allocate).
     mb_row_scratch: Vec<Real>,
+    /// Pooled island-pass buffers (union-find arrays + awake-flag vectors,
+    /// grown to the node count on demand; see `island::IslandScratch`).
+    island_scratch: IslandScratch,
     /// Position-based soft bodies (Bullet's `btSoftBody` list of
     /// `btSoftRigidDynamicsWorld`); each body owns one broad-phase proxy
     /// over its node-hull bounds (phase B: SDF_RS contacts and anchors;
@@ -389,6 +392,7 @@ impl PhysicsWorld {
             mb_pending_contacts: Vec::new(),
             mb_contact_rows: Vec::new(),
             mb_row_scratch: Vec::new(),
+            island_scratch: IslandScratch::default(),
             soft_bodies: Vec::new(),
             soft_proxies: Vec::new(),
             soft_scratch: Vec::new(),
@@ -1933,22 +1937,30 @@ impl PhysicsWorld {
         let num_mbs = self.multibodies.len();
         let soft_base = num_bodies + num_mbs;
         let total = soft_base + self.soft_bodies.len();
-        let mut uf = UnionFind::new(total);
+        // Pooled buffers, grown to the node count on demand (union-find
+        // reset to `n` singletons).
+        let IslandScratch { uf, island_awake, body_awake, mb_awake } =
+            &mut self.island_scratch;
+        uf.reset(total);
+        island_awake.clear();
+        island_awake.resize(total, false);
 
         // Proxy-pair owners -> island nodes (None: not an island member).
         // A soft body is one node (Bullet unions the soft body's single
         // collision object the same way) and never sleeps, so any island
         // touching it stays awake.
-        let node_of = |world: &Self, owner: ProxyOwner| match owner {
-            ProxyOwner::Body(i) => world.bodies[i].participates_in_islands().then_some(i),
-            ProxyOwner::Collider(e) => Some(num_bodies + world.collider_entries[e].mb),
+        let bodies = &self.bodies;
+        let collider_entries = &self.collider_entries;
+        let node_of = |owner: ProxyOwner| match owner {
+            ProxyOwner::Body(i) => bodies[i].participates_in_islands().then_some(i),
+            ProxyOwner::Collider(e) => Some(num_bodies + collider_entries[e].mb),
             ProxyOwner::Soft(i) => Some(soft_base + i),
             ProxyOwner::Free => None,
         };
         for &(pi, pj) in pairs {
             if let (Some(a), Some(b)) = (
-                node_of(self, self.proxy_owners[pi]),
-                node_of(self, self.proxy_owners[pj]),
+                node_of(self.proxy_owners[pi]),
+                node_of(self.proxy_owners[pj]),
             ) {
                 uf.unite(a, b);
             }
@@ -1979,7 +1991,6 @@ impl PhysicsWorld {
         }
 
         // Any awake member keeps its whole island awake (per island root).
-        let mut island_awake = vec![false; total];
         for (i, b) in self.bodies.iter().enumerate() {
             if b.participates_in_islands() && b.is_island_awake() {
                 island_awake[uf.find(i)] = true;
@@ -1998,12 +2009,10 @@ impl PhysicsWorld {
 
         // Resolve every member's island state first (the decisions borrow
         // the union-find while applying them borrows the world).
-        let body_awake: Vec<bool> = (0..num_bodies)
-            .map(|i| island_awake[uf.find(i)])
-            .collect();
-        let mb_awake: Vec<bool> = (0..num_mbs)
-            .map(|i| island_awake[uf.find(num_bodies + i)])
-            .collect();
+        body_awake.clear();
+        body_awake.extend((0..num_bodies).map(|i| island_awake[uf.find(i)]));
+        mb_awake.clear();
+        mb_awake.extend((0..num_mbs).map(|i| island_awake[uf.find(num_bodies + i)]));
         for (i, &awake) in body_awake.iter().enumerate() {
             let b = &mut self.bodies[i];
             if awake {
