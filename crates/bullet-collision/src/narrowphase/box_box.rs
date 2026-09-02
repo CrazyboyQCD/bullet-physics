@@ -45,16 +45,54 @@ fn line_closest_approach(
     }
 }
 
-/// Clip a polygon against the half-plane `sign * coord[axis] < h`.
-fn clip_poly(poly: &[[Real; 2]], axis: usize, sign: Real, h: Real) -> Vec<[Real; 2]> {
-    let n = poly.len();
-    if n == 0 {
-        return Vec::new();
+/// Fixed-capacity vertex buffer for the Sutherland–Hodgman face clip: a
+/// convex polygon gains at most one vertex per half-plane cut, so a quad
+/// clipped by four half-planes never exceeds 8 vertices. Replaces the old
+/// per-call `Vec` chain (one allocation per clip, ~8 per face-face contact) —
+/// container change only, the clip arithmetic is untouched.
+const CLIP_POLY_CAP: usize = 8;
+
+#[derive(Clone, Copy)]
+struct ClipPoly {
+    pts: [[Real; 2]; CLIP_POLY_CAP],
+    len: usize,
+}
+
+impl ClipPoly {
+    #[inline]
+    fn from_quad(quad: &[[Real; 2]; 4]) -> Self {
+        let mut pts = [[0.0; 2]; CLIP_POLY_CAP];
+        pts[..4].copy_from_slice(quad);
+        Self { pts, len: 4 }
     }
-    let mut out = Vec::new();
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[[Real; 2]] {
+        &self.pts[..self.len]
+    }
+
+    #[inline]
+    fn push(&mut self, p: [Real; 2]) {
+        debug_assert!(self.len < CLIP_POLY_CAP, "clip polygon overflow");
+        self.pts[self.len] = p;
+        self.len += 1;
+    }
+}
+
+/// Clip the polygon `src` against the half-plane `sign * coord[axis] < h`,
+/// writing the vertices into `out` (reset first; callers ping-pong two
+/// buffers, so `src` and `out` never alias).
+fn clip_poly(src: &ClipPoly, axis: usize, sign: Real, h: Real, out: &mut ClipPoly) {
+    let n = src.len;
+    out.len = 0;
     for i in 0..n {
-        let cur = poly[i];
-        let next = poly[(i + 1) % n];
+        let cur = src.pts[i];
+        let next = src.pts[(i + 1) % n];
         let cur_in = sign * cur[axis] < h;
         let next_in = sign * next[axis] < h;
         if cur_in {
@@ -68,52 +106,69 @@ fn clip_poly(poly: &[[Real; 2]], axis: usize, sign: Real, h: Real) -> Vec<[Real;
             out.push(p);
         }
     }
-    out
 }
 
 /// Intersect an axis-aligned rectangle `[-h0, h0] x [-h1, h1]` with a convex
-/// quad (Sutherland-Hodgman). Returns the clipped polygon vertices.
-fn intersect_rect_quad(h: [Real; 2], quad: [[Real; 2]; 4]) -> Vec<[Real; 2]> {
-    let mut poly: Vec<[Real; 2]> = quad.to_vec();
-    poly = clip_poly(&poly, 0, -1.0, h[0]);
-    poly = clip_poly(&poly, 0, 1.0, h[0]);
-    poly = clip_poly(&poly, 1, -1.0, h[1]);
-    poly = clip_poly(&poly, 1, 1.0, h[1]);
-    poly
+/// quad (Sutherland–Hodgman). Returns the clipped polygon vertices in a
+/// fixed stack buffer.
+fn intersect_rect_quad(h: [Real; 2], quad: &[[Real; 2]; 4]) -> ClipPoly {
+    let mut buf = ClipPoly::from_quad(quad);
+    let mut tmp = ClipPoly { pts: [[0.0; 2]; CLIP_POLY_CAP], len: 0 };
+    clip_poly(&buf, 0, -1.0, h[0], &mut tmp);
+    clip_poly(&tmp, 0, 1.0, h[0], &mut buf);
+    clip_poly(&buf, 1, -1.0, h[1], &mut tmp);
+    clip_poly(&tmp, 1, 1.0, h[1], &mut buf);
+    buf
 }
 
 /// Keep the deepest contact point plus the `maxc - 1` points farthest from it,
 /// so remaining contacts are well spread (analogous to Bullet's `cullPoints2`).
-fn cull_points(points: Vec<(Vector3, Real)>, maxc: usize) -> Vec<(Vector3, Real)> {
+/// Fixed buffers (`points.len() <= CLIP_POLY_CAP`, output `<= maxc <= 4`); the
+/// sort is a stable insertion sort matching the old `sort_by` tie order
+/// bit-for-bit (equal depths keep their index order).
+fn cull_points(points: &[(Vector3, Real)], maxc: usize) -> ([(Vector3, Real); 4], usize) {
     if points.len() <= maxc {
-        return points;
+        let mut out = [(Vector3::ZERO, 0.0); 4];
+        out[..points.len()].copy_from_slice(points);
+        return (out, points.len());
     }
-    let i0 = points
-        .iter()
-        .enumerate()
-        .max_by(|a, b| {
-            a.1 .1
-                .partial_cmp(&b.1 .1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(i, _)| i)
-        .unwrap_or(0);
+    let mut i0 = 0;
+    let mut deepest_depth = points[0].1;
+    for (i, &(_, d)) in points.iter().enumerate().skip(1) {
+        // `>=` keeps the last maximum, matching `Iterator::max_by`.
+        if d >= deepest_depth {
+            i0 = i;
+            deepest_depth = d;
+        }
+    }
     let deepest = points[i0];
-    let mut rest: Vec<(usize, Real)> = points
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != i0)
-        .map(|(i, (p, _))| (i, (*p - deepest.0).length_squared()))
-        .collect();
-    rest.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut result = vec![deepest];
-    for &(i, _) in rest.iter().take(maxc - 1) {
-        result.push(points[i]);
+    let mut rest = [(0usize, 0.0); CLIP_POLY_CAP - 1];
+    let mut rn = 0;
+    for (i, (p, _)) in points.iter().enumerate() {
+        if i != i0 {
+            rest[rn] = (i, (*p - deepest.0).length_squared());
+            rn += 1;
+        }
     }
-    result
+    // Stable descending insertion sort (strict comparison keeps ties in
+    // construction order, like the previous `sort_by`).
+    for j in 1..rn {
+        let (key_i, key_d) = rest[j];
+        let mut k = j;
+        while k > 0 && rest[k - 1].1 < key_d {
+            rest[k] = rest[k - 1];
+            k -= 1;
+        }
+        rest[k] = (key_i, key_d);
+    }
+    let mut out = [(Vector3::ZERO, 0.0); 4];
+    out[0] = deepest;
+    let mut n = 1;
+    for &(i, _) in rest.iter().take(maxc - 1) {
+        out[n] = points[i];
+        n += 1;
+    }
+    (out, n)
 }
 
 /// Box-box contact, adapted from Bullet's `btBoxBoxDetector` (ODE `dBoxBox2`,
@@ -423,7 +478,7 @@ fn box_box_sat(
     ];
 
     let rect = [comp(sa, code1), comp(sa, code2)];
-    let ret = intersect_rect_quad(rect, quad);
+    let ret = intersect_rect_quad(rect, &quad);
     if ret.is_empty() {
         return None;
     }
@@ -432,8 +487,9 @@ fn box_box_sat(
     let det1 = 1.0 / (m11 * m22 - m12 * m21);
     let (m11, m12, m21, m22) = (m11 * det1, m12 * det1, m21 * det1, m22 * det1);
 
-    let mut penetrating: Vec<(Vector3, Real)> = Vec::new();
-    for pt in &ret {
+    let mut penetrating = [(Vector3::ZERO, 0.0); CLIP_POLY_CAP];
+    let mut np = 0;
+    for pt in ret.as_slice() {
         let rx = pt[0];
         let ry = pt[1];
         let k1 = m22 * (rx - c1) - m12 * (ry - c2);
@@ -441,16 +497,17 @@ fn box_box_sat(
         let point = center + k1 * col(rb, a1) + k2 * col(rb, a2);
         let dep = comp(sa, code_n) - normal2.dot(point);
         if dep >= 0.0 {
-            penetrating.push((point, dep));
+            penetrating[np] = (point, dep);
+            np += 1;
         }
     }
-    if penetrating.is_empty() {
+    if np == 0 {
         return None;
     }
 
-    let penetrating = cull_points(penetrating, 4);
-    let mut contacts = Vec::with_capacity(penetrating.len());
-    for (point, dep) in penetrating {
+    let (penetrating, np) = cull_points(&penetrating[..np], 4);
+    let mut contacts = Vec::with_capacity(np);
+    for &(point, dep) in penetrating[..np].iter() {
         // `point` is expressed relative to the reference-box center; move it
         // back to world space. The contact normal points from box A to box B.
         let mut pos = point + pa_ref;
