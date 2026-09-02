@@ -62,7 +62,7 @@ S/M/L · **See** = existing notes.
 
 ## P6 — feature surface, by expected usage frequency
 
-- **all-hits ray**: `raycast_closest` only; Bullet's `rayTest` also
+- **all-hits ray** ✅ (2026-09-02): `raycast_closest` only; Bullet's `rayTest` also
   offers all-hits via `RayResultCallback`.
   - Impl: the closest-hit walk (`raycast_closest_excluding`) already
     iterates every candidate from `BroadPhase::raycast_candidates`;
@@ -72,7 +72,7 @@ S/M/L · **See** = existing notes.
     `bullet-collision` are unchanged).
   - Risk: none semantic; document ordering guarantee.
   - Size: S.
-- **ray filter masks**: rays consume no group/mask yet (the group/mask
+- **ray filter masks** ✅ (2026-09-02): rays consume no group/mask yet (the group/mask
   system itself is ported).
   - Impl: optional `(group, mask)` parameters (or a filter closure) on
     the ray entry points; the per-candidate acceptance test applies the
@@ -131,7 +131,7 @@ S/M/L · **See** = existing notes.
     wake dynamic contacts they move into (Bullet's contact generation
     does this for free since pairs are detected).
   - Size: M.
-- **per-body gravity**: `btRigidBody::setGravity` — only world gravity
+- **per-body gravity** ✅ (2026-09-02): `btRigidBody::setGravity` — only world gravity
   exists here.
   - Impl: `RigidBody.gravity: Vector3` filled from the world at
     `add_body` (skip static/kinematic); `world.set_gravity` propagates
@@ -149,7 +149,7 @@ S/M/L · **See** = existing notes.
     btDiscreteDynamicsWorld.cpp:322` (`applyGravity`), `:499`
     (propagating `setGravity`), `:538` (`addRigidBody` sync);
     `btRigidBody.cpp:205` (`applyGravity` = cached-force application).
-- **overlap-filter callback**: `btOverlapFilterCallback` — the
+- **overlap-filter callback** ✅ (2026-09-02): `btOverlapFilterCallback` — the
   group/mask pair test is in, custom predicates are not.
   - Impl: `world.set_pair_filter(Option<Box<dyn FnMut(usize, usize) ->
     bool>>)` consulted at pair acceptance (where the group & mask test
@@ -262,7 +262,7 @@ S/M/L · **See** = existing notes.
   - Risk: fields must stay out of the numeric path (warm start reads
     impulses only) or parity breaks.
   - Size: M.
-- **CCD candidate pruning**: the sweep tests every body linearly;
+- **CCD candidate pruning** ✅ (2026-09-02): the sweep tests every body linearly;
   Bullet prunes through a broad-phase AABB query first (cost only).
   - Impl: inside the CCD pass (the swept-sphere closure in `world.rs`,
     `integrate_transforms` stage), wrap the per-target test with

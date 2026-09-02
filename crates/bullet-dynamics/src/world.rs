@@ -7,7 +7,7 @@ use bullet_collision::broadphase::{BroadPhase, BroadPhaseBackend};
 use bullet_collision::manifold::{ContactManifold, PersistentManifold, CONTACT_BREAKING_THRESHOLD};
 use bullet_collision::narrowphase::{self, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
-use crate::body::{CollisionFlags, RigidBody};
+use crate::body::{CollisionFlags, RayFilter, RigidBody};
 use crate::constraint::{self, Constraint};
 use crate::island::IslandScratch;
 use crate::multibody::body::{MultiBody, MultiBodyScratch};
@@ -234,6 +234,12 @@ fn filters_collide(group_a: u16, mask_a: u16, group_b: u16, mask_b: u16) -> bool
     group_a & mask_b != 0 && group_b & mask_a != 0
 }
 
+/// Custom overlap-filter predicate for rigid pairs (Bullet's
+/// `btOverlapFilterCallback::needsCollision`): receives both body indices
+/// and references; pairs it rejects are skipped by the narrow phase and the
+/// CCD sweep, on top of the group & mask test.
+pub type PairFilter = dyn Fn(usize, &RigidBody, usize, &RigidBody) -> bool;
+
 /// A discrete rigid-body simulation world, mirroring `btDiscreteDynamicsWorld`
 /// extended with the Featherstone multibody list of `btMultiBodyDynamicsWorld`
 /// (phase A of the collision-integration design: one fused world, stepping
@@ -272,6 +278,9 @@ pub struct PhysicsWorld {
     /// entries carry stale stamps until this step's pair pass re-stamps
     /// them).
     prev_simulate: bool,
+    /// Custom overlap-filter predicate for rigid pairs (Bullet's
+    /// `btOverlapFilterCallback`); see [`PhysicsWorld::set_pair_filter`].
+    pair_filter: Option<Box<PairFilter>>,
     /// Joints (Bullet's `btTypedConstraint` list added with `addConstraint`).
     constraints: Vec<Constraint>,
     /// Body pairs whose collision response is suppressed by a joint
@@ -374,6 +383,7 @@ impl PhysicsWorld {
             step_counter: 0,
             refresh_out: Vec::new(),
             prev_simulate: false,
+            pair_filter: None,
             constraints: Vec::new(),
             no_collision_pairs: HashSet::with_hasher(FxBuild::default()),
             prev_touching: Vec::new(),
@@ -405,6 +415,27 @@ impl PhysicsWorld {
 
     pub fn set_gravity(&mut self, gravity: Vector3) {
         self.gravity = gravity;
+        // Bullet's `setGravity`: propagate to every active body that has not
+        // opted out. Sleeping bodies keep the stale value until woken — the
+        // upstream quirk, copied verbatim.
+        for body in &mut self.bodies {
+            if body.is_active()
+                && !body
+                    .collision_flags
+                    .contains(CollisionFlags::DISABLE_WORLD_GRAVITY)
+            {
+                body.set_gravity(gravity);
+            }
+        }
+    }
+
+    /// Install a custom overlap-filter predicate for rigid pairs (Bullet's
+    /// `btOverlapFilterCallback::needsCollision`): the closure receives both
+    /// body indices and references, and pairs it rejects are skipped by the
+    /// narrow phase and the CCD sweep, on top of the group & mask test.
+    /// `None` (the default) restores the standard semantics.
+    pub fn set_pair_filter(&mut self, filter: Option<Box<PairFilter>>) {
+        self.pair_filter = filter;
     }
 
     pub fn gravity(&self) -> Vector3 {
@@ -435,7 +466,16 @@ impl PhysicsWorld {
     /// they are tracked in [`PhysicsWorld::body_proxies`] (visible to tests).
     /// Indices are stable: removing a body never renumbers the others (see
     /// [`PhysicsWorld::remove_body`]).
-    pub fn add_body(&mut self, body: RigidBody) -> usize {
+    pub fn add_body(&mut self, mut body: RigidBody) -> usize {
+        // Bullet's `addRigidBody`: a dynamic body inherits the world gravity
+        // unless it detached itself (`BT_DISABLE_WORLD_GRAVITY`).
+        if !body.is_static()
+            && !body
+                .collision_flags
+                .contains(CollisionFlags::DISABLE_WORLD_GRAVITY)
+        {
+            body.set_gravity(self.gravity);
+        }
         let aabb = body
             .shape
             .world_aabb(body.position, body.orientation)
@@ -876,6 +916,66 @@ impl PhysicsWorld {
         ignore: Option<usize>,
     ) -> Option<(usize, RayHit)> {
         let mut best: Option<(usize, RayHit)> = None;
+        self.raycast_walk(ray_from, ray_to, ignore, RayFilter::DEFAULT, |i, hit| {
+            if best.is_none_or(|(_, b)| hit.fraction < b.fraction) {
+                best = Some((i, hit));
+            }
+        });
+        best
+    }
+
+    /// Every body hit along the segment, nearest first (Bullet's `rayTest`
+    /// with an all-hits callback). Bodies whose collision group/mask pair
+    /// test rejects the query's [`RayFilter::DEFAULT`] group and mask are
+    /// not tested.
+    pub fn raycast_all(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<(usize, RayHit)> {
+        self.raycast_all_filtered(ray_from, ray_to, RayFilter::DEFAULT)
+    }
+
+    /// Every hit among the bodies the `filter` accepts, nearest first.
+    pub fn raycast_all_filtered(
+        &self,
+        ray_from: Vector3,
+        ray_to: Vector3,
+        filter: RayFilter,
+    ) -> Vec<(usize, RayHit)> {
+        let mut hits: Vec<(usize, RayHit)> = Vec::new();
+        self.raycast_walk(ray_from, ray_to, None, filter, |i, hit| {
+            hits.push((i, hit));
+        });
+        hits.sort_by(|a, b| a.1.fraction.total_cmp(&b.1.fraction));
+        hits
+    }
+
+    /// Closest hit among the bodies the `filter` accepts (Bullet's
+    /// `rayTest` with a filtered closest-result callback).
+    pub fn raycast_closest_filtered(
+        &self,
+        ray_from: Vector3,
+        ray_to: Vector3,
+        filter: RayFilter,
+    ) -> Option<(usize, RayHit)> {
+        let mut best: Option<(usize, RayHit)> = None;
+        self.raycast_walk(ray_from, ray_to, None, filter, |i, hit| {
+            if best.is_none_or(|(_, b)| hit.fraction < b.fraction) {
+                best = Some((i, hit));
+            }
+        });
+        best
+    }
+
+    /// The shared ray walk: the broad phase prunes proxies whose AABB the
+    /// segment does not cross, link-collider proxies are skipped (phase C),
+    /// and the filter applies the symmetric group & mask test. Each hit is
+    /// handed to `out` in no particular order.
+    fn raycast_walk(
+        &self,
+        ray_from: Vector3,
+        ray_to: Vector3,
+        ignore: Option<usize>,
+        filter: RayFilter,
+        mut out: impl FnMut(usize, RayHit),
+    ) {
         for p in self.broadphase.raycast_candidates(ray_from, ray_to) {
             // Link colliders join the world queries together with their
             // contact response (phase C); until then only rigid bodies are
@@ -887,18 +987,19 @@ impl PhysicsWorld {
                 continue;
             }
             let body = &self.bodies[i];
+            if !filter.accepts(body) {
+                continue;
+            }
             if let Some(hit) = raycast::raycast(
                 &body.shape,
                 body.position,
                 body.orientation,
                 ray_from,
                 ray_to,
-            ) && best.is_none_or(|(_, b)| hit.fraction < b.fraction)
-            {
-                best = Some((i, hit));
+            ) {
+                out(i, hit);
             }
         }
-        best
     }
 
     /// Indices of bodies whose broad-phase AABB overlaps `aabb` (exact AABB
@@ -1069,7 +1170,7 @@ impl PhysicsWorld {
                 .map(|b| b.linear_velocity.length_squared() + b.angular_velocity.length_squared()),
         );
         for body in &mut self.bodies {
-            body.integrate_velocities(self.gravity, dt);
+            body.integrate_velocities(dt);
         }
 
         // 1m. Multibody gravity (Bullet's `applyGravity` over the `btMultiBody`
@@ -1372,6 +1473,14 @@ impl PhysicsWorld {
             {
                 continue;
             }
+            // The custom overlap filter gates the pair on top of the group
+            // & mask test (Bullet's `btOverlapFilterCallback` order: both
+            // must accept).
+            if let Some(filter) = self.pair_filter.as_deref()
+                && !filter(i, &self.bodies[i], j, &self.bodies[j])
+            {
+                continue;
+            }
             // The pair stays in the cache lifecycle even when skipped below:
             // a sleeping island keeps its manifolds (their AABBs still
             // overlap), matching Bullet's persistent manifolds on a
@@ -1650,6 +1759,12 @@ impl PhysicsWorld {
                     return 1.0;
                 }
                 let mut best = 1.0;
+                // Broad-phase AABB pretest bounds for the whole sweep: a
+                // target whose (margin-padded) proxy AABB does not touch
+                // this box cannot be hit by the sphere cast, so the exact
+                // cast only runs on plausible targets (conservative on both
+                // sides — output-neutral pruning).
+                let swept = Aabb::new(from.min(to), from.max(to)).expanded(radius);
                 for j in 0..self.bodies.len() {
                     if i == j {
                         continue;
@@ -1670,6 +1785,18 @@ impl PhysicsWorld {
                     // the suppression set above (dispatcher `needsCollision`).
                     if self.bodies[i].collision_group & other.collision_mask == 0
                         || other.collision_group & self.bodies[i].collision_mask == 0
+                    {
+                        continue;
+                    }
+                    // The custom overlap filter gates the CCD sweep as well.
+                    if let Some(filter) = self.pair_filter.as_deref()
+                        && !filter(i, &self.bodies[i], j, other)
+                    {
+                        continue;
+                    }
+                    // The swept-bounds pretest (see `swept` above).
+                    if let Some(aabb) = self.broadphase.proxy_aabb(self.body_proxies[j])
+                        && !aabb.overlaps(&swept)
                     {
                         continue;
                     }
@@ -2788,6 +2915,111 @@ mod tests {
         assert!(world
             .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
             .is_none());
+    }
+
+    #[test]
+    fn raycast_all_reports_every_hit_nearest_first() {
+        let mut world = PhysicsWorld::new();
+        let far = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(3.0, 0.0, 0.0),
+        ));
+        let near = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(1.0, 0.0, 0.0),
+        ));
+        let hits = world.raycast_all(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0));
+        let indices: Vec<usize> = hits.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, vec![near, far]);
+        assert!(hits[0].1.fraction < hits[1].1.fraction);
+    }
+
+    #[test]
+    fn raycast_filters_consume_group_and_mask() {
+        let mut world = PhysicsWorld::new();
+        // The body's mask does not accept the default ray group...
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(1.0, 0.0, 0.0),
+            )
+            .collision_filter(filter_groups::STATIC, filter_groups::STATIC),
+        );
+        assert!(world
+            .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+            .is_none());
+        // ...but a query whose group includes STATIC sees it.
+        let filter = RayFilter {
+            group: filter_groups::DEFAULT | filter_groups::STATIC,
+            mask: filter_groups::ALL,
+        };
+        assert!(world
+            .raycast_closest_filtered(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0), filter)
+            .is_some());
+    }
+
+    #[test]
+    fn pair_filter_rejects_pairs() {
+        let ground_shape = || {
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+        };
+        // Without the filter the ball lands on the plate.
+        let mut world = PhysicsWorld::new();
+        world.add_body(ground_shape());
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(world.body(ball).position.y > 0.2);
+        // Rejecting every pair lets it fall through.
+        let mut world = PhysicsWorld::new();
+        world.add_body(ground_shape());
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        world.set_pair_filter(Some(Box::new(|_, _, _, _| false)));
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(world.body(ball).position.y < -0.5);
+    }
+
+    #[test]
+    fn per_body_gravity_overrides_the_world() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        // A dynamic body inherits the world gravity at add time.
+        let free = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::ZERO,
+            1.0,
+        ));
+        assert_eq!(world.body(free).gravity(), Vector3::new(0.0, -10.0, 0.0));
+        // A detached body keeps its own gravity.
+        let mut detached = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::ZERO,
+            1.0,
+        );
+        detached.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+        detached.set_gravity(Vector3::new(0.0, 5.0, 0.0));
+        let detached = world.add_body(detached);
+        world.step_simulation(1.0 / 60.0);
+        assert!(world.body(free).position.y < 0.0);
+        assert!(world.body(detached).position.y > 0.0);
+        // Propagation skips the detached body.
+        world.set_gravity(Vector3::new(0.0, -3.0, 0.0));
+        assert_eq!(world.body(free).gravity(), Vector3::new(0.0, -3.0, 0.0));
+        assert_eq!(world.body(detached).gravity(), Vector3::new(0.0, 5.0, 0.0));
     }
 
     /// The broad-phase AABB test is conservative: a ray crossing a proxy's

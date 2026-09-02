@@ -99,7 +99,11 @@ gap. Behavior semantics are out of scope here — see
 | `body->setDamping(l, a)` | `body.set_damping(l, a)` | factors clamped to `[0, 1]` |
 | collision groups / masks | `body.collision_group` / `.collision_mask` | symmetric `group & mask` pair test |
 | trigger volume / sensor | `body.no_contact_response(true)` + `.collision_events(true)` | `world.contact_events()` drain |
-| `rayTest` (all hits) | `world.raycast_closest(...)` | closest hit only (§3) |
+| `rayTest` (closest) | `world.raycast_closest(...)` | |
+| `rayTest` (all hits) | `world.raycast_all(...)` / `raycast_all_filtered(...)` | filter = the ray's own group/mask |
+| `RayResultCallback` filter | `RayFilter { group, mask }` | symmetric pair test, default group 1 / mask all |
+| `body->setGravity(v)` | `body.set_gravity(v)` | add-time sync + awake-only propagation; `DISABLE_WORLD_GRAVITY` opts out |
+| `btOverlapFilterCallback` | `world.set_pair_filter(...)` | rigid pairs + CCD sweep, on top of group/mask |
 | `contactTest` | `world.contact_test(...)` | returns manifolds, not a callback |
 | `btRaycastVehicle` | `RaycastVehicle` | `update_vehicle` after `step_simulation` |
 | `btKinematicCharacterController` | `KinematicCharacterController` | no ghost object needed |

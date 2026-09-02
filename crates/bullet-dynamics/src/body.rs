@@ -38,6 +38,33 @@ pub mod filter_groups {
     pub const ALL: u16 = u16::MAX;
 }
 
+/// Collision filter for ray queries (Bullet's `RayResultCallback` group /
+/// mask members): a body is ray-tested when the symmetric `group & mask`
+/// pair test passes — the same rule the broad phase applies to pairs, but
+/// with the ray carrying its own group and mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RayFilter {
+    /// The group this query belongs to (Bullet's `m_collisionFilterGroup`).
+    pub group: u16,
+    /// The groups this query tests against (Bullet's `m_collisionFilterMask`).
+    pub mask: u16,
+}
+
+impl RayFilter {
+    /// Accept every body (Bullet's default `RayResultCallback` filter:
+    /// group 1, mask all).
+    pub const DEFAULT: Self = Self {
+        group: filter_groups::DEFAULT,
+        mask: filter_groups::ALL,
+    };
+
+    /// The symmetric test between this query and a body.
+    #[inline]
+    pub(crate) fn accepts(self, body: &RigidBody) -> bool {
+        self.group & body.collision_mask != 0 && body.collision_group & self.mask != 0
+    }
+}
+
 /// Collision-object flags (Bullet's `btCollisionObject::CollisionFlags`),
 /// a small bit set stored by value like the engine's other flag newtypes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -50,6 +77,12 @@ impl CollisionFlags {
     /// queries and collision events (with `sensor = true`) still report
     /// (Bullet's `CF_NO_CONTACT_RESPONSE`, the trigger-volume / sensor flag).
     pub const NO_CONTACT_RESPONSE: Self = Self(0x0001);
+
+    /// The body's gravity does not follow
+    /// [`PhysicsWorld::set_gravity`](crate::world::PhysicsWorld::set_gravity)
+    /// propagation: the per-body value (synced from the world at `add_body`
+    /// time) stays as set (Bullet's `BT_DISABLE_WORLD_GRAVITY`).
+    pub const DISABLE_WORLD_GRAVITY: Self = Self(0x0002);
 
     /// Whether every bit of `other` is set.
     pub const fn contains(self, other: Self) -> bool {
@@ -77,6 +110,11 @@ pub struct RigidBody {
     inv_inertia_local: Vector3,
     pub friction: Real,
     pub restitution: Real,
+    /// Per-body gravity acceleration (Bullet's `m_gravity_acceleration`):
+    /// synced from the world at `add_body` time and by
+    /// `PhysicsWorld::set_gravity` propagation unless the
+    /// [`CollisionFlags::DISABLE_WORLD_GRAVITY`] flag detaches it.
+    gravity: Vector3,
     /// Collision filter group: pairs collide when this intersects the other
     /// body's [`collision_mask`](RigidBody::collision_mask) *and* vice versa
     /// (Bullet's `m_collisionFilterGroup`, default [`filter_groups::DEFAULT`]).
@@ -147,6 +185,7 @@ impl RigidBody {
             collision_mask: filter_groups::ALL,
             collision_flags: CollisionFlags::default(),
             collision_events: false,
+            gravity: Vector3::ZERO,
             linear_damping: 0.0,
             angular_damping: 0.0,
             is_static: false,
@@ -183,6 +222,7 @@ impl RigidBody {
             collision_mask: filter_groups::ALL,
             collision_flags: CollisionFlags::default(),
             collision_events: false,
+            gravity: Vector3::ZERO,
             linear_damping: 0.0,
             angular_damping: 0.0,
             is_static: true,
@@ -530,6 +570,21 @@ impl RigidBody {
         self.angular_damping = angular.clamp(0.0, 1.0);
     }
 
+    /// Per-body gravity acceleration. It starts as the world gravity at
+    /// `add_body` time and follows `PhysicsWorld::set_gravity` propagation
+    /// while the body is awake, unless the
+    /// [`CollisionFlags::DISABLE_WORLD_GRAVITY`] flag detaches it (Bullet's
+    /// `btRigidBody::setGravity` + `BT_DISABLE_WORLD_GRAVITY`).
+    pub fn set_gravity(&mut self, gravity: Vector3) {
+        self.gravity = gravity;
+    }
+
+    /// The body's gravity acceleration (the world's value unless detached or
+    /// overridden).
+    pub fn gravity(&self) -> Vector3 {
+        self.gravity
+    }
+
     pub fn linear_damping(&self) -> Real {
         self.linear_damping
     }
@@ -560,12 +615,12 @@ impl RigidBody {
     /// Euler velocity update), damping the previous-step velocity first
     /// (Bullet's `applyDamping`). Sleeping and disabled bodies are not touched.
     #[inline]
-    pub fn integrate_velocities(&mut self, gravity: Vector3, dt: Real) {
+    pub fn integrate_velocities(&mut self, dt: Real) {
         if self.is_static || !self.is_active() {
             return;
         }
         self.apply_damping(dt);
-        self.linear_velocity += (gravity + self.force * self.inv_mass) * dt;
+        self.linear_velocity += (self.gravity + self.force * self.inv_mass) * dt;
         let iw = self.inv_inertia_world();
         self.angular_velocity += iw * (self.torque * dt);
     }
@@ -714,7 +769,7 @@ mod tests {
         body.angular_velocity = Vector3::new(0.0, 0.0, 20.0);
         let dt = 1.0 / 60.0;
         for _ in 0..60 {
-            body.integrate_velocities(Vector3::ZERO, dt);
+            body.integrate_velocities(dt);
         }
         assert_relative_eq!(body.linear_velocity.x, 5.0, epsilon = 1e-4);
         assert_relative_eq!(body.angular_velocity.z, 10.0, epsilon = 1e-4);

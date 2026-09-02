@@ -81,19 +81,19 @@ Scene: stack_1000 (f32), bodies: 1001, frames: 600, warmup: 30, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.313 | 788.1 | 98.5 |
-| rust | 1.256 | 753.7 | 60.0 |
-| rust/bullet | 0.96x | | |
+| bullet | 1.356 | 813.6 | 101.0 |
+| rust | 1.286 | 771.8 | 64.5 |
+| rust/bullet | 0.95x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
-- integrate_velocities: 2.9 ms (0.4%)
-- update_aabbs: 46.0 ms (6.4%)
-- broadphase: 47.1 ms (6.5%)
-- islands: 38.1 ms (5.3%)
-- narrowphase: 235.8 ms (32.8%)
-- solve: 343.8 ms (47.8%)
-- integrate_positions: 5.0 ms (0.7%)
+- integrate_velocities: 3.2 ms (0.4%)
+- update_aabbs: 51.7 ms (6.7%)
+- broadphase: 51.0 ms (6.6%)
+- islands: 41.6 ms (5.4%)
+- narrowphase: 264.8 ms (34.1%)
+- solve: 357.2 ms (46.1%)
+- integrate_positions: 6.0 ms (0.8%)
 
 **Analysis (2026-09-01, handwritten)**: the first soft-body perf scene — pure soft-body core work (PBD links + faces + aerodynamics), zero contacts. The soft-body stages live inside the Rust `integrate_positions` stage (the world's 7s section, where `solve_constraints` runs; 55.1 ms = 82%) plus the wind/predict slice of `integrate_velocities` (17.6%); broadphase/solve are near-zero because the cloths hang pinned in the air with no ground below. Bullet's stage breakdown is not instrumented, but the ratio (0.63x) lands between the rigid-solver scenes (0.6-0.8x) and the best pure-algorithm scenes — the classic `btSoftBody` position pipeline (links/faces iteration + `applyForces`) is cost-for-cost comparable to ours, with our edge mainly in the per-node bookkeeping. The workload is a genuine steady state: the wind keeps every node moving all run (max node speed stays ~2-3 m/s in both engines' dumps), so this measures sustained soft-body simulation, not a settle.
 
@@ -132,19 +132,19 @@ Scene: rain_500 (f32), bodies: 501, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 3.641 | 1092.4 | 1092.4 |
-| rust | 1.308 | 392.3 | 392.3 |
-| rust/bullet | 0.36x | | |
+| bullet | 3.914 | 1174.1 | 1174.1 |
+| rust | 1.330 | 399.0 | 399.0 |
+| rust/bullet | 0.34x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 1.6 ms (0.4%)
-- update_aabbs: 31.2 ms (8.0%)
-- broadphase: 1.8 ms (0.5%)
-- islands: 3.9 ms (1.0%)
-- narrowphase: 168.8 ms (43.5%)
-- solve: 178.2 ms (45.9%)
-- integrate_positions: 2.5 ms (0.6%)
+- integrate_velocities: 1.7 ms (0.4%)
+- update_aabbs: 32.4 ms (8.1%)
+- broadphase: 2.2 ms (0.5%)
+- islands: 4.2 ms (1.0%)
+- narrowphase: 179.1 ms (44.5%)
+- solve: 179.8 ms (44.7%)
+- integrate_positions: 2.6 ms (0.6%)
 
 **2026-08-28 SipHash removal round (Fx-hash pair-keyed maps).** The
 post-pair-set stack_1000 profile put the `manifold_cache` lookups at
@@ -306,19 +306,19 @@ Scene: mb_chains (f32), bodies: 200, frames: 300, warmup: 5, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 0.792 | 237.7 | 237.7 |
-| rust | 0.467 | 140.2 | 140.2 |
-| rust/bullet | 0.59x | | |
+| bullet | 0.838 | 251.5 | 251.5 |
+| rust | 0.469 | 140.7 | 140.7 |
+| rust/bullet | 0.56x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 28.9 ms (21.1%)
-- update_aabbs: 78.5 ms (57.4%)
+- integrate_velocities: 29.6 ms (21.1%)
+- update_aabbs: 80.8 ms (57.6%)
 - broadphase: 0.2 ms (0.1%)
 - islands: 0.3 ms (0.2%)
-- narrowphase: 1.2 ms (0.9%)
-- solve: 14.8 ms (10.8%)
-- integrate_positions: 12.8 ms (9.4%)
+- narrowphase: 1.3 ms (0.9%)
+- solve: 15.1 ms (10.7%)
+- integrate_positions: 13.1 ms (9.3%)
 
 **2026-08-28 scene scaled 20 -> 200 chains + two waste fixes.** The
 original 5x4/20-chain grid ran ~45us/frame — too small to separate engine
@@ -402,19 +402,19 @@ Scene: dbvt_rain_2000 (f32), bodies: 2001, frames: 300, warmup: 10, repeats medi
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 19.230 | 5769.1 | 5769.1 |
-| rust | 6.964 | 2089.3 | 2089.3 |
-| rust/bullet | 0.36x | | |
+| bullet | 19.022 | 5706.7 | 5706.7 |
+| rust | 7.469 | 2240.7 | 2240.7 |
+| rust/bullet | 0.39x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 7.8 ms (0.4%)
-- update_aabbs: 396.1 ms (18.8%)
-- broadphase: 8.6 ms (0.4%)
-- islands: 18.2 ms (0.9%)
-- narrowphase: 863.2 ms (40.9%)
-- solve: 800.9 ms (38.0%)
-- integrate_positions: 14.7 ms (0.7%)
+- integrate_velocities: 7.9 ms (0.4%)
+- update_aabbs: 407.8 ms (18.6%)
+- broadphase: 9.1 ms (0.4%)
+- islands: 19.0 ms (0.9%)
+- narrowphase: 914.1 ms (41.7%)
+- solve: 817.7 ms (37.3%)
+- integrate_positions: 14.8 ms (0.7%)
 
 **2026-08-28 Dbvt broad phase round.** `btDbvt`/`btDbvtBroadphase` ported
 as `broadphase::DbvtBroadPhase` (array-based trees: node slab + free list,
@@ -457,19 +457,19 @@ Scene: gimpact_rain_100 (f32), bodies: 101, frames: 300, warmup: 10, repeats med
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 2.585 | 775.4 | 775.4 |
-| rust | 0.413 | 123.8 | 123.8 |
+| bullet | 2.650 | 795.0 | 795.0 |
+| rust | 0.433 | 130.0 | 130.0 |
 | rust/bullet | 0.16x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
 - integrate_velocities: 0.2 ms (0.2%)
-- update_aabbs: 1.4 ms (1.1%)
+- update_aabbs: 1.2 ms (1.0%)
 - broadphase: 0.2 ms (0.2%)
 - islands: 0.3 ms (0.2%)
-- narrowphase: 99.5 ms (79.3%)
-- solve: 23.5 ms (18.7%)
-- integrate_positions: 0.4 ms (0.3%)
+- narrowphase: 97.1 ms (79.2%)
+- solve: 23.2 ms (18.9%)
+- integrate_positions: 0.3 ms (0.3%)
 
 **2026-08-31 GImpact coverage round.** First perf coverage of the dynamic
 concave-mesh path (the last feature without numbers): 100 closed 12-triangle
@@ -504,19 +504,19 @@ Scene: game_arena (f32), bodies: 93, frames: 600, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 0.337 | 202.5 | 30.0 |
-| rust | 0.133 | 79.6 | 15.5 |
-| rust/bullet | 0.39x | | |
+| bullet | 0.376 | 225.9 | 33.2 |
+| rust | 0.138 | 82.6 | 15.9 |
+| rust/bullet | 0.37x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
 - integrate_velocities: 0.3 ms (0.4%)
-- update_aabbs: 1.9 ms (2.4%)
-- broadphase: 1.3 ms (1.6%)
-- islands: 1.8 ms (2.2%)
-- narrowphase: 32.8 ms (41.0%)
-- solve: 41.3 ms (51.6%)
-- integrate_positions: 0.6 ms (0.8%)
+- update_aabbs: 1.8 ms (2.3%)
+- broadphase: 1.2 ms (1.5%)
+- islands: 1.8 ms (2.3%)
+- narrowphase: 32.3 ms (40.9%)
+- solve: 41.0 ms (51.9%)
+- integrate_positions: 0.5 ms (0.7%)
 
 **2026-08-31 Game-load scene.** First scene whose point is the *time
 structure* of the load, not body count (the rain/stack scenes already
@@ -578,19 +578,19 @@ Scene: cloth_wind (f32), bodies: 16, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 0.386 | 115.8 | 115.8 |
-| rust | 0.229 | 68.6 | 68.6 |
-| rust/bullet | 0.59x | | |
+| bullet | 0.371 | 111.2 | 111.2 |
+| rust | 0.227 | 68.1 | 68.1 |
+| rust/bullet | 0.61x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 14.6 ms (18.8%)
-- update_aabbs: 0.4 ms (0.5%)
+- integrate_velocities: 12.3 ms (17.9%)
+- update_aabbs: 0.3 ms (0.4%)
 - broadphase: 0.0 ms (0.0%)
-- islands: 0.0 ms (0.1%)
+- islands: 0.0 ms (0.0%)
 - narrowphase: 0.0 ms (0.0%)
-- solve: 0.1 ms (0.1%)
-- integrate_positions: 62.3 ms (80.4%)
+- solve: 0.0 ms (0.1%)
+- integrate_positions: 56.3 ms (81.5%)
 
 **Analysis (2026-09-01, handwritten)**: the first soft-body perf scene — pure soft-body core work (PBD links + faces + aerodynamics), zero contacts. The soft-body stages live inside the Rust `integrate_positions` stage (the world's 7s section, where `solve_constraints` runs; 55.1 ms = 82%) plus the wind/predict slice of `integrate_velocities` (17.6%); broadphase/solve are near-zero because the cloths hang pinned in the air with no ground below. Bullet's stage breakdown is not instrumented, but the ratio (0.63x) lands between the rigid-solver scenes (0.6-0.8x) and the best pure-algorithm scenes — the classic `btSoftBody` position pipeline (links/faces iteration + `applyForces`) is cost-for-cost comparable to ours, with our edge mainly in the per-node bookkeeping. The workload is a genuine steady state: the wind keeps every node moving all run (max node speed stays ~2-3 m/s in both engines' dumps), so this measures sustained soft-body simulation, not a settle.
 
@@ -602,19 +602,19 @@ Scene: softbody_rain (f32), bodies: 65, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.334 | 400.1 | 400.1 |
-| rust | 0.308 | 92.5 | 92.5 |
-| rust/bullet | 0.23x | | |
+| bullet | 1.488 | 446.3 | 446.3 |
+| rust | 0.315 | 94.6 | 94.6 |
+| rust/bullet | 0.21x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 6.0 ms (5.6%)
-- update_aabbs: 1.1 ms (1.0%)
-- broadphase: 0.4 ms (0.4%)
+- integrate_velocities: 5.0 ms (5.2%)
+- update_aabbs: 1.0 ms (1.0%)
+- broadphase: 0.3 ms (0.3%)
 - islands: 0.1 ms (0.1%)
-- narrowphase: 30.0 ms (27.9%)
-- solve: 0.1 ms (0.1%)
-- integrate_positions: 69.6 ms (64.8%)
+- narrowphase: 26.1 ms (27.4%)
+- solve: 0.0 ms (0.1%)
+- integrate_positions: 62.7 ms (65.9%)
 
 **Analysis (2026-09-01, handwritten)**: the soft-body contact scene — 64 cloths settled onto a plane, every one of ~2300 nodes living inside the SDF_RS contact band for the whole run (soft bodies never sleep). **0.23x, the largest lead of any scene**: Bullet's soft-vs-plane route stacks three approximations per node per iteration (plane triangulated into concave-sub triangles, each extruded into a hull, then the sparse-SDF voxel interpolation) and pays all three at full node count, while our node-vs-plane distance is one analytic evaluation (deviations §1 "Soft body: node-vs-rigid distance"). Rust split: 27% narrowphase (the SDF_RS band queries) + 67% the PBD solve in `integrate_positions` — the contact projection itself is where Bullet burns the extra 4x. Drop height note: the first draft dropped the cloths from y = 4 (~8.9 m/s) and **Bullet's own cloths tunneled straight through the plane** (min_y −120 by frame 300) — the rope_ball_tunnel catch-leak class, measured live; y = 0.5 (~2.2 m/s) settles both engines cleanly (bullet min_y 0.337 / rust 0.2527, the known settle-offset pair). Reproducibility notes: the C++ runner must use `btSoftBodyRigidBodyCollisionConfiguration` (the default config silently drops **every** soft pair — the nodes fall straight through with no contact at all); the broad phase is the same sweep as every other scene (works fine for soft pairs — an earlier Dbvt guess was a misdiagnosis of the same missing-config symptom).
 
@@ -626,18 +626,18 @@ Scene: softbody_mesh (f32), bodies: 65, frames: 300, warmup: 10, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 4.619 | 1385.8 | 1385.8 |
-| rust | 1.857 | 557.0 | 557.0 |
-| rust/bullet | 0.40x | | |
+| bullet | 6.032 | 1809.6 | 1809.6 |
+| rust | 1.890 | 566.9 | 566.9 |
+| rust/bullet | 0.31x | | |
 
 Rust stage breakdown (cumulative over 300 frames):
 
-- integrate_velocities: 8.4 ms (1.5%)
-- update_aabbs: 1.2 ms (0.2%)
-- broadphase: 0.4 ms (0.1%)
+- integrate_velocities: 9.0 ms (1.6%)
+- update_aabbs: 1.3 ms (0.2%)
+- broadphase: 0.5 ms (0.1%)
 - islands: 0.2 ms (0.0%)
-- narrowphase: 481.0 ms (86.6%)
+- narrowphase: 495.6 ms (86.2%)
 - solve: 0.1 ms (0.0%)
-- integrate_positions: 64.0 ms (11.5%)
+- integrate_positions: 68.2 ms (11.9%)
 
 **Analysis (2026-09-01, handwritten)**: the softbody_rain workload on the wavy 40×40 static mesh (~3200 triangles) instead of the analytic plane — deliberately built on Bullet's sparse-SDF home turf to decompose the softbody_rain lead. **0.39x (bullet 4.689 / rust 1.842 ms/frame), down from 0.23x on the plane**: the algorithm-substituted share of the plane lead shrinks exactly as predicted, but the cached SDF does not overtake the uncached exact queries. Both sides pay more on the mesh: Bullet 1.372 → 4.689 (+3.3 ms — the SDF's `BuildCell` runs a GJK signed-distance against the nearest extruded hull per voxel corner, and 3200 hulls at 0.25 m voxels make both the build and the cache-miss cost explode), while we go 0.310 → 1.842 (+1.5 ms — every node walks the local BVH and runs the exact point-triangle distance per query, no cache). Rust split flips hard: **narrowphase 476.9 ms = 86.4%** (vs 27.5% on the plane) — the node-vs-triangle query is now the dominant cost, and it is stateless per query even though settled nodes re-probe the same triangles frame after frame; a cross-frame/per-body distance cache (Bullet's SDF idea, applied to exact queries) or ndbvt-driven batch queries is the obvious soft-narrowphase optimization candidate if this workload class matters. Behavior: both engines settle in band over the troughs (bullet min_y ≈ 0.143 / rust ≈ 0.058 — the same ~85 mm SDF-lift pair as every SDF-vs-analytic scene), free-fall prefix frame-identical, soft_nodes 2304 on both sides.
