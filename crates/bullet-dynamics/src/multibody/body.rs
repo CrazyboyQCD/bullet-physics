@@ -132,6 +132,13 @@ pub struct LinkCollider {
     pub friction: Real,
     /// Restitution contribution.
     pub restitution: Real,
+    /// Collision filter group (Bullet's `m_collisionFilterGroup` on the
+    /// `btMultiBodyLinkCollider` proxy; default
+    /// [`filter_groups::DEFAULT`](crate::body::filter_groups::DEFAULT)).
+    pub collision_group: u16,
+    /// Collision filter mask (default
+    /// [`filter_groups::ALL`](crate::body::filter_groups::ALL)).
+    pub collision_mask: u16,
 }
 
 /// A Featherstone articulated rigid body.
@@ -1820,7 +1827,13 @@ impl MultiBody {
     /// `btMultiBodyLinkCollider`). The world registers it as a broad-phase
     /// proxy at the next step.
     pub fn set_base_collider(&mut self, shape: CollisionShape, friction: Real, restitution: Real) {
-        self.base_collider = Some(LinkCollider { shape, friction, restitution });
+        self.base_collider = Some(LinkCollider {
+            shape,
+            friction,
+            restitution,
+            collision_group: crate::body::filter_groups::DEFAULT,
+            collision_mask: crate::body::filter_groups::ALL,
+        });
     }
 
     /// Attach a collider to link `i` (Bullet's link `m_collider`).
@@ -1831,7 +1844,13 @@ impl MultiBody {
         friction: Real,
         restitution: Real,
     ) {
-        self.link_colliders[i] = Some(LinkCollider { shape, friction, restitution });
+        self.link_colliders[i] = Some(LinkCollider {
+            shape,
+            friction,
+            restitution,
+            collision_group: crate::body::filter_groups::DEFAULT,
+            collision_mask: crate::body::filter_groups::ALL,
+        });
     }
 
     pub fn base_collider(&self) -> Option<&LinkCollider> {

@@ -11,7 +11,7 @@ pub mod solver;
 pub mod vehicle;
 pub mod world;
 
-pub use body::RigidBody;
+pub use body::{CollisionFlags, RigidBody};
 pub use character::KinematicCharacterController;
 pub use constraint::{
     AngularLimit, ConeTwistConstraint, ConeTwistMotor, Constraint, ConstraintKind,
@@ -27,4 +27,4 @@ pub use softbody::{
     SContact, Side, SoftBody, SoftCollision, SoftJoint, Tetra, ROPE_FIX_END, ROPE_FIX_START,
 };
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
-pub use world::{PhysicsWorld, StepStage, StepTimings, STEP_STAGES};
+pub use world::{CollisionEvent, PhysicsWorld, StepStage, StepTimings, STEP_STAGES};

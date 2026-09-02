@@ -21,6 +21,47 @@ pub enum ActivationState {
     DisableSimulation,
 }
 
+/// Collision filter groups (Bullet's
+/// `btBroadphaseProxy::CollisionFilterGroups`). A pair collides when
+/// `(a.collision_group & b.collision_mask) != 0` **and**
+/// `(b.collision_group & a.collision_mask) != 0`.
+pub mod filter_groups {
+    /// The default group every body belongs to.
+    pub const DEFAULT: u16 = 1;
+    /// Conventional group for static geometry (Bullet demos).
+    pub const STATIC: u16 = 2;
+    /// Conventional group for kinematic bodies.
+    pub const KINEMATIC: u16 = 4;
+    /// Conventional group for trigger volumes.
+    pub const TRIGGER: u16 = 16;
+    /// Matches every group (Bullet's `AllFilter` = all bits set).
+    pub const ALL: u16 = u16::MAX;
+}
+
+/// Collision-object flags (Bullet's `btCollisionObject::CollisionFlags`),
+/// a small bit set stored by value like the engine's other flag newtypes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CollisionFlags(pub u32);
+
+impl CollisionFlags {
+    /// The body is detected and queried normally, but the solver applies no
+    /// response for its pairs: other bodies pass through, while contacts,
+    /// [`PhysicsWorld::contact_test`](crate::world::PhysicsWorld::contact_test)
+    /// queries and collision events (with `sensor = true`) still report
+    /// (Bullet's `CF_NO_CONTACT_RESPONSE`, the trigger-volume / sensor flag).
+    pub const NO_CONTACT_RESPONSE: Self = Self(0x0001);
+
+    /// Whether every bit of `other` is set.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether no flag is set.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
 /// A rigid body with mass, inertia, pose and velocity state.
 ///
 /// Equivalent to Bullet's `btRigidBody` (with an inline `btCollisionShape`).
@@ -36,6 +77,24 @@ pub struct RigidBody {
     inv_inertia_local: Vector3,
     pub friction: Real,
     pub restitution: Real,
+    /// Collision filter group: pairs collide when this intersects the other
+    /// body's [`collision_mask`](RigidBody::collision_mask) *and* vice versa
+    /// (Bullet's `m_collisionFilterGroup`, default [`filter_groups::DEFAULT`]).
+    pub collision_group: u16,
+    /// Collision filter mask: the groups this body collides with (Bullet's
+    /// `m_collisionFilterMask`, default [`filter_groups::ALL`]).
+    pub collision_mask: u16,
+    /// Collision-object flags (Bullet's `CollisionFlags`; see
+    /// [`CollisionFlags::NO_CONTACT_RESPONSE`] for trigger volumes).
+    pub collision_flags: CollisionFlags,
+    /// Whether pairs this body touches emit collision events (Rapier's
+    /// `ActiveEvents::COLLISION_EVENTS` opt-in): quiet scenes pay nothing.
+    pub collision_events: bool,
+    /// Velocity damping factors (Bullet's `m_linearDamping` / `m_angularDamping`,
+    /// defaults 0; set via [`RigidBody::set_damping`], applied every step by
+    /// [`RigidBody::integrate_velocities`]).
+    linear_damping: Real,
+    angular_damping: Real,
     is_static: bool,
     activation_state: ActivationState,
     deactivation_time: Real,
@@ -84,6 +143,12 @@ impl RigidBody {
             inv_inertia_local: inv_inertia,
             friction: 0.5,
             restitution: 0.0,
+            collision_group: filter_groups::DEFAULT,
+            collision_mask: filter_groups::ALL,
+            collision_flags: CollisionFlags::default(),
+            collision_events: false,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
             is_static: false,
             activation_state: ActivationState::Active,
             deactivation_time: 0.0,
@@ -114,6 +179,12 @@ impl RigidBody {
             inv_inertia_local: Vector3::ZERO,
             friction: 0.5,
             restitution: 0.0,
+            collision_group: filter_groups::DEFAULT,
+            collision_mask: filter_groups::ALL,
+            collision_flags: CollisionFlags::default(),
+            collision_events: false,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
             is_static: true,
             activation_state: ActivationState::IslandSleeping,
             deactivation_time: 0.0,
@@ -327,6 +398,32 @@ impl RigidBody {
         self
     }
 
+    /// Builder: set the collision filter group and mask (Bullet's
+    /// `setCollisionGroup` / `setCollisionMask`).
+    pub fn collision_filter(mut self, group: u16, mask: u16) -> Self {
+        self.collision_group = group;
+        self.collision_mask = mask;
+        self
+    }
+
+    /// Builder: set or clear
+    /// [`CollisionFlags::NO_CONTACT_RESPONSE`] (a trigger volume: detected
+    /// and reported, but it does not stop other bodies).
+    pub fn no_contact_response(mut self, on: bool) -> Self {
+        self.collision_flags.0 &= !CollisionFlags::NO_CONTACT_RESPONSE.0;
+        if on {
+            self.collision_flags.0 |= CollisionFlags::NO_CONTACT_RESPONSE.0;
+        }
+        self
+    }
+
+    /// Builder: opt this body's pairs in for collision events (Rapier's
+    /// `ActiveEvents::COLLISION_EVENTS`).
+    pub fn collision_events(mut self, on: bool) -> Self {
+        self.collision_events = on;
+        self
+    }
+
     /// Builder: set orientation.
     pub fn orientation(mut self, o: Quaternion) -> Self {
         self.orientation = o;
@@ -425,13 +522,49 @@ impl RigidBody {
         self.torque = Vector3::ZERO;
     }
 
+    /// Set the linear/angular velocity damping factors (Bullet's
+    /// `setDamping`). Both are clamped to `[0, 1]`, like Bullet; the
+    /// defaults are 0 (no damping).
+    pub fn set_damping(&mut self, linear: Real, angular: Real) {
+        self.linear_damping = linear.clamp(0.0, 1.0);
+        self.angular_damping = angular.clamp(0.0, 1.0);
+    }
+
+    pub fn linear_damping(&self) -> Real {
+        self.linear_damping
+    }
+
+    pub fn angular_damping(&self) -> Real {
+        self.angular_damping
+    }
+
+    /// Scale the previous-step velocity by the damping factors (Bullet's
+    /// `applyDamping`, run by `predictUnconstraintMotion` before the solver
+    /// integrates gravity and forces). Bullet applies it to every non-static
+    /// body; gating on activity here is equivalent because sleeping bodies
+    /// carry zero velocity. The opt-in "additional damping" block of the
+    /// same function is not ported (deviations §3).
+    #[inline]
+    fn apply_damping(&mut self, dt: Real) {
+        // Zero factors skip the `powf`; multiplying by
+        // `powf(1.0, dt) = 1.0` would be exact anyway.
+        if self.linear_damping != 0.0 {
+            self.linear_velocity *= (1.0 - self.linear_damping).powf(dt);
+        }
+        if self.angular_damping != 0.0 {
+            self.angular_velocity *= (1.0 - self.angular_damping).powf(dt);
+        }
+    }
+
     /// Integrate velocities from gravity and accumulated forces (semi-implicit
-    /// Euler velocity update). Sleeping and disabled bodies are not touched.
+    /// Euler velocity update), damping the previous-step velocity first
+    /// (Bullet's `applyDamping`). Sleeping and disabled bodies are not touched.
     #[inline]
     pub fn integrate_velocities(&mut self, gravity: Vector3, dt: Real) {
         if self.is_static || !self.is_active() {
             return;
         }
+        self.apply_damping(dt);
         self.linear_velocity += (gravity + self.force * self.inv_mass) * dt;
         let iw = self.inv_inertia_world();
         self.angular_velocity += iw * (self.torque * dt);
@@ -558,5 +691,32 @@ mod tests {
             static_body.compute_impulse_denominator(Vector3::new(0.0, 0.5, 0.0), Vector3::Y),
             0.0
         );
+    }
+
+    /// `set_damping` clamps both factors into `[0, 1]` (Bullet's
+    /// `setDamping`).
+    #[test]
+    fn set_damping_clamps_factors() {
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0);
+        body.set_damping(-0.5, 2.0);
+        assert_eq!(body.linear_damping(), 0.0);
+        assert_eq!(body.angular_damping(), 1.0);
+    }
+
+    /// Damping scales the velocity before the force integration: with factor
+    /// 0.5 and 60 steps of 1/60 s the speeds halve (Bullet's `applyDamping`:
+    /// `v *= (1 - d)^dt` per step).
+    #[test]
+    fn damping_scales_velocity_exponentially() {
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0);
+        body.set_damping(0.5, 0.5);
+        body.linear_velocity = Vector3::new(10.0, 0.0, 0.0);
+        body.angular_velocity = Vector3::new(0.0, 0.0, 20.0);
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            body.integrate_velocities(Vector3::ZERO, dt);
+        }
+        assert_relative_eq!(body.linear_velocity.x, 5.0, epsilon = 1e-4);
+        assert_relative_eq!(body.angular_velocity.z, 10.0, epsilon = 1e-4);
     }
 }

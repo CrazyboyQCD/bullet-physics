@@ -7,7 +7,7 @@ use bullet_collision::broadphase::{BroadPhase, BroadPhaseBackend};
 use bullet_collision::manifold::{ContactManifold, PersistentManifold, CONTACT_BREAKING_THRESHOLD};
 use bullet_collision::narrowphase::{self, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
-use crate::body::RigidBody;
+use crate::body::{CollisionFlags, RigidBody};
 use crate::constraint::{self, Constraint};
 use crate::island::UnionFind;
 use crate::multibody::body::{MultiBody, MultiBodyScratch};
@@ -210,6 +210,30 @@ enum ProxyOwner {
     Free,
 }
 
+/// A contact-pair lifecycle event, emitted after each step for every pair
+/// with at least one body opted in via [`RigidBody::collision_events`]
+/// (Rapier's `CollisionEvent` model; Bullet has no equivalent — its
+/// `gContactAddedCallback` is a process-global function pointer fired per
+/// contact point). `a < b` always.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionEvent {
+    /// The pair began touching this step. `sensor` is set when either side
+    /// has [`CollisionFlags::NO_CONTACT_RESPONSE`] — a trigger volume: no
+    /// contact response is ever solved for it, only events and queries.
+    Started { a: usize, b: usize, sensor: bool },
+    /// The pair stopped touching this step (separated past the breaking
+    /// threshold, left the broad phase, got filtered by group/mask, or a
+    /// body was removed).
+    Stopped { a: usize, b: usize, sensor: bool },
+}
+
+/// Bullet's broad-phase pair filter (`btBroadphaseProxy::NeedsCollision`):
+/// the pair collides when each object's group intersects the other's mask.
+#[inline]
+fn filters_collide(group_a: u16, mask_a: u16, group_b: u16, mask_b: u16) -> bool {
+    group_a & mask_b != 0 && group_b & mask_a != 0
+}
+
 /// A discrete rigid-body simulation world, mirroring `btDiscreteDynamicsWorld`
 /// extended with the Featherstone multibody list of `btMultiBodyDynamicsWorld`
 /// (phase A of the collision-integration design: one fused world, stepping
@@ -254,6 +278,14 @@ pub struct PhysicsWorld {
     /// (`disableCollisionsBetweenLinkedBodies`, Bullet's
     /// `checkCollideWithOverride`), sorted `(min, max)`.
     no_collision_pairs: HashSet<(usize, usize), FxBuild>,
+    /// Opt-in pairs that touched last step, sorted (`[min, max]` body
+    /// indices): the baseline of the Started/Stopped diff.
+    prev_touching: Vec<[u32; 2]>,
+    /// Opt-in pairs that touched this step, sorted after the pair pass.
+    touching: Vec<[u32; 2]>,
+    /// Collision events of the last step, cleared at the start of each
+    /// step (Rapier's post-step drain buffer).
+    contact_events: Vec<CollisionEvent>,
     /// Broad-phase proxy id for each rigid body (proxy ids are shared with
     /// the multibody link colliders, so they no longer coincide with body
     /// indices).
@@ -341,6 +373,9 @@ impl PhysicsWorld {
             prev_simulate: false,
             constraints: Vec::new(),
             no_collision_pairs: HashSet::with_hasher(FxBuild::default()),
+            prev_touching: Vec::new(),
+            touching: Vec::new(),
+            contact_events: Vec::new(),
             body_proxies: Vec::new(),
             collider_entries: Vec::new(),
             proxy_owners: Vec::new(),
@@ -494,6 +529,26 @@ impl PhysicsWorld {
                 }
             }
         }
+        // Collision events: removing a body ends its touches — a Stopped
+        // is emitted for pairs that were touching (Rapier reports removed
+        // colliders the same way); the buffer survives until the next step
+        // clears it, so callers see the removal right away.
+        let idx = index as u32;
+        let mut ended = Vec::new();
+        self.prev_touching.retain(|p| {
+            let hit = p[0] == idx || p[1] == idx;
+            if hit {
+                ended.push(*p);
+            }
+            !hit
+        });
+        self.touching.retain(|p| p[0] != idx && p[1] != idx);
+        for pair in ended {
+            let (a, b) = (pair[0] as usize, pair[1] as usize);
+            let sensor = self.pair_sensor(a, b);
+            self.contact_events
+                .push(CollisionEvent::Stopped { a, b, sensor });
+        }
         self.no_collision_pairs.clear();
         for c in &self.constraints {
             if c.disable_collisions() {
@@ -501,6 +556,33 @@ impl PhysicsWorld {
                 self.no_collision_pairs.insert((a.min(b), a.max(b)));
             }
         }
+    }
+
+    /// Collision events of the step that ran last. Every pair with at
+    /// least one body opted in via [`RigidBody::collision_events`] reports
+    /// `Started` on contact and `Stopped` on separation; sleeping pairs
+    /// keep their state and emit nothing while asleep. The buffer is
+    /// cleared at the start of the next [`PhysicsWorld::step_simulation`]
+    /// (or drained immediately with [`PhysicsWorld::take_contact_events`]).
+    pub fn contact_events(&self) -> &[CollisionEvent] {
+        &self.contact_events
+    }
+
+    /// Take the collision events of the last step, leaving the buffer
+    /// empty.
+    pub fn take_contact_events(&mut self) -> Vec<CollisionEvent> {
+        std::mem::take(&mut self.contact_events)
+    }
+
+    /// Whether either body of the pair is a trigger volume
+    /// (`CF_NO_CONTACT_RESPONSE`).
+    fn pair_sensor(&self, a: usize, b: usize) -> bool {
+        self.bodies[a]
+            .collision_flags
+            .contains(CollisionFlags::NO_CONTACT_RESPONSE)
+            || self.bodies[b]
+                .collision_flags
+                .contains(CollisionFlags::NO_CONTACT_RESPONSE)
     }
 
     /// Inner iterations for the multibody non-contact (joint) rows per outer
@@ -966,6 +1048,10 @@ impl PhysicsWorld {
     pub fn step_simulation(&mut self, dt: Real) {
         let inv_dt = 1.0 / dt;
         let mut clk = StepClock::new(self.step_timings.enabled);
+        // Collision events are per-step (Rapier's drain): the new step
+        // rebuilds the buffer and the touching set from scratch.
+        self.contact_events.clear();
+        self.touching.clear();
 
         // 1. Integrate velocities from gravity and accumulated forces.
         // Sample the end-of-last-step speeds first: they feed the refresh-
@@ -1109,15 +1195,41 @@ impl PhysicsWorld {
             // multibody phase.
             match (owner_a, owner_b) {
                 (ProxyOwner::Soft(s), ProxyOwner::Body(j)) => {
-                    self.soft_vs_rigid(s, j);
+                    let (gs, ms) = (
+                        self.soft_bodies[s].collision_group,
+                        self.soft_bodies[s].collision_mask,
+                    );
+                    let (gb, bm) =
+                        (self.bodies[j].collision_group, self.bodies[j].collision_mask);
+                    if filters_collide(gs, ms, gb, bm) {
+                        self.soft_vs_rigid(s, j);
+                    }
                     continue;
                 }
                 (ProxyOwner::Body(j), ProxyOwner::Soft(s)) => {
-                    self.soft_vs_rigid(s, j);
+                    let (gs, ms) = (
+                        self.soft_bodies[s].collision_group,
+                        self.soft_bodies[s].collision_mask,
+                    );
+                    let (gb, bm) =
+                        (self.bodies[j].collision_group, self.bodies[j].collision_mask);
+                    if filters_collide(gb, bm, gs, ms) {
+                        self.soft_vs_rigid(s, j);
+                    }
                     continue;
                 }
                 (ProxyOwner::Soft(a), ProxyOwner::Soft(b)) => {
-                    self.soft_vs_soft(a, b);
+                    let (ga, ma) = (
+                        self.soft_bodies[a].collision_group,
+                        self.soft_bodies[a].collision_mask,
+                    );
+                    let (gb, mb) = (
+                        self.soft_bodies[b].collision_group,
+                        self.soft_bodies[b].collision_mask,
+                    );
+                    if filters_collide(ga, ma, gb, mb) {
+                        self.soft_vs_soft(a, b);
+                    }
                     continue;
                 }
                 // Phase F: soft-vs-multibody link collider through the
@@ -1125,7 +1237,22 @@ impl PhysicsWorld {
                 // `CO_FEATHERSTONE_LINK` colObj).
                 (ProxyOwner::Soft(s), ProxyOwner::Collider(e))
                 | (ProxyOwner::Collider(e), ProxyOwner::Soft(s)) => {
-                    self.soft_vs_mb(s, e);
+                    let (gs, ms) = (
+                        self.soft_bodies[s].collision_group,
+                        self.soft_bodies[s].collision_mask,
+                    );
+                    let ent = self.collider_entries[e];
+                    let mb = &self.multibodies[ent.mb];
+                    let col = if ent.link < 0 {
+                        mb.base_collider()
+                    } else {
+                        mb.link_collider(ent.link as usize)
+                    };
+                    if let Some(col) = col
+                        && filters_collide(gs, ms, col.collision_group, col.collision_mask)
+                    {
+                        self.soft_vs_mb(s, e);
+                    }
                     continue;
                 }
                 _ => {}
@@ -1135,6 +1262,33 @@ impl PhysicsWorld {
                 // run the narrow phase at the current FK pose and collect the
                 // manifold for the contact rows (converted at solve time).
                 // Self-collision filtering mirrors `checkCollideWithOverride`.
+                // The group/mask filter is the same `NeedsCollision` test as
+                // for the rigid pairs, on the colliders' filter values.
+                let side_filter = |owner: ProxyOwner| -> Option<(u16, u16)> {
+                    match owner {
+                        ProxyOwner::Body(i) => Some((
+                            self.bodies[i].collision_group,
+                            self.bodies[i].collision_mask,
+                        )),
+                        ProxyOwner::Collider(e) => {
+                            let ent = self.collider_entries[e];
+                            let mb = &self.multibodies[ent.mb];
+                            let col = if ent.link < 0 {
+                                mb.base_collider()?
+                            } else {
+                                mb.link_collider(ent.link as usize)?
+                            };
+                            Some((col.collision_group, col.collision_mask))
+                        }
+                        ProxyOwner::Soft(_) | ProxyOwner::Free => None,
+                    }
+                };
+                if let (Some((ga, ma)), Some((gb, gm))) =
+                    (side_filter(owner_a), side_filter(owner_b))
+                    && !filters_collide(ga, ma, gb, gm)
+                {
+                    continue;
+                }
                 let resolve = |owner: ProxyOwner| -> Option<(ContactSide, &bullet_collision::shapes::CollisionShape, Vector3, Quaternion, Real, Real)> {
                     match owner {
                         ProxyOwner::Body(i) => {
@@ -1208,7 +1362,10 @@ impl PhysicsWorld {
                 });
                 continue;
             };
-            if self.no_collision_pairs.contains(&(i.min(j), i.max(j))) {
+            if self.no_collision_pairs.contains(&(i.min(j), i.max(j)))
+                || self.bodies[i].collision_group & self.bodies[j].collision_mask == 0
+                || self.bodies[j].collision_group & self.bodies[i].collision_mask == 0
+            {
                 continue;
             }
             // The pair stays in the cache lifecycle even when skipped below:
@@ -1224,9 +1381,28 @@ impl PhysicsWorld {
             // belongs to a sleeping island: skip detection and rows
             // entirely (Bullet solves no manifolds of a sleeping island).
             if !self.bodies[i].is_active() && !self.bodies[j].is_active() {
+                // The sleeping pair's touch state is frozen: carry the
+                // previous step's entry over so no event churns while the
+                // island sleeps.
+                if (self.bodies[i].collision_events || self.bodies[j].collision_events)
+                    && self
+                        .prev_touching
+                        .binary_search(&[i.min(j) as u32, i.max(j) as u32])
+                        .is_ok()
+                {
+                    self.touching.push([i.min(j) as u32, i.max(j) as u32]);
+                }
                 continue;
             }
             let (a, b) = (&self.bodies[i], &self.bodies[j]);
+            // A trigger volume (Bullet's `CF_NO_CONTACT_RESPONSE`) is
+            // detected and reported but never solved: no contact rows are
+            // built for its pairs, so nothing is blocked or woken by it.
+            let no_response = a
+                .collision_flags
+                .contains(CollisionFlags::NO_CONTACT_RESPONSE)
+                || b.collision_flags
+                    .contains(CollisionFlags::NO_CONTACT_RESPONSE);
             let (pa, pb) = (self.predicted_poses[i], self.predicted_poses[j]);
             // Fast-moving pairs re-detect *when the cache would serve a
             // positional bias*: a refreshed point deeper than the slop feeds
@@ -1257,10 +1433,17 @@ impl PhysicsWorld {
                 );
                 let deep = self.refresh_out.iter().any(|cp| cp.penetration > SLOP);
                 if !fast || !deep {
-                    for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
-                        cp.normal_impulse *= WARM_STARTING_FACTOR;
-                        self.contact_rows
-                            .push(ContactConstraint::prepare(i, j, &cp, a, b, k as u32));
+                    if !no_response {
+                        for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
+                            cp.normal_impulse *= WARM_STARTING_FACTOR;
+                            self.contact_rows
+                                .push(ContactConstraint::prepare(i, j, &cp, a, b, k as u32));
+                        }
+                    }
+                    if !self.refresh_out.is_empty()
+                        && (a.collision_events || b.collision_events)
+                    {
+                        self.touching.push([i.min(j) as u32, i.max(j) as u32]);
                     }
                     served_from_cache = true;
                 }
@@ -1300,10 +1483,15 @@ impl PhysicsWorld {
                     .min(b.shape.contact_breaking_threshold());
                 cache.capture(&manifold, pa, a.orientation, pb, b.orientation, threshold);
                 cache.refresh(pa, a.orientation, pb, b.orientation, &mut self.refresh_out);
-                for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
-                    cp.normal_impulse *= WARM_STARTING_FACTOR;
-                    self.contact_rows
-                        .push(ContactConstraint::prepare(i, j, &cp, a, b, k as u32));
+                if !no_response {
+                    for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
+                        cp.normal_impulse *= WARM_STARTING_FACTOR;
+                        self.contact_rows
+                            .push(ContactConstraint::prepare(i, j, &cp, a, b, k as u32));
+                    }
+                }
+                if a.collision_events || b.collision_events {
+                    self.touching.push([i.min(j) as u32, i.max(j) as u32]);
                 }
             } else {
                 // Detection found nothing: the pair separated past the
@@ -1311,6 +1499,52 @@ impl PhysicsWorld {
                 self.manifold_cache.remove(&(i, j));
             }
         }
+
+        // 5e. Collision events: diff this step's touching pairs against the
+        // previous step's (Rapier's post-step event drain). Only pairs with
+        // an opted-in body are tracked, so scenes without listeners keep
+        // both sets empty; a pair skipped because its island sleeps carries
+        // its state over instead of churning.
+        self.touching.sort_unstable();
+        let prev = std::mem::take(&mut self.prev_touching);
+        let cur = std::mem::take(&mut self.touching);
+        let (mut pi, mut ci) = (0usize, 0usize);
+        while pi < prev.len() || ci < cur.len() {
+            // Both sets are sorted: walk the smaller key forward each round
+            // (an Equal key is the surviving pair, emitted by neither side).
+            let order = match (prev.get(pi), cur.get(ci)) {
+                (Some(p), Some(c)) => p.cmp(c),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => break,
+            };
+            let (pair, started) = match order {
+                std::cmp::Ordering::Less => {
+                    let pair = prev[pi];
+                    pi += 1;
+                    (pair, false)
+                }
+                std::cmp::Ordering::Greater => {
+                    let pair = cur[ci];
+                    ci += 1;
+                    (pair, true)
+                }
+                std::cmp::Ordering::Equal => {
+                    pi += 1;
+                    ci += 1;
+                    continue;
+                }
+            };
+            let (a, b) = (pair[0] as usize, pair[1] as usize);
+            let sensor = self.pair_sensor(a, b);
+            let event = if started {
+                CollisionEvent::Started { a, b, sensor }
+            } else {
+                CollisionEvent::Stopped { a, b, sensor }
+            };
+            self.contact_events.push(event);
+        }
+        self.prev_touching = cur;
 
         // 5a. Joint rows: flatten every enabled joint of an awake island
         // into its solver rows from the current (pre-integration) poses,
@@ -1426,6 +1660,13 @@ impl PhysicsWorld {
                     // sweep as well (Bullet's dispatcher `needsCollision` →
                     // `checkCollideWithOverride` gates the CCD sweep too).
                     if self.no_collision_pairs.contains(&(i.min(j), i.max(j))) {
+                        continue;
+                    }
+                    // The group/mask filter gates the CCD sweep too, like
+                    // the suppression set above (dispatcher `needsCollision`).
+                    if self.bodies[i].collision_group & other.collision_mask == 0
+                        || other.collision_group & self.bodies[i].collision_mask == 0
+                    {
                         continue;
                     }
                     if let Some(hit) = narrowphase::swept_sphere_cast(
@@ -2174,6 +2415,7 @@ fn side_active_owner(side: ContactSide, bodies: &[RigidBody], multibodies: &[Mul
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+    use crate::body::filter_groups;
     use crate::body::ActivationState;
 
     #[test]
@@ -2194,6 +2436,341 @@ mod tests {
         assert_eq!(index, 1);
         assert_relative_eq!(hit.fraction, 0.1, epsilon = 1e-4);
         assert_relative_eq!(hit.normal.x, -1.0, epsilon = 1e-4);
+    }
+
+    /// Damping is applied automatically by the step, before the force
+    /// integration (Bullet's `predictUnconstraintMotion`): with factor 0.5
+    /// and one second of 1/60 s steps the speed halves.
+    #[test]
+    fn damping_applied_during_step() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let b = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 10.0, 0.0),
+            1.0,
+        ));
+        world.body_mut(b).linear_velocity = Vector3::new(10.0, 0.0, 0.0);
+        world.body_mut(b).set_damping(0.5, 0.0);
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert_relative_eq!(world.body(b).linear_velocity.x, 5.0, epsilon = 1e-4);
+    }
+
+    // ------------------------------------------------------------------
+    // Collision groups/masks, trigger volumes, collision events.
+    // ------------------------------------------------------------------
+
+    /// A plate whose mask matches nothing is invisible to the ball: the
+    /// ball falls straight through (Bullet's `btBroadphaseProxy`
+    /// group/mask pair test).
+    #[test]
+    fn collision_mask_blocks_pair() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::DEFAULT, 0),
+        );
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 3.0, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+        }
+        // Through the plate (its top is y = 0.5) and far below it.
+        assert!(
+            world.body(ball).position.y < -1.0,
+            "ball did not fall through: y = {}",
+            world.body(ball).position.y
+        );
+    }
+
+    /// The pair test is symmetric: a plate in the STATIC group is ignored
+    /// by a ball whose mask only accepts DEFAULT, and collides again once
+    /// the mask widens to ALL.
+    #[test]
+    fn collision_group_mask_asymmetric() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::STATIC, filter_groups::ALL),
+        );
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 1.01, 0.0),
+                1.0,
+            )
+            .collision_filter(filter_groups::DEFAULT, filter_groups::DEFAULT),
+        );
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(ball).position.y < 0.0,
+            "ball should ignore the STATIC plate: y = {}",
+            world.body(ball).position.y
+        );
+        // Widen the mask, put the ball back above the plate: the pair
+        // collides and the ball settles on top.
+        world.body_mut(ball).collision_mask = filter_groups::ALL;
+        world.set_body_transform(ball, Vector3::new(0.0, 1.01, 0.0), Quaternion::IDENTITY);
+        for _ in 0..180 {
+            world.step_simulation(dt);
+        }
+        assert_relative_eq!(world.body(ball).position.y, 1.0, epsilon = 0.05);
+    }
+
+    /// A trigger volume (`NO_CONTACT_RESPONSE`) never blocks: the ball
+    /// falls straight through, and its touch still reports as a sensor
+    /// event.
+    #[test]
+    fn trigger_volume_passes_through_but_reports() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .no_contact_response(true)
+            .collision_events(true),
+        );
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 3.0, 0.0),
+                1.0,
+            )
+            .collision_events(true),
+        );
+        let dt = 1.0 / 60.0;
+        let mut started = None;
+        for _ in 0..120 {
+            world.step_simulation(dt);
+            for &ev in world.contact_events() {
+                if let CollisionEvent::Started { a, b, sensor } = ev {
+                    started = Some((a, b, sensor));
+                }
+            }
+        }
+        assert_eq!(started, Some((0, 1, true)));
+        assert!(
+            world.body(ball).position.y < -1.0,
+            "trigger did not let the ball through: y = {}",
+            world.body(ball).position.y
+        );
+    }
+
+    /// Pairs emit events only when at least one body opts in.
+    #[test]
+    fn collision_events_require_opt_in() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 1.01, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            world.step_simulation(dt);
+        }
+        assert!(world.contact_events().is_empty());
+    }
+
+    /// A resting pair that falls asleep keeps its touch state: exactly one
+    /// Started, and no churn while the island sleeps.
+    #[test]
+    fn sleeping_pair_emits_no_events() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .collision_events(true),
+        );
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 1.01, 0.0),
+                1.0,
+            )
+            .collision_events(true),
+        );
+        let dt = 1.0 / 60.0;
+        // Events are a per-step drain, so tally them as they appear.
+        let (mut started, mut stopped) = (0, 0);
+        for _ in 0..300 {
+            world.step_simulation(dt);
+            for ev in world.contact_events() {
+                match ev {
+                    CollisionEvent::Started { .. } => started += 1,
+                    CollisionEvent::Stopped { .. } => stopped += 1,
+                }
+            }
+        }
+        assert_eq!((started, stopped), (1, 0), "exactly one Started, no churn");
+        for _ in 0..120 {
+            world.step_simulation(dt);
+        }
+        assert_eq!(
+            (started, stopped),
+            (1, 0),
+            "the sleeping island emitted nothing further"
+        );
+    }
+
+    /// Removing a body emits Stopped for its touching pairs.
+    #[test]
+    fn remove_body_emits_stopped() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .collision_events(true),
+        );
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 1.01, 0.0),
+                1.0,
+            )
+            .collision_events(true),
+        );
+        let dt = 1.0 / 60.0;
+        let mut saw_started = false;
+        for _ in 0..3 {
+            world.step_simulation(dt);
+            saw_started |= world
+                .contact_events()
+                .iter()
+                .any(|e| matches!(e, CollisionEvent::Started { .. }));
+        }
+        assert!(saw_started, "the contact never produced a Started");
+        world.remove_body(ball);
+        let Some(CollisionEvent::Stopped { a, b, sensor }) =
+            world.contact_events().iter().copied().last()
+        else {
+            panic!("removal did not emit Stopped");
+        };
+        assert_eq!((a, b), (0, ball));
+        assert!(!sensor);
+    }
+
+    /// The CCD sweep respects the group/mask filter.
+    #[test]
+    fn ccd_respects_collision_filter() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 2.0, 0.25)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::DEFAULT, 0),
+        );
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 0.0, -5.0),
+                1.0,
+            )
+            .ccd(0.1, 0.3),
+        );
+        world.body_mut(ball).linear_velocity = Vector3::new(0.0, 0.0, 10.0);
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(ball).position.z > 4.0,
+            "filtered wall stopped the CCD ball: z = {}",
+            world.body(ball).position.z
+        );
+    }
+
+    /// A soft body filtered by the rigid side's mask falls through.
+    #[test]
+    fn soft_body_respects_collision_mask() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(3.0, 0.5, 3.0)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::DEFAULT, 0),
+        );
+        let rope = crate::softbody::helpers::create_rope(
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+            8,
+            0,
+        );
+        world.add_soft_body(rope);
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+        }
+        let min_y = world
+            .soft_body(0)
+            .nodes
+            .iter()
+            .map(|n| n.x.y)
+            .fold(Real::INFINITY, Real::min);
+        assert!(
+            min_y < -0.5,
+            "rope did not fall through the filtered plate: min_y = {min_y}"
+        );
+    }
+
+    /// A multibody base collider filtered by the plane's mask falls
+    /// through.
+    #[test]
+    fn mb_base_collider_respects_mask() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::DEFAULT, 0),
+        );
+        let mut mb = crate::multibody::MultiBody::new(0, 1.0, Vector3::ONE, false, false);
+        mb.set_linear_damping(0.0);
+        mb.finalize_multidof();
+        mb.set_base_collider(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            0.5,
+            0.0,
+        );
+        mb.base_pos = Vector3::new(0.0, 3.0, 0.0);
+        world.add_multibody(mb);
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.multibody(0).base_pos.y < -1.0,
+            "filtered plane stopped the mb base: y = {}",
+            world.multibody(0).base_pos.y
+        );
     }
 
     #[test]
@@ -2592,7 +3169,7 @@ mod tests {
             .ccd(0.1, 0.3),
         );
         let mut joint = Constraint::point2point(0, 1, Vector3::new(0.0, 0.5, 0.0), Vector3::new(0.0, -0.5, 0.0));
-        joint.kind_mut().point2point_mut().set_impulse_clamp(0.001);
+        joint.point2point_mut().set_impulse_clamp(0.001);
         world.add_constraint(joint);
         // The suppressed pair is not swept: the ball crosses the wall (the
         // unsuppressed control is `ccd_clamps_fast_bodies_at_the_impact`).

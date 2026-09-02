@@ -384,6 +384,13 @@ pub struct SoftBody {
     /// motion from initial to current pose through them (Bullet's quirk:
     /// nodes appended later have no rest sample).
     pub rest_positions: Vec<Vector3>,
+    /// Collision filter group (Bullet's `m_collisionFilterGroup` on the
+    /// soft body's proxy; default
+    /// [`filter_groups::DEFAULT`](crate::body::filter_groups::DEFAULT)).
+    pub collision_group: u16,
+    /// Collision filter mask (default
+    /// [`filter_groups::ALL`](crate::body::filter_groups::ALL)).
+    pub collision_mask: u16,
 }
 
 impl Default for SoftBody {
@@ -426,6 +433,8 @@ impl SoftBody {
             update_rt_cst: true,
             rest_length_scale: 1.0,
             rest_positions: positions.to_vec(),
+            collision_group: crate::body::filter_groups::DEFAULT,
+            collision_mask: crate::body::filter_groups::ALL,
         };
         for (i, (&x, &m)) in positions.iter().zip(masses).enumerate() {
             body.nodes.push(Node::new(x, m));
