@@ -32,6 +32,7 @@
 
 // Usage: bullet_perf.exe <scene_name> [repeats]
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -135,7 +136,12 @@ struct SceneRun {
         broadphase(spec.bp_kind ? static_cast<btBroadphaseInterface*>(new btDbvtBroadphase())
                                 : static_cast<btBroadphaseInterface*>(new btAxisSweep3(
                                       btVector3(spec.bp_min[0], spec.bp_min[1], spec.bp_min[2]),
-                                      btVector3(spec.bp_max[0], spec.bp_max[1], spec.bp_max[2])))),
+                                      btVector3(spec.bp_max[0], spec.bp_max[1], spec.bp_max[2]),
+                                      // The default handle cap is 16384; the big sweep
+                                      // tiers (32k bodies) need room for 2x that, and
+                                      // unsigned short caps the parameter at 65535.
+                                      static_cast<unsigned short>(std::min<long>(
+                                          65535, std::max<long>(16384, spec.num_bodies * 2L)))))),
         solver(),
         arena(spec.script == 1) {
     const bool soft_scene = spec.softs.count > 0;

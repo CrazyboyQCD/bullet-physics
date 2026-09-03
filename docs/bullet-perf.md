@@ -73,7 +73,7 @@ lattice into a sustained rain.
 ## FPS sweeps (ball count vs frame budget)
 
 `python tools/perf.py --sweep sphere_rain|sphere_pool` aggregates the
-`sphere_rain_*` / `sphere_pool_*` tiers (250-4000 balls) into the
+`sphere_rain_*` / `sphere_pool_*` tiers (250-8000 balls) into the
 "how many balls before 60 fps breaks" table: steady-state ms/frame
 (last300 window) per engine against two budgets — 16.67 ms (pure-physics
 60 fps ceiling) and 8.33 ms (physics at half the frame, the common game
@@ -702,9 +702,17 @@ Rust never leaves budget anywhere in the scanned range: at N = 4000 it
 runs 4.20 ms/f — 2.6x headroom to the 8.3 ms game budget — while bullet
 already exceeds the 8.3 ms half-frame budget at N = 2000 (4.3 ms pass,
 but 8.4+ ms at the next doubling in the first-draft run) and lands at
-11.1 ms at N = 4000, inside the 16.7 ms pure-physics ceiling. Both sides
-well within budget at 16.7 ms up to N = 4000; the rust 8.3 ms ceiling lies
-beyond the scan range (extrapolating the ~1.05 us/ball slope, ~8000).
+11.1 ms at N = 4000, inside the 16.7 ms pure-physics ceiling.
+
+**Upper bound (2026-09-03, extended tier)**: an N = 8000 tier measured
+once puts the crossover — rust 10.5 ms/f (still inside the 16.7 ms
+ceiling, past the 8.3 ms game budget) vs bullet 26.3 ms/f (past both).
+So the rust 60 fps limits sit between the scanned tiers: ~4000-8000
+balls for the 8.3 ms game budget, above 8000 for the pure-physics
+ceiling; bullet caps at ~2000-4000 (8.3 ms) and ~4000-8000 (16.7 ms).
+Scaling turns superlinear past ~8000 balls (taller piles, more and
+deeper contacts per ball), which is where both curves leave the budget
+band; the table above keeps the regularly-tracked 250-4000 range.
 
 ## Sweep: sphere_pool
 
@@ -735,3 +743,10 @@ denser pile. Conclusions match the rain sweep: both engines hold the
 16.7 ms pure-physics ceiling through N = 4000, rust holds even the
 8.3 ms half-frame budget across the whole scan (3.32 ms/f at N = 4000,
 0.27x), bullet crosses 8.3 ms between N = 2000 and N = 4000.
+
+**Upper bound (2026-09-03, extended tier)**: an N = 8000 tier measured
+once — rust 9.5 ms/f (inside the 16.7 ms ceiling, past the 8.3 ms game
+budget) vs bullet 31.7 ms/f (past both) — places the rust limits at
+~4000-8000 balls (8.3 ms) and above 8000 (16.7 ms), bullet at
+~2000-4000 (8.3 ms) and ~4000-8000 (16.7 ms), same shape as the rain
+sweep. The regularly-tracked table above keeps 250-4000.

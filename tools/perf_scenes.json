@@ -556,6 +556,40 @@
       "generators": [
         {"type": "sphere_rain", "nx": 20, "nz": 20, "layers": 10, "spacing": [0.5, 0.8, 0.5], "base": [-4.75, 5.0, -4.75], "radius": 0.2, "mass": 1, "friction": 0.2, "restitution": 0.6, "stagger": 45}
       ]
+    },
+    "sphere_rain_8000": {
+      "comment": "FPS sweep tier 8000 (extended range): 8000 spheres (20x20x20, stagger 22), same protocol as sphere_rain_250.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-16, -2, -16], [16, 30, 16]],
+      "bodies": [
+        {"name": "ground", "shape": {"type": "box", "half_extents": [10, 0.5, 10]}, "position": [0, -0.5, 0], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 20, "nz": 20, "layers": 20, "spacing": [0.5, 0.8, 0.5], "base": [-4.75, 5.0, -4.75], "radius": 0.2, "mass": 1, "friction": 0.5, "restitution": 0.3, "stagger": 22}
+      ]
+    },
+    "sphere_pool_8000": {
+      "comment": "FPS sweep tier 8000 (extended range): 8000 spheres (20x20x20, stagger 22) into the tall-walled basin, same protocol as sphere_pool_250.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-10, -2, -10], [10, 24, 10]],
+      "bodies": [
+        {"name": "floor", "shape": {"type": "box", "half_extents": [6, 0.5, 6]}, "position": [0, -0.5, 0], "mass": 0},
+        {"name": "wall_px", "shape": {"type": "box", "half_extents": [0.5, 6, 6.5]}, "position": [6.5, 4.5, 0], "mass": 0},
+        {"name": "wall_nx", "shape": {"type": "box", "half_extents": [0.5, 6, 6.5]}, "position": [-6.5, 4.5, 0], "mass": 0},
+        {"name": "wall_pz", "shape": {"type": "box", "half_extents": [6.5, 6, 0.5]}, "position": [0, 4.5, 6.5], "mass": 0},
+        {"name": "wall_nz", "shape": {"type": "box", "half_extents": [6.5, 6, 0.5]}, "position": [0, 4.5, -6.5], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 20, "nz": 20, "layers": 20, "spacing": [0.5, 0.8, 0.5], "base": [-4.75, 5.0, -4.75], "radius": 0.2, "mass": 1, "friction": 0.2, "restitution": 0.6, "stagger": 22}
+      ]
     }
   }
 }
