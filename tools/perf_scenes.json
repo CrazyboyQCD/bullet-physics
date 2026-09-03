@@ -386,6 +386,176 @@
           "capsule_half_height": 0.5
         }
       ]
+    },
+    "sphere_rain_250": {
+      "comment": "FPS sweep tier 250: 250 spheres (10x5x5 lattice, r=0.2, e=0.3) raining onto a flat 20x20 box ground; the last300 window is the rolling-pile steady state. Part of the sphere_rain sweep (docs/bullet-perf.md).",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-16, -2, -16], [16, 30, 16]],
+      "bodies": [
+        {"name": "ground", "shape": {"type": "box", "half_extents": [10, 0.5, 10]}, "position": [0, -0.5, 0], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 10, "nz": 5, "layers": 5, "spacing": [0.5, 0.8, 0.5], "base": [-2.25, 5.0, -1.0], "radius": 0.2, "mass": 1, "friction": 0.5, "restitution": 0.3, "stagger": 90}
+      ]
+    },
+    "sphere_rain_500": {
+      "comment": "FPS sweep tier 500: 500 spheres (10x10x5), same protocol as sphere_rain_250.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-16, -2, -16], [16, 30, 16]],
+      "bodies": [
+        {"name": "ground", "shape": {"type": "box", "half_extents": [10, 0.5, 10]}, "position": [0, -0.5, 0], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 10, "nz": 10, "layers": 5, "spacing": [0.5, 0.8, 0.5], "base": [-2.25, 5.0, -2.25], "radius": 0.2, "mass": 1, "friction": 0.5, "restitution": 0.3, "stagger": 90}
+      ]
+    },
+    "sphere_rain_1000": {
+      "comment": "FPS sweep tier 1000: 1000 spheres (10x10x10), same protocol as sphere_rain_250.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-16, -2, -16], [16, 30, 16]],
+      "bodies": [
+        {"name": "ground", "shape": {"type": "box", "half_extents": [10, 0.5, 10]}, "position": [0, -0.5, 0], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 10, "nz": 10, "layers": 10, "spacing": [0.5, 0.8, 0.5], "base": [-2.25, 5.0, -2.25], "radius": 0.2, "mass": 1, "friction": 0.5, "restitution": 0.3, "stagger": 45}
+      ]
+    },
+    "sphere_rain_2000": {
+      "comment": "FPS sweep tier 2000: 2000 spheres (20x10x10), same protocol as sphere_rain_250.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-16, -2, -16], [16, 30, 16]],
+      "bodies": [
+        {"name": "ground", "shape": {"type": "box", "half_extents": [10, 0.5, 10]}, "position": [0, -0.5, 0], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 20, "nz": 10, "layers": 10, "spacing": [0.5, 0.8, 0.5], "base": [-4.75, 5.0, -2.25], "radius": 0.2, "mass": 1, "friction": 0.5, "restitution": 0.3, "stagger": 45}
+      ]
+    },
+    "sphere_rain_4000": {
+      "comment": "FPS sweep tier 4000: 4000 spheres (20x20x10), same protocol as sphere_rain_250.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-16, -2, -16], [16, 30, 16]],
+      "bodies": [
+        {"name": "ground", "shape": {"type": "box", "half_extents": [10, 0.5, 10]}, "position": [0, -0.5, 0], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 20, "nz": 20, "layers": 10, "spacing": [0.5, 0.8, 0.5], "base": [-4.75, 5.0, -4.75], "radius": 0.2, "mass": 1, "friction": 0.5, "restitution": 0.3, "stagger": 45}
+      ]
+    },
+    "sphere_pool_250": {
+      "comment": "FPS sweep tier 250, enclosed variant: 250 spheres (r=0.2, low friction 0.2, bouncy e=0.6) dropped into a walled 12x12 basin (4 static walls, height 2) so the pile keeps churning instead of spreading out; the last300 window is the slow-decay churn steady state. Part of the sphere_pool sweep.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-10, -2, -10], [10, 20, 10]],
+      "bodies": [
+        {"name": "floor", "shape": {"type": "box", "half_extents": [6, 0.5, 6]}, "position": [0, -0.5, 0], "mass": 0},
+        {"name": "wall_px", "shape": {"type": "box", "half_extents": [0.5, 2, 6.5]}, "position": [6.5, 1.5, 0], "mass": 0},
+        {"name": "wall_nx", "shape": {"type": "box", "half_extents": [0.5, 2, 6.5]}, "position": [-6.5, 1.5, 0], "mass": 0},
+        {"name": "wall_pz", "shape": {"type": "box", "half_extents": [6.5, 2, 0.5]}, "position": [0, 1.5, 6.5], "mass": 0},
+        {"name": "wall_nz", "shape": {"type": "box", "half_extents": [6.5, 2, 0.5]}, "position": [0, 1.5, -6.5], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 10, "nz": 5, "layers": 5, "spacing": [0.5, 0.8, 0.5], "base": [-2.25, 5.0, -1.0], "radius": 0.2, "mass": 1, "friction": 0.2, "restitution": 0.6, "stagger": 90}
+      ]
+    },
+    "sphere_pool_500": {
+      "comment": "FPS sweep tier 500: 500 spheres (10x10x5) into the basin, same protocol as sphere_pool_250.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-10, -2, -10], [10, 20, 10]],
+      "bodies": [
+        {"name": "floor", "shape": {"type": "box", "half_extents": [6, 0.5, 6]}, "position": [0, -0.5, 0], "mass": 0},
+        {"name": "wall_px", "shape": {"type": "box", "half_extents": [0.5, 2, 6.5]}, "position": [6.5, 1.5, 0], "mass": 0},
+        {"name": "wall_nx", "shape": {"type": "box", "half_extents": [0.5, 2, 6.5]}, "position": [-6.5, 1.5, 0], "mass": 0},
+        {"name": "wall_pz", "shape": {"type": "box", "half_extents": [6.5, 2, 0.5]}, "position": [0, 1.5, 6.5], "mass": 0},
+        {"name": "wall_nz", "shape": {"type": "box", "half_extents": [6.5, 2, 0.5]}, "position": [0, 1.5, -6.5], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 10, "nz": 10, "layers": 5, "spacing": [0.5, 0.8, 0.5], "base": [-2.25, 5.0, -2.25], "radius": 0.2, "mass": 1, "friction": 0.2, "restitution": 0.6, "stagger": 90}
+      ]
+    },
+    "sphere_pool_1000": {
+      "comment": "FPS sweep tier 1000: 1000 spheres (10x10x10) into the basin, same protocol as sphere_pool_250.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-10, -2, -10], [10, 20, 10]],
+      "bodies": [
+        {"name": "floor", "shape": {"type": "box", "half_extents": [6, 0.5, 6]}, "position": [0, -0.5, 0], "mass": 0},
+        {"name": "wall_px", "shape": {"type": "box", "half_extents": [0.5, 2, 6.5]}, "position": [6.5, 1.5, 0], "mass": 0},
+        {"name": "wall_nx", "shape": {"type": "box", "half_extents": [0.5, 2, 6.5]}, "position": [-6.5, 1.5, 0], "mass": 0},
+        {"name": "wall_pz", "shape": {"type": "box", "half_extents": [6.5, 2, 0.5]}, "position": [0, 1.5, 6.5], "mass": 0},
+        {"name": "wall_nz", "shape": {"type": "box", "half_extents": [6.5, 2, 0.5]}, "position": [0, 1.5, -6.5], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 10, "nz": 10, "layers": 10, "spacing": [0.5, 0.8, 0.5], "base": [-2.25, 5.0, -2.25], "radius": 0.2, "mass": 1, "friction": 0.2, "restitution": 0.6, "stagger": 45}
+      ]
+    },
+    "sphere_pool_2000": {
+      "comment": "FPS sweep tier 2000: 2000 spheres (20x10x10) into the basin, same protocol as sphere_pool_250.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-10, -2, -10], [10, 20, 10]],
+      "bodies": [
+        {"name": "floor", "shape": {"type": "box", "half_extents": [6, 0.5, 6]}, "position": [0, -0.5, 0], "mass": 0},
+        {"name": "wall_px", "shape": {"type": "box", "half_extents": [0.5, 2, 6.5]}, "position": [6.5, 1.5, 0], "mass": 0},
+        {"name": "wall_nx", "shape": {"type": "box", "half_extents": [0.5, 2, 6.5]}, "position": [-6.5, 1.5, 0], "mass": 0},
+        {"name": "wall_pz", "shape": {"type": "box", "half_extents": [6.5, 2, 0.5]}, "position": [0, 1.5, 6.5], "mass": 0},
+        {"name": "wall_nz", "shape": {"type": "box", "half_extents": [6.5, 2, 0.5]}, "position": [0, 1.5, -6.5], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 20, "nz": 10, "layers": 10, "spacing": [0.5, 0.8, 0.5], "base": [-4.75, 5.0, -2.25], "radius": 0.2, "mass": 1, "friction": 0.2, "restitution": 0.6, "stagger": 45}
+      ]
+    },
+    "sphere_pool_4000": {
+      "comment": "FPS sweep tier 4000: 4000 spheres (20x20x10) into the basin, same protocol as sphere_pool_250.",
+      "dt": [1, 60],
+      "frames": 450,
+      "warmup": 10,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-10, -2, -10], [10, 20, 10]],
+      "bodies": [
+        {"name": "floor", "shape": {"type": "box", "half_extents": [6, 0.5, 6]}, "position": [0, -0.5, 0], "mass": 0},
+        {"name": "wall_px", "shape": {"type": "box", "half_extents": [0.5, 2, 6.5]}, "position": [6.5, 1.5, 0], "mass": 0},
+        {"name": "wall_nx", "shape": {"type": "box", "half_extents": [0.5, 2, 6.5]}, "position": [-6.5, 1.5, 0], "mass": 0},
+        {"name": "wall_pz", "shape": {"type": "box", "half_extents": [6.5, 2, 0.5]}, "position": [0, 1.5, 6.5], "mass": 0},
+        {"name": "wall_nz", "shape": {"type": "box", "half_extents": [6.5, 2, 0.5]}, "position": [0, 1.5, -6.5], "mass": 0}
+      ],
+      "generators": [
+        {"type": "sphere_rain", "nx": 20, "nz": 20, "layers": 10, "spacing": [0.5, 0.8, 0.5], "base": [-4.75, 5.0, -4.75], "radius": 0.2, "mass": 1, "friction": 0.2, "restitution": 0.6, "stagger": 45}
+      ]
     }
   }
 }

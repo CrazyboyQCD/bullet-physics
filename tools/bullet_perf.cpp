@@ -123,6 +123,11 @@ struct SceneRun {
   std::vector<btSoftBody*> softs;       // borrowed (owned by the world)
   long frame = 0;                       // total stepped frames (warmup included)
   const bool arena;                     // per-frame arena tick (launcher + dozer)
+  // Staggered-rain scenes: (spawn_frame, bodies index) pairs built but not
+  // registered; the step loop drops each layer when its frame comes due
+  // (table order keeps pending sorted). spawned[i] gates the dump stats.
+  std::vector<std::pair<int, size_t>> pending;
+  std::vector<char> spawned;
 
   SceneRun(const PerfSceneSpec& spec)
       : config(),
@@ -171,7 +176,13 @@ struct SceneRun {
       btRigidBody* body = bodies.back().get();
       body->setFriction(b.friction);
       body->setRestitution(b.restitution);
-      world->addRigidBody(body);
+      if (b.spawn_frame > 0 && !is_static) {
+        pending.push_back({b.spawn_frame, bodies.size() - 1});
+        spawned.push_back(0);
+      } else {
+        world->addRigidBody(body);
+        spawned.push_back(1);
+      }
     }
 
     if (spec.chains.count > 0) add_chains(spec.chains);
@@ -296,6 +307,17 @@ struct SceneRun {
              std::cos(btScalar(2) * SIMD_PI * frame / btScalar(240)));
       dozer->setLinearVelocity(v);
     }
+    // Staggered rain: register every layer whose spawn frame has come due
+    // (table order keeps pending sorted, so a prefix erase suffices).
+    {
+      size_t k = 0;
+      while (k < pending.size() && pending[k].first <= frame) ++k;
+      for (size_t j = 0; j < k; ++j) {
+        world->addRigidBody(bodies[pending[j].second].get());
+        spawned[pending[j].second] = 1;
+      }
+      if (k > 0) pending.erase(pending.begin(), pending.begin() + static_cast<long>(k));
+    }
     world->stepSimulation(dt, 1, dt);
     ++frame;
   }
@@ -321,6 +343,7 @@ void run_dump(const PerfSceneSpec& spec, btScalar dt) {
       for (int i = 0; i < int(run.bodies.size()); ++i) {
         const btRigidBody* b = run.bodies[i].get();
         if (b->getInvMass() == btScalar(0)) continue;
+        if (!run.spawned.empty() && !run.spawned[i]) continue;  // not dropped yet
         ++count;
         sum_y += double(b->getWorldTransform().getOrigin().getY());
         const double v = double(b->getLinearVelocity().length());

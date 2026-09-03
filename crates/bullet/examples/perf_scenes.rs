@@ -38,7 +38,7 @@ mod perf_scenes_table;
 
 use perf_scenes_table::{PerfChainSpec, PerfSceneSpec, PerfShapeSpec, PerfSoftSpec, PERF_SCENES};
 
-fn build_world(spec: &PerfSceneSpec) -> PhysicsWorld {
+fn build_world(spec: &PerfSceneSpec) -> (PhysicsWorld, Vec<(u64, RigidBody)>) {
     // The backend mirrors the C++ runner's per-scene broad phase choice
     // (btDbvtBroadphase vs btAxisSweep3).
     let mut world = PhysicsWorld::with_broadphase(if spec.broadphase_dbvt {
@@ -53,6 +53,10 @@ fn build_world(spec: &PerfSceneSpec) -> PhysicsWorld {
     ));
     world.set_iterations(spec.iterations);
 
+    // Staggered-rain scenes: bodies with spawn_frame > 0 are built here but
+    // registered by the step loop when their frame comes due (the table is
+    // in layer order, so pending stays sorted by frame).
+    let mut pending: Vec<(u64, RigidBody)> = Vec::new();
     for b in spec.bodies {
         let shape = match b.shape {
             PerfShapeSpec::Box(h) => CollisionShape::box_shape(Vector3::new(
@@ -87,7 +91,11 @@ fn build_world(spec: &PerfSceneSpec) -> PhysicsWorld {
                 .friction(b.friction as Real)
                 .restitution(b.restitution as Real)
         };
-        world.add_body(body);
+        if b.spawn_frame > 0 && b.mass != 0.0 {
+            pending.push((u64::from(b.spawn_frame), body));
+        } else {
+            world.add_body(body);
+        }
     }
 
     if let Some(c) = &spec.chains {
@@ -96,7 +104,7 @@ fn build_world(spec: &PerfSceneSpec) -> PhysicsWorld {
     if let Some(s) = &spec.softs {
         add_softs(&mut world, s);
     }
-    world
+    (world, pending)
 }
 
 /// A grid of fixed-base revolute pendulums, matching the C++ runner's chain
@@ -202,20 +210,33 @@ fn arena_tick(world: &mut PhysicsWorld, frame: u64) {
     world.body_mut(DOZER).linear_velocity.x = vx;
 }
 
-/// One scripted step: the arena tick (when the scene asks for it) plus the
-/// solver step, shared by every run mode so the workload is identical.
-fn step_once(world: &mut PhysicsWorld, spec: &PerfSceneSpec, frame: u64, dt: Real) {
+/// One scripted step: the arena tick (when the scene asks for it), the
+/// staggered-rain drops due this frame, plus the solver step, shared by
+/// every run mode so the workload is identical.
+fn step_once(
+    world: &mut PhysicsWorld,
+    spec: &PerfSceneSpec,
+    frame: u64,
+    dt: Real,
+    pending: &mut Vec<(u64, RigidBody)>,
+) {
     if spec.arena_script {
         arena_tick(world, frame);
+    }
+    // Staggered rain: register every layer whose spawn frame has come due
+    // (table order keeps `pending` sorted, so a prefix drain suffices).
+    let due = pending.partition_point(|(f, _)| *f <= frame);
+    for (_, body) in pending.drain(..due) {
+        world.add_body(body);
     }
     world.step_simulation(dt);
 }
 
 fn run_scene(spec: &PerfSceneSpec, dt: Real) -> (std::time::Duration, std::time::Duration) {
-    let mut world = build_world(spec);
+    let (mut world, mut pending) = build_world(spec);
     let mut frame: u64 = 0;
     for _ in 0..spec.warmup {
-        step_once(&mut world, spec, frame, dt);
+        step_once(&mut world, spec, frame, dt, &mut pending);
         frame += 1;
     }
     let start = Instant::now();
@@ -224,7 +245,7 @@ fn run_scene(spec: &PerfSceneSpec, dt: Real) -> (std::time::Duration, std::time:
         if f + 300 == spec.frames {
             last300_start = Some(Instant::now());
         }
-        step_once(&mut world, spec, frame, dt);
+        step_once(&mut world, spec, frame, dt, &mut pending);
         frame += 1;
     }
     let total = start.elapsed();
@@ -233,15 +254,15 @@ fn run_scene(spec: &PerfSceneSpec, dt: Real) -> (std::time::Duration, std::time:
 }
 
 fn run_stages(spec: &PerfSceneSpec, dt: Real) {
-    let mut world = build_world(spec);
+    let (mut world, mut pending) = build_world(spec);
     let mut frame: u64 = 0;
     for _ in 0..spec.warmup {
-        step_once(&mut world, spec, frame, dt);
+        step_once(&mut world, spec, frame, dt, &mut pending);
         frame += 1;
     }
     world.enable_step_timing();
     for _ in 0..spec.frames {
-        step_once(&mut world, spec, frame, dt);
+        step_once(&mut world, spec, frame, dt, &mut pending);
         frame += 1;
     }
     let t = world.step_timings();
@@ -270,10 +291,10 @@ fn to_f64(v: impl Into<f64>) -> f64 {
 /// stack health every 5 frames (sum of dynamic-body y, sum/max speed,
 /// awake count).
 fn run_dump(spec: &PerfSceneSpec, dt: Real) {
-    let mut world = build_world(spec);
+    let (mut world, mut pending) = build_world(spec);
     let frames = spec.warmup + spec.frames;
     for f in 0..frames {
-        step_once(&mut world, spec, f as u64, dt);
+        step_once(&mut world, spec, f as u64, dt, &mut pending);
         if f % 5 == 0 || f == frames - 1 {
             let mut sum_y = 0.0f64;
             let mut sum_v = 0.0f64;
