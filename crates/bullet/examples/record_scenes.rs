@@ -18,7 +18,7 @@ use std::fs::File;
 use std::io::Write;
 
 use bullet::dynamics::body::RayFilter;
-use bullet::dynamics::{CollisionFlags, PhysicsWorld, RigidBody};
+use bullet::dynamics::{BodyHandle, CollisionFlags, PhysicsWorld, RigidBody};
 use bullet::math::{Real, Vector3};
 use bullet::shapes::CollisionShape;
 
@@ -63,18 +63,21 @@ fn main() {
             eprintln!("record_scenes: pair_filter body not found");
             std::process::exit(2);
         };
-        let (lo, hi) = (ia.min(ib), ia.max(ib));
+        let (lo, hi) = (
+            BodyHandle::from_index(ia.min(ib)),
+            BodyHandle::from_index(ia.max(ib)),
+        );
         world.set_pair_filter(Some(Box::new(
-            move |a: usize, _: &RigidBody, b: usize, _: &RigidBody| {
+            move |a: BodyHandle, _: &RigidBody, b: BodyHandle, _: &RigidBody| {
                 !(a.min(b) == lo && a.max(b) == hi)
             },
         )));
     }
 
-    // Build bodies; remember the index of each body whose trajectory is
+    // Build bodies; remember the handle of each body whose trajectory is
     // recorded (scene bodies are added in spec order, matching the C++ side).
-    let mut record_idx: Vec<usize> = Vec::new();
-    for (i, b) in spec.bodies.iter().enumerate() {
+    let mut record_idx: Vec<BodyHandle> = Vec::new();
+    for b in spec.bodies.iter() {
         let shape = match b.shape {
             ShapeSpec::Box(h) => CollisionShape::box_shape(Vector3::new(
                 h[0] as Real, h[1] as Real, h[2] as Real,
@@ -134,9 +137,9 @@ fn main() {
             ));
         }
         body = body.collision_filter(b.group, b.mask);
-        world.add_body(body);
+        let handle = world.add_body(body);
         if spec.record.contains(&b.name) {
-            record_idx.push(i);
+            record_idx.push(handle);
         }
     }
 
@@ -179,17 +182,17 @@ fn main() {
             let to = Vector3::new(r.to[0] as Real, r.to[1] as Real, r.to[2] as Real);
             let filter = RayFilter { group: r.group, mask: r.mask };
             if r.all_hits {
-                let mut hits: Vec<(usize, Real)> = world
+                let mut hits: Vec<(BodyHandle, Real)> = world
                     .raycast_all_filtered(from, to, filter)
                     .into_iter()
                     .map(|(idx, hit)| (idx, hit.fraction))
                     .collect();
                 hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
                 for (idx, fraction) in hits {
-                    writeln!(rf, "{i} {idx} {fraction:.6}").expect("write csv");
+                    writeln!(rf, "{i} {} {fraction:.6}", idx.index()).expect("write csv");
                 }
             } else if let Some((idx, hit)) = world.raycast_closest_filtered(from, to, filter) {
-                writeln!(rf, "{i} {idx} {:.6}", hit.fraction).expect("write csv");
+                writeln!(rf, "{i} {} {:.6}", idx.index(), hit.fraction).expect("write csv");
             }
         }
     }

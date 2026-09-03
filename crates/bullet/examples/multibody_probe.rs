@@ -11,7 +11,7 @@
 //! fixed_rb, slider_rb}.
 
 use bullet::dynamics::multibody::constraint::MultiBodyConstraint;
-use bullet::dynamics::{MultiBody, PhysicsWorld, RigidBody};
+use bullet::dynamics::{BodyHandle, MultiBody, MultiBodyHandle, PhysicsWorld, RigidBody};
 use bullet::math::{Matrix3, Quaternion, Real, Vector3};
 use bullet::shapes::CollisionShape;
 
@@ -62,7 +62,7 @@ fn scene_free_base(dt: Real, frames: usize) {
     world.add_multibody(body);
     for f in 0..frames {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         let p = body.base_pos();
         let v = body.base_vel();
         println!(
@@ -91,7 +91,7 @@ fn scene_pendulum(dt: Real, frames: usize) {
     world.add_multibody(body);
     for f in 0..frames {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         println!("{f} {:.6} {:.6}", body.joint_pos_multidof(0)[0], body.joint_vel_multidof(0)[0]);
     }
 }
@@ -124,7 +124,7 @@ fn scene_two_link(dt: Real, frames: usize) {
     world.add_multibody(body);
     for f in 0..frames {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         println!(
             "{f} {:.6} {:.6} {:.6} {:.6}",
             body.joint_pos_multidof(0)[0],
@@ -237,7 +237,7 @@ fn scene_prismatic(dt: Real, frames: usize) {
     world.add_multibody(body);
     for f in 0..frames {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         println!("{f} {:.6} {:.6}", body.joint_pos_multidof(0)[0], body.joint_vel_multidof(0)[0]);
     }
 }
@@ -263,7 +263,7 @@ fn scene_spherical(dt: Real, frames: usize) {
     world.add_multibody(body);
     for f in 0..frames {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         let jp = body.joint_pos_multidof(0);
         let jv = body.joint_vel_multidof(0);
         println!(
@@ -291,7 +291,7 @@ fn scene_planar(dt: Real, frames: usize) {
     world.add_multibody(body);
     for f in 0..frames {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         let jp = body.joint_pos_multidof(0);
         let jv = body.joint_vel_multidof(0);
         println!(
@@ -484,7 +484,7 @@ fn scene_link_ground(dt: Real, frames: usize) {
     world.add_multibody(mb);
     for f in 0..frames {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         let p = body.link_world_position(0);
         println!(
             "{f} {:.6} {:.6} {:.6} {:.6} {:.6}",
@@ -512,7 +512,7 @@ fn scene_base_ground(dt: Real, frames: usize) {
     world.add_multibody(mb);
     for f in 0..frames {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         let p = body.base_pos();
         let v = body.base_vel();
         println!("{f} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}", p.x, p.y, p.z, v.x, v.y, v.z);
@@ -577,7 +577,7 @@ fn scene_rb_hits_mb(dt: Real, frames: usize) {
     );
     for f in 0..frames {
         world.step_simulation(dt);
-        let mbp = world.multibody(0).base_pos();
+        let mbp = world.multibody(MultiBodyHandle::from_index(0)).base_pos();
         let p = world.body(ball).position;
         let v = world.body(ball).linear_velocity;
         println!(
@@ -691,7 +691,7 @@ fn scene_self_collision(dt: Real, frames: usize) {
         let label = if phase == 0 { "on" } else { "off" };
         for f in 0..frames {
             world.step_simulation(dt);
-            let body = world.multibody(0);
+            let body = world.multibody(MultiBodyHandle::from_index(0));
             println!(
                 "{label} {f} {:.6} {:.6} {:.6}",
                 body.joint_pos_multidof(0)[0],
@@ -725,7 +725,7 @@ fn scene_joint_feedback(dt: Real, frames: usize) {
     world.add_multibody(mb);
     for f in 0..frames {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         let fb = body.link_joint_feedback(0).expect("feedback enabled");
         println!(
             "{f} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
@@ -772,7 +772,7 @@ fn scene_joint_feedback_contact(dt: Real, frames: usize) {
     world.add_multibody(mb);
     for f in 0..frames {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         let fb = body.link_joint_feedback(0).expect("feedback enabled");
         println!(
             "{f} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
@@ -791,7 +791,7 @@ fn scene_joint_feedback_contact(dt: Real, frames: usize) {
 /// A fixed-base zero-link multibody acting as an immovable anchor at the
 /// origin (with a 0.1 m base collider, like the C++ probe), plus a dynamic
 /// rigid sphere at `pos` (mass 1, radius 0.1, analytic sphere inertia).
-fn anchor_and_ball(world: &mut PhysicsWorld, pos: Vector3) -> (usize, usize) {
+fn anchor_and_ball(world: &mut PhysicsWorld, pos: Vector3) -> (MultiBodyHandle, BodyHandle) {
     let mut anchor = MultiBody::new(0, 1.0, Vector3::ONE, true, false);
     anchor.set_linear_damping(0.0);
     anchor.set_angular_damping(0.0);

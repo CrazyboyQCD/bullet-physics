@@ -53,18 +53,34 @@ S/M/L · **See** = existing notes.
     overlap-filter callback below).
     Size: S. See: `api-usability.md` §2 (P4).
 
-- **P5 — typed handles** (breaking; before 1.0): `add_body` /
-  `add_multibody` / `add_soft_body` return `usize`.
-  - Impl: newtypes (`BodyHandle`, `MultiBodyHandle`, `SoftBodyHandle`)
-    over `NonZeroU32`; world keeps `usize` slots internally, the public
-    API swaps signatures; user-visible lookups (`body`,
-    `body_mut`, constraint endpoints, events) change type.
-  - Files: `world.rs` (whole public surface), a new `handles.rs`,
-    facade prelude, all examples/demos.
-  - Risk: tombstone slot reuse makes plain indices ambiguous across
-    remove cycles — either document indices-as-handles (status quo) or
-    add generation counters (more churn); every existing usize-keyed
-    snippet breaks.
+- **P5 — typed handles** ✅ (2026-09-03, breaking): `add_body` /
+  `add_multibody` / `add_soft_body` used to return `usize`.
+  - Shipped: newtypes `BodyHandle` / `MultiBodyHandle` / `SoftBodyHandle`
+    over `NonZeroU32` (`handles.rs`, `Option<H>` same size as `H`,
+    `const fn from_index`/`index()` for literal migration and interop —
+    no generation counters, so stale handles behave exactly like the old
+    stale indices: inert data for removed rigid bodies, renumbered
+    lookups for soft bodies). The world keeps `usize` slots internally
+    and converts at the API boundary; constraint endpoints
+    (`Constraint::body_a`/`body_b`, the mb-vs-rigid `rigid_body_b`, the
+    `mb-p2p/fixed/slider` constructors), `Side::Rigid`/`Cluster.soft`,
+    soft anchors, the vehicle chassis, the character body,
+    `CollisionEvent` fields, `PairFilter` args, ray/sweep/contact-test
+    returns and `RaycastInfo::ground_body` are all typed. Constraint /
+    multibody-constraint *list* slots stay `usize` (no other usize index
+    space is user-visible anymore, so the confusion class is closed).
+    The `*_to_rigid` mb constructors pass `body_a` as the placeholder
+    side-B handle (Bullet's `m_multiBodyB == 0` null branch; every
+    side-B read is gated by `rigid_body_b`).
+  - Files: `bullet-dynamics` `handles.rs` (new), `world.rs`,
+    `constraint.rs`, `multibody/constraint.rs`, `softbody/{body,collide,
+    joints,solver}.rs`, `vehicle.rs`, `character.rs`, facade prelude,
+    all examples/demos.
+  - Risk: verified output-neutral — parity `falling_box` /
+    `composite_consumer` (f64) reproduce the ledger-classified numbers
+    exactly (balloon bit-identical, rays body mismatches = 0, impact
+    transients under the predicted-pose class); 327 tests x f32/f64,
+    14 demos, clippy x2 clean.
   - Size: M (mechanical but wide). See: `api-usability.md` §2 (P5).
 
 ## P6 — feature surface, by expected usage frequency

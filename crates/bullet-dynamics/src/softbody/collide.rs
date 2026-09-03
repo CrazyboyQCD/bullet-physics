@@ -19,6 +19,7 @@ use bullet_collision::shapes::TriangleMesh;
 use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
 
 use crate::body::RigidBody;
+use crate::handles::{BodyHandle, SoftBodyHandle};
 
 use super::body::{Cluster, Side, SoftBody};
 use super::config::SoftCollision;
@@ -78,8 +79,8 @@ pub struct RContact {
 pub struct Anchor {
     /// Pinned node index.
     pub node: usize,
-    /// Rigid body index.
-    pub body: usize,
+    /// Rigid body the node is pinned to.
+    pub body: BodyHandle,
     /// Anchor position in body space.
     pub local: Vector3,
     /// Influence weight [0,1].
@@ -811,12 +812,15 @@ impl SoftBody {
             let velocity_b = body.velocity_at_local_point(res.witness_b - body.position);
             if let Some(mut joint) = solve_cluster_contact(
                 res,
-                Side::Cluster { soft: self_idx, cluster: ci },
+                Side::Cluster {
+                    soft: SoftBodyHandle::from_index(self_idx),
+                    cluster: ci,
+                },
                 cluster.com,
                 velocity_a,
                 cluster.imass,
                 cluster.invwi,
-                Side::Rigid(body_idx),
+                Side::Rigid(BodyHandle::from_index(body_idx)),
                 body.position,
                 velocity_b,
                 body.inv_mass(),
@@ -873,8 +877,14 @@ impl SoftBody {
                 cluster_a,
                 &hull_b,
                 cluster_b,
-                Side::Cluster { soft: a_idx, cluster: ca },
-                Side::Cluster { soft: b_idx, cluster: cb },
+                Side::Cluster {
+                    soft: SoftBodyHandle::from_index(a_idx),
+                    cluster: ca,
+                },
+                Side::Cluster {
+                    soft: SoftBodyHandle::from_index(b_idx),
+                    cluster: cb,
+                },
                 margin,
                 friction,
                 self.cfg.k_sshr_cl.max(other.cfg.k_sshr_cl),
@@ -915,8 +925,14 @@ impl SoftBody {
                 &self.clusters[lo],
                 &hull_hi,
                 &self.clusters[hi],
-                Side::Cluster { soft: self_idx, cluster: lo },
-                Side::Cluster { soft: self_idx, cluster: hi },
+                Side::Cluster {
+                    soft: SoftBodyHandle::from_index(self_idx),
+                    cluster: lo,
+                },
+                Side::Cluster {
+                    soft: SoftBodyHandle::from_index(self_idx),
+                    cluster: hi,
+                },
                 margin,
                 friction,
                 self.cfg.k_sshr_cl,

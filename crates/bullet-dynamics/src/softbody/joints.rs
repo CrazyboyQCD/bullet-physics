@@ -83,18 +83,18 @@ pub(crate) mod side {
     pub fn velocity(side: Side, rpos: Vector3, softs: &[SoftBody], bodies: &[RigidBody]) -> Vector3 {
         match side {
             Side::Cluster { soft, cluster } => {
-                let c = &softs[soft].clusters[cluster];
+                let c = &softs[soft.index()].clusters[cluster];
                 c.lv + c.av.cross(rpos)
             }
-            Side::Rigid(i) => bodies[i].velocity_at_local_point(rpos),
+            Side::Rigid(i) => bodies[i.index()].velocity_at_local_point(rpos),
         }
     }
 
     /// The side's angular velocity (Bullet's `Body::angularVelocity()`).
     pub fn angular_velocity(side: Side, softs: &[SoftBody], bodies: &[RigidBody]) -> Vector3 {
         match side {
-            Side::Cluster { soft, cluster } => softs[soft].clusters[cluster].av,
-            Side::Rigid(i) => bodies[i].angular_velocity,
+            Side::Cluster { soft, cluster } => softs[soft.index()].clusters[cluster].av,
+            Side::Rigid(i) => bodies[i.index()].angular_velocity,
         }
     }
 
@@ -103,26 +103,29 @@ pub(crate) mod side {
     pub fn xform(side: Side, softs: &[SoftBody], bodies: &[RigidBody]) -> (Vector3, Matrix3) {
         match side {
             Side::Cluster { soft, cluster } => {
-                let c = &softs[soft].clusters[cluster];
+                let c = &softs[soft.index()].clusters[cluster];
                 (c.framepos, c.framerot)
             }
-            Side::Rigid(i) => (bodies[i].position, Matrix3::from_quat(bodies[i].orientation)),
+            Side::Rigid(i) => (
+                bodies[i.index()].position,
+                Matrix3::from_quat(bodies[i.index()].orientation),
+            ),
         }
     }
 
     /// The side's inverse mass (Bullet's `Body::invMass`).
     pub fn inv_mass(side: Side, softs: &[SoftBody], bodies: &[RigidBody]) -> Real {
         match side {
-            Side::Cluster { soft, cluster } => softs[soft].clusters[cluster].imass,
-            Side::Rigid(i) => bodies[i].inv_mass(),
+            Side::Cluster { soft, cluster } => softs[soft.index()].clusters[cluster].imass,
+            Side::Rigid(i) => bodies[i.index()].inv_mass(),
         }
     }
 
     /// The side's inverse world inertia (Bullet's `Body::invWorldInertia`).
     pub fn inv_world_inertia(side: Side, softs: &[SoftBody], bodies: &[RigidBody]) -> Matrix3 {
         match side {
-            Side::Cluster { soft, cluster } => softs[soft].clusters[cluster].invwi,
-            Side::Rigid(i) => bodies[i].inv_inertia_world(),
+            Side::Cluster { soft, cluster } => softs[soft.index()].clusters[cluster].invwi,
+            Side::Rigid(i) => bodies[i.index()].inv_inertia_world(),
         }
     }
 
@@ -130,7 +133,7 @@ pub(crate) mod side {
     /// soft bodies never sleep so only the rigid side acts).
     pub fn activate(side: Side, bodies: &mut [RigidBody]) {
         if let Side::Rigid(i) = side {
-            bodies[i].activate();
+            bodies[i.index()].activate();
         }
     }
 }
@@ -145,9 +148,9 @@ pub(crate) mod side_apply {
     pub fn v_impulse(side: Side, rpos: Vector3, impulse: Vector3, softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
         match side {
             Side::Cluster { soft, cluster } => {
-                cluster_v_impulse(&mut softs[soft].clusters[cluster], rpos, impulse)
+                cluster_v_impulse(&mut softs[soft.index()].clusters[cluster], rpos, impulse)
             }
-            Side::Rigid(i) => bodies[i].apply_impulse(impulse, rpos),
+            Side::Rigid(i) => bodies[i.index()].apply_impulse(impulse, rpos),
         }
     }
 
@@ -155,9 +158,9 @@ pub(crate) mod side_apply {
     pub fn d_impulse(side: Side, rpos: Vector3, impulse: Vector3, softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
         match side {
             Side::Cluster { soft, cluster } => {
-                cluster_d_impulse(&mut softs[soft].clusters[cluster], rpos, impulse)
+                cluster_d_impulse(&mut softs[soft.index()].clusters[cluster], rpos, impulse)
             }
-            Side::Rigid(i) => bodies[i].apply_impulse(impulse, rpos),
+            Side::Rigid(i) => bodies[i.index()].apply_impulse(impulse, rpos),
         }
     }
 
@@ -166,9 +169,9 @@ pub(crate) mod side_apply {
     pub fn va_impulse(side: Side, impulse: Vector3, softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
         match side {
             Side::Cluster { soft, cluster } => {
-                cluster_va_impulse(&mut softs[soft].clusters[cluster], impulse)
+                cluster_va_impulse(&mut softs[soft.index()].clusters[cluster], impulse)
             }
-            Side::Rigid(i) => bodies[i].apply_torque_impulse(impulse),
+            Side::Rigid(i) => bodies[i.index()].apply_torque_impulse(impulse),
         }
     }
 
@@ -178,9 +181,9 @@ pub(crate) mod side_apply {
     pub fn da_impulse(side: Side, impulse: Vector3, softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
         match side {
             Side::Cluster { soft, cluster } => {
-                cluster_da_impulse(&mut softs[soft].clusters[cluster], impulse)
+                cluster_da_impulse(&mut softs[soft.index()].clusters[cluster], impulse)
             }
-            Side::Rigid(i) => bodies[i].apply_torque_impulse(impulse),
+            Side::Rigid(i) => bodies[i.index()].apply_torque_impulse(impulse),
         }
     }
 
@@ -265,8 +268,8 @@ impl CJoint {
             _ => None,
         };
         if let Some(soft) = self_collision {
-            let cap = softs[soft].max_self_collision_impulse;
-            let factor = softs[soft].self_collision_impulse_factor;
+            let cap = softs[soft.index()].max_self_collision_impulse;
+            let factor = softs[soft.index()].self_collision_impulse_factor;
             // NaN-guarded like Bullet's `impulse.getX() == impulse.getX()`.
             if impulse.velocity.is_finite() && impulse.velocity.length() >= cap {
                 let (a, imp, r) = half_a;

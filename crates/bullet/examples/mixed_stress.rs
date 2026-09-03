@@ -202,7 +202,7 @@ fn main() {
     let mut chain_min_y: Real = Real::MAX;
     for f in 0..frames {
         world.step_simulation(DT);
-        chain_min_y = chain_min_y.min(world.multibody(0).link_world_position(1).y);
+        chain_min_y = chain_min_y.min(world.multibody(MultiBodyHandle::from_index(0)).link_world_position(1).y);
         let mut awake = 0usize;
         let mut max_v: Real = 0.0;
         let mut min_y: Real = Real::MAX;

@@ -204,7 +204,7 @@ impl SoftBody {
         // Prepare anchors (Bullet: impulse matrix per anchor + activate the
         // body so a sleeping anchor target takes part).
         for a in &mut this.anchors {
-            let body = &mut bodies[a.body];
+            let body = &mut bodies[a.body.index()];
             let ra = body.orientation * a.local;
             a.c0 = impulse_matrix(
                 this.sst.sdt,
@@ -381,7 +381,7 @@ impl SoftBody {
                 let a = &self.anchors[a];
                 (a.node, a.body, a.local, a.influence, a.c0, a.c1, a.c2)
             };
-            let body = &mut bodies[body_idx];
+            let body = &mut bodies[body_idx.index()];
             let wa = body.position + body.orientation * local;
             let va = body.velocity_at_local_point(c1) * sdt;
             let (x, q) = {

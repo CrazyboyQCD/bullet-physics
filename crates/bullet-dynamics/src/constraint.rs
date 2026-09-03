@@ -26,6 +26,7 @@ use bullet_math::{Matrix3, Quaternion, Real, Vector3};
 use bullet_math::compat::{quat_from_axis_angle, quat_from_mat3, quat_from_rotation_arc, quat_xyz};
 
 use crate::body::RigidBody;
+use crate::handles::BodyHandle;
 use crate::solver::sequential_impulse::{ConstraintRow, RowLimits};
 
 /// The specific kind of a [`Constraint`] and its parameters (Bullet's
@@ -209,10 +210,10 @@ impl ConstraintKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Constraint {
     kind: ConstraintKind,
-    /// Body indices, sorted so `body_a <= body_b` (constraint math is
-    /// direction-sensitive; the constructors fix the order at creation).
-    body_a: usize,
-    body_b: usize,
+    /// Body handles (the constructors fix the math direction order at
+    /// creation).
+    body_a: BodyHandle,
+    body_b: BodyHandle,
     /// Whether the solver enforces this constraint this step (Bullet's
     /// `setEnabled`). A disabled constraint also stops suppressing
     /// collisions between its bodies.
@@ -228,8 +229,8 @@ impl Constraint {
     /// `btPoint2PointConstraint(rbA, rbB, pivotInA, pivotInB)`). `pivot_a` is
     /// in body A's center-of-mass frame, `pivot_b` in body B's.
     pub fn point2point(
-        body_a: usize,
-        body_b: usize,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
         pivot_a: Vector3,
         pivot_b: Vector3,
     ) -> Self {
@@ -258,8 +259,8 @@ impl Constraint {
     /// zero-angle reference is not aligned to body A's initial X axis, so
     /// limit angles are measured from the assembly-time axes.
     pub fn hinge(
-        body_a: usize,
-        body_b: usize,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
         pivot_a: Vector3,
         axis_a: Vector3,
         pivot_b: Vector3,
@@ -274,11 +275,11 @@ impl Constraint {
         }
     }
 
-    pub fn body_a(&self) -> usize {
+    pub fn body_a(&self) -> BodyHandle {
         self.body_a
     }
 
-    pub fn body_b(&self) -> usize {
+    pub fn body_b(&self) -> BodyHandle {
         self.body_b
     }
 
@@ -287,8 +288,8 @@ impl Constraint {
     /// both the pivot and the relative orientation are locked, removing all
     /// six degrees of freedom (Bullet's `btFixedConstraint`).
     pub fn fixed(
-        body_a: usize,
-        body_b: usize,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
         frame_a: JointFrame,
         frame_b: JointFrame,
     ) -> Self {
@@ -307,8 +308,8 @@ impl Constraint {
     /// twist limit `twist_span` around the cone axis (Bullet's
     /// `btConeTwistConstraint`). All spans are in radians.
     pub fn cone_twist(
-        body_a: usize,
-        body_b: usize,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
         frame_a: JointFrame,
         frame_b: JointFrame,
         swing_span1: Real,
@@ -333,7 +334,12 @@ impl Constraint {
     /// A slider (prismatic) joint: the bodies slide along the frame X axes.
     /// Bullet's defaults apply — free linear travel, locked rotation — so
     /// set the limits/motors to taste (see [`SliderConstraint`]).
-    pub fn slider(body_a: usize, body_b: usize, frame_a: JointFrame, frame_b: JointFrame) -> Self {
+    pub fn slider(
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        frame_a: JointFrame,
+        frame_b: JointFrame,
+    ) -> Self {
         Self {
             kind: ConstraintKind::Slider(SliderConstraint::new(frame_a, frame_b)),
             body_a,
@@ -350,8 +356,8 @@ impl Constraint {
     /// defaults apply — linear locked, angular free — so a fresh joint
     /// behaves like a ball joint.
     pub fn generic_6dof(
-        body_a: usize,
-        body_b: usize,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
         frame_a: JointFrame,
         frame_b: JointFrame,
     ) -> Self {
@@ -2585,10 +2591,13 @@ pub fn prepare_rows(
     if !constraint.enabled {
         return;
     }
+    // Solver rows address the bodies by world slot (the row pipeline is
+    // handle-agnostic).
+    let (body_a_idx, body_b_idx) = (constraint.body_a.index(), constraint.body_b.index());
     match &mut constraint.kind {
         ConstraintKind::Point2Point(p2p) => {
-            let a = &bodies[constraint.body_a];
-            let b = &bodies[constraint.body_b];
+            let a = &bodies[body_a_idx];
+            let b = &bodies[body_b_idx];
             // World-space pivots and lever arms from each body's COM.
             let pivot_a = a.position + a.orientation * p2p.pivot_a;
             let pivot_b = b.position + b.orientation * p2p.pivot_b;
@@ -2609,8 +2618,8 @@ pub fn prepare_rows(
                 let mut normal = Vector3::ZERO;
                 normal[axis] = 1.0;
                 out.push(ConstraintRow::prepare(
-                    constraint.body_a,
-                    constraint.body_b,
+                    body_a_idx,
+                    body_b_idx,
                     normal,
                     r_a.cross(normal),
                     normal,
@@ -2626,54 +2635,19 @@ pub fn prepare_rows(
             }
         }
         ConstraintKind::Hinge(hinge) => {
-            hinge.prepare_rows(
-                constraint.body_a,
-                constraint.body_b,
-                bodies,
-                inv_dt,
-                erp,
-                out,
-            );
+            hinge.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, out);
         }
         ConstraintKind::Fixed(fixed) => {
-            fixed.prepare_rows(
-                constraint.body_a,
-                constraint.body_b,
-                bodies,
-                inv_dt,
-                erp,
-                out,
-            );
+            fixed.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, out);
         }
         ConstraintKind::ConeTwist(cone_twist) => {
-            cone_twist.prepare_rows(
-                constraint.body_a,
-                constraint.body_b,
-                bodies,
-                inv_dt,
-                erp,
-                out,
-            );
+            cone_twist.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, out);
         }
         ConstraintKind::Slider(slider) => {
-            slider.prepare_rows(
-                constraint.body_a,
-                constraint.body_b,
-                bodies,
-                inv_dt,
-                erp,
-                out,
-            );
+            slider.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, out);
         }
         ConstraintKind::Generic6Dof(dof) => {
-            dof.prepare_rows(
-                constraint.body_a,
-                constraint.body_b,
-                bodies,
-                inv_dt,
-                erp,
-                out,
-            );
+            dof.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, out);
         }
     }
 }
@@ -2692,7 +2666,10 @@ mod tests {
     /// `bob_offset` from the bob's centre and `anchor_offset` from the
     /// anchor's origin. The bob starts at the constraint-satisfied position
     /// (`anchor_offset − bob_offset`) so there is no initial correction kick.
-    fn pendulum_world(bob_offset: Vector3, anchor_offset: Vector3) -> (PhysicsWorld, usize, usize) {
+    fn pendulum_world(
+        bob_offset: Vector3,
+        anchor_offset: Vector3,
+    ) -> (PhysicsWorld, BodyHandle, BodyHandle) {
         let mut world = PhysicsWorld::new();
         world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
         let anchor = world.add_body(RigidBody::new_static(
@@ -2729,7 +2706,7 @@ mod tests {
         let a45 = std::f32::consts::FRAC_PI_4 as Real;
         world.body_mut(bob).position = Vector3::new(a45.sin(), -a45.cos(), 0.0);
         world.body_mut(bob).orientation = Quaternion::from_rotation_z(-a45);
-        let pivot_err = |world: &PhysicsWorld, bob: usize| -> Real {
+        let pivot_err = |world: &PhysicsWorld, bob: BodyHandle| -> Real {
             let b = world.body(bob);
             (b.position + b.orientation * Vector3::new(-1.0, 0.0, 0.0)).length()
         };
@@ -3608,7 +3585,12 @@ mod tests {
     /// one dispatch, and reads go back through `kind()`.
     #[test]
     fn kind_accessors_tune_parameters() {
-        let mut c = Constraint::point2point(0, 1, Vector3::ZERO, Vector3::ZERO);
+        let mut c = Constraint::point2point(
+            BodyHandle::from_index(0),
+            BodyHandle::from_index(1),
+            Vector3::ZERO,
+            Vector3::ZERO,
+        );
         c.point2point_mut().set_impulse_clamp(0.001);
         assert_eq!(c.kind().point2point().impulse_clamp, 0.001);
     }
@@ -3618,8 +3600,8 @@ mod tests {
     #[should_panic = "not a point-to-point constraint (found hinge)"]
     fn wrong_kind_accessor_panics() {
         let mut h = Constraint::hinge(
-            0,
-            1,
+            BodyHandle::from_index(0),
+            BodyHandle::from_index(1),
             Vector3::ZERO,
             Vector3::Y,
             Vector3::ZERO,

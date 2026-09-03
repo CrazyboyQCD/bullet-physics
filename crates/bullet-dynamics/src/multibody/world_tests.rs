@@ -7,6 +7,7 @@ use bullet_math::compat::{quat_from_axis_angle};
 
 use super::body::MultiBody;
 use super::constraint::MultiBodyConstraint;
+use crate::handles::MultiBodyHandle;
 use crate::world::PhysicsWorld;
 
 fn assert_close(a: Real, b: Real, tol: Real) {
@@ -31,7 +32,7 @@ fn free_base_falls_under_gravity() {
     for _ in 0..60 {
         world.step_simulation(dt);
     }
-    let body = world.multibody(0);
+    let body = world.multibody(MultiBodyHandle::from_index(0));
     // v = g·t after 1 s; position follows the semi-implicit Euler scheme
     // (velocity is integrated before position), so
     // y = −g·dt²·n·(n+1)/2 with n = 60.
@@ -68,12 +69,12 @@ fn revolute_pendulum_swings() {
     world.add_multibody(mb);
     let dt = 1.0 / 60.0;
     let mut bottom_speeds = Vec::new();
-    let mut prev_q = world.multibody(0).joint_pos_multidof(0)[0];
-    let mut prev_qd = world.multibody(0).joint_vel_multidof(0)[0];
+    let mut prev_q = world.multibody(MultiBodyHandle::from_index(0)).joint_pos_multidof(0)[0];
+    let mut prev_qd = world.multibody(MultiBodyHandle::from_index(0)).joint_vel_multidof(0)[0];
     let mut crossings = 0;
     for _ in 0..600 {
         world.step_simulation(dt);
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         let q = body.joint_pos_multidof(0)[0];
         let qd = body.joint_vel_multidof(0)[0];
         // Detect a bottom crossing: q changes sign while qd is largest
@@ -511,7 +512,7 @@ fn joint_feedback_released_pendulum_reaction() {
     world.add_multibody(mb);
     world.step_simulation(1.0 / 60.0);
     let fb = world
-        .multibody(0)
+        .multibody(MultiBodyHandle::from_index(0))
         .link_joint_feedback(0)
         .expect("feedback enabled");
     // Reaction force: m·g·ŷ + m·q̈·(ẑ×d) with q̈ = −g/2 → g/2 = 4.905.
@@ -555,7 +556,7 @@ fn joint_feedback_world_space_rotation() {
     world.add_multibody(mb);
     world.step_simulation(1.0 / 60.0);
     let fb = world
-        .multibody(0)
+        .multibody(MultiBodyHandle::from_index(0))
         .link_joint_feedback(0)
         .expect("feedback enabled");
     // The reaction force is (0, g/2, 0) in both frames (Y invariant under
@@ -607,7 +608,7 @@ fn joint_feedback_includes_contact_support() {
         world.step_simulation(dt);
     }
     let fb = world
-        .multibody(0)
+        .multibody(MultiBodyHandle::from_index(0))
         .link_joint_feedback(0)
         .expect("feedback enabled");
     // Settled hanging straight down: the joint carries the weight.
@@ -625,7 +626,7 @@ fn joint_feedback_includes_contact_support() {
 /// fixed-base zero-link multibody acting as an immovable anchor at the
 /// origin, finalized and registered with the world. Returns the anchor's
 /// multibody index.
-fn rigid_anchor_world() -> (PhysicsWorld, usize) {
+fn rigid_anchor_world() -> (PhysicsWorld, MultiBodyHandle) {
     let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
     let mut anchor = MultiBody::new(0, 1.0, Vector3::ONE, true, false);

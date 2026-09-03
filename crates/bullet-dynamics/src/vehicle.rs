@@ -37,6 +37,7 @@ use bullet_math::{Matrix3, Quaternion, Real, Transform, Vector3};
 use bullet_math::compat::{quat_from_axis_angle, transform_from_mat3_translation};
 
 use crate::body::RigidBody;
+use crate::handles::BodyHandle;
 use crate::world::PhysicsWorld;
 
 /// Per-vehicle tuning values (Bullet's `btRaycastVehicle::btVehicleTuning`,
@@ -96,9 +97,9 @@ pub struct RaycastInfo {
     pub wheel_axle_ws: Vector3,
     /// Whether the wheel ray hit anything this step.
     pub is_in_contact: bool,
-    /// Index of the hit body, when in contact. The ground is treated as the
+    /// Handle of the hit body, when in contact. The ground is treated as the
     /// fixed body (see the module docs), so this is informational only.
-    pub ground_body: Option<usize>,
+    pub ground_body: Option<BodyHandle>,
 }
 
 /// One wheel of a [`RaycastVehicle`] (Bullet's `btWheelInfo`): the constant
@@ -230,8 +231,8 @@ impl WheelInfo {
 ///
 /// See the [module docs](self) for the usage pattern and deviations.
 pub struct RaycastVehicle {
-    /// The chassis body index in the world.
-    chassis: usize,
+    /// The chassis body handle in the world.
+    chassis: BodyHandle,
     wheels: Vec<WheelInfo>,
     /// Per-step forward friction direction/impulse per wheel (Bullet's
     /// `m_forwardWS` / `m_forwardImpulse`).
@@ -257,7 +258,7 @@ pub struct RaycastVehicle {
 impl RaycastVehicle {
     /// Create a vehicle for the chassis body `chassis` (which must already
     /// exist in the world).
-    pub fn new(chassis: usize) -> Self {
+    pub fn new(chassis: BodyHandle) -> Self {
         Self {
             chassis,
             wheels: Vec::new(),
@@ -292,8 +293,8 @@ impl RaycastVehicle {
         self.forward_axis
     }
 
-    /// Index of the chassis body (Bullet's `getRigidBody`).
-    pub fn chassis_body(&self) -> usize {
+    /// Handle of the chassis body (Bullet's `getRigidBody`).
+    pub fn chassis_body(&self) -> BodyHandle {
         self.chassis
     }
 

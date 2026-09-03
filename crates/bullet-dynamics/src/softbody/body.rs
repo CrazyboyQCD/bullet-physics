@@ -8,6 +8,8 @@
 use bullet_collision::broadphase::DbvtTree;
 use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
 
+use crate::handles::{BodyHandle, SoftBodyHandle};
+
 use super::collide::{Anchor, RContact, SContact};
 use super::config::{Config, SolverState};
 use super::joints::{
@@ -241,19 +243,22 @@ impl std::ops::Neg for Impulse {
 }
 
 /// One side of a soft-body joint (Bullet's `btSoftBody::Body` tagged union):
-/// either a cluster of a soft body or a rigid body, both addressed by index
-/// (Bullet stores pointers).
+/// either a cluster of a soft body or a rigid body, both addressed by
+/// handle (Bullet stores pointers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
-    /// A cluster: `(soft body index, cluster index)`.
-    Cluster { soft: usize, cluster: usize },
-    /// A rigid body index.
-    Rigid(usize),
+    /// A cluster: `(soft body handle, cluster index)`.
+    Cluster {
+        soft: SoftBodyHandle,
+        cluster: usize,
+    },
+    /// A rigid body.
+    Rigid(BodyHandle),
 }
 
 impl Default for Side {
     fn default() -> Self {
-        Side::Rigid(0)
+        Side::Rigid(BodyHandle::from_index(0))
     }
 }
 
@@ -867,7 +872,7 @@ impl SoftBody {
     pub fn append_anchor(
         &mut self,
         node: usize,
-        body: usize,
+        body: BodyHandle,
         body_position: Vector3,
         body_orientation: Quaternion,
         influence: Real,
@@ -879,7 +884,7 @@ impl SoftBody {
 
     /// Pin a node to a rigid body at an explicit body-space pivot (Bullet's
     /// `appendAnchor(node, body, localPivot, ...)`).
-    pub fn append_anchor_local(&mut self, node: usize, body: usize, local: Vector3, influence: Real) {
+    pub fn append_anchor_local(&mut self, node: usize, body: BodyHandle, local: Vector3, influence: Real) {
         self.nodes[node].battach = true;
         self.anchors.push(Anchor {
             node,
@@ -933,7 +938,13 @@ impl SoftBody {
         let refs0 = cluster.framerot.transpose() * (specs.position - cluster.framepos);
         let refs1 = xform1.1.transpose() * (specs.position - xform1.0);
         self.joints.push(SoftJoint::Linear(LJoint {
-            bodies: [Side::Cluster { soft: self_idx, cluster: cluster0 }, body1],
+            bodies: [
+                Side::Cluster {
+                    soft: SoftBodyHandle::from_index(self_idx),
+                    cluster: cluster0,
+                },
+                body1,
+            ],
             refs: [refs0, refs1],
             cfm: specs.tuning.cfm,
             erp: specs.tuning.erp,
@@ -960,7 +971,13 @@ impl SoftBody {
         let refs0 = cluster.framerot.transpose() * specs.axis;
         let refs1 = xform1.1.transpose() * specs.axis;
         self.joints.push(SoftJoint::Angular(AJoint {
-            bodies: [Side::Cluster { soft: self_idx, cluster: cluster0 }, body1],
+            bodies: [
+                Side::Cluster {
+                    soft: SoftBodyHandle::from_index(self_idx),
+                    cluster: cluster0,
+                },
+                body1,
+            ],
             refs: [refs0, refs1],
             cfm: specs.tuning.cfm,
             erp: specs.tuning.erp,

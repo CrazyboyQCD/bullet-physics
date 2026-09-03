@@ -11,7 +11,7 @@
 //!
 //! Run with `cargo run --example multibody`.
 
-use bullet::dynamics::{MultiBody, MultiBodyConstraint, PhysicsWorld};
+use bullet::dynamics::{MultiBody, MultiBodyConstraint, MultiBodyHandle, PhysicsWorld};
 use bullet::math::{Quaternion, Real, Vector3};
 
 fn main() {
@@ -107,7 +107,7 @@ fn main() {
     let mut gear_speeds = (0.0, 0.0);
     for step in 0..900 {
         world.step_simulation(dt);
-        let pend = world.multibody(0);
+        let pend = world.multibody(MultiBodyHandle::from_index(0));
         let q = pend.joint_pos_multidof(0)[0];
         let qd = pend.joint_vel_multidof(0)[0];
         if prev_q.abs() < 0.1 && q.abs() < 0.1 && prev_q * q <= 0.0 {

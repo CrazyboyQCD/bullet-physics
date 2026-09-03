@@ -4,6 +4,7 @@
 pub mod body;
 pub mod character;
 pub mod constraint;
+pub mod handles;
 mod island;
 pub mod multibody;
 pub mod softbody;
@@ -19,6 +20,7 @@ pub use constraint::{
     Point2PointConstraint, RotationalLimitMotor, SliderConstraint, SliderMotor,
     TranslationalLimitMotor,
 };
+pub use handles::{BodyHandle, MultiBodyHandle, SoftBodyHandle};
 pub use multibody::{MultiBody, MultiBodyConstraint};
 pub use softbody::{
     create_ellipsoid, create_from_convex_hull, create_from_tri_mesh, create_patch, create_rope,

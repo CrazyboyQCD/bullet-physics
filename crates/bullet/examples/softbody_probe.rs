@@ -7,7 +7,8 @@
 //! with scene in {rope_pendulum, rope_ground, cloth_plane}.
 
 use bullet::dynamics::{
-    create_ellipsoid, create_patch, create_rope, PhysicsWorld, RigidBody, SoftCollision,
+    create_ellipsoid, create_patch, create_rope, PhysicsWorld, RigidBody, SoftBodyHandle,
+    SoftCollision,
 };
 use bullet::math::{Real, Vector3};
 use bullet::shapes::CollisionShape;
@@ -197,7 +198,7 @@ fn scene_soft_soft_vf(dt: Real, frames: usize) {
 
 /// Configure a cluster ellipsoid like the C++ twin (the shared recipe of
 /// the ellipsoid_ground / cluster_pair scenes).
-fn setup_cluster_ellipsoid(world: &mut PhysicsWorld, center: Vector3, radius: Vector3, res: usize, collisions: SoftCollision, mass: Real) -> usize {
+fn setup_cluster_ellipsoid(world: &mut PhysicsWorld, center: Vector3, radius: Vector3, res: usize, collisions: SoftCollision, mass: Real) -> SoftBodyHandle {
     let ball = world.add_soft_body(create_ellipsoid(center, radius, res));
     let sb = world.soft_body_mut(ball);
     sb.cfg.piterations = 4;

@@ -26,7 +26,9 @@
 
 use std::time::Instant;
 
-use bullet::dynamics::{create_patch, MultiBody, PhysicsWorld, RigidBody, StepStage, STEP_STAGES};
+use bullet::dynamics::{
+    create_patch, BodyHandle, MultiBody, PhysicsWorld, RigidBody, StepStage, STEP_STAGES,
+};
 use bullet::math::{Quaternion, Real, Vector3, PI};
 use bullet::shapes::CollisionShape;
 use bullet::collision::broadphase::{BroadPhaseBackend, DbvtBroadPhase};
@@ -191,7 +193,7 @@ fn add_softs(world: &mut PhysicsWorld, c: &PerfSoftSpec) {
 /// every 30 frames plus the velocity-driven dozer. Runs before
 /// `step_simulation` so the solver sees the scripted frame.
 fn arena_tick(world: &mut PhysicsWorld, frame: u64) {
-    const DOZER: usize = 1; // bodies[1] is the mass-50 dozer sphere (json contract)
+    const DOZER: BodyHandle = BodyHandle::from_index(1); // bodies[1] is the mass-50 dozer sphere (json contract)
     if frame.is_multiple_of(30) && frame < 610 {
         let k = frame / 30;
         let from = Vector3::new(0.0, 2.5, -8.0);

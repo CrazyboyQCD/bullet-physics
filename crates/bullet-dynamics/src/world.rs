@@ -9,6 +9,7 @@ use bullet_collision::narrowphase::{self, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
 use crate::body::{CollisionFlags, RayFilter, RigidBody};
 use crate::constraint::{self, Constraint};
+use crate::handles::{BodyHandle, MultiBodyHandle, SoftBodyHandle};
 use crate::island::IslandScratch;
 use crate::multibody::body::{MultiBody, MultiBodyScratch};
 use crate::multibody::contact::{self, ContactSide, MbContactRow, PendingContact};
@@ -220,11 +221,11 @@ pub enum CollisionEvent {
     /// The pair began touching this step. `sensor` is set when either side
     /// has [`CollisionFlags::NO_CONTACT_RESPONSE`] — a trigger volume: no
     /// contact response is ever solved for it, only events and queries.
-    Started { a: usize, b: usize, sensor: bool },
+    Started { a: BodyHandle, b: BodyHandle, sensor: bool },
     /// The pair stopped touching this step (separated past the breaking
     /// threshold, left the broad phase, got filtered by group/mask, or a
     /// body was removed).
-    Stopped { a: usize, b: usize, sensor: bool },
+    Stopped { a: BodyHandle, b: BodyHandle, sensor: bool },
 }
 
 /// Bullet's broad-phase pair filter (`btBroadphaseProxy::NeedsCollision`):
@@ -235,10 +236,10 @@ fn filters_collide(group_a: u16, mask_a: u16, group_b: u16, mask_b: u16) -> bool
 }
 
 /// Custom overlap-filter predicate for rigid pairs (Bullet's
-/// `btOverlapFilterCallback::needsCollision`): receives both body indices
+/// `btOverlapFilterCallback::needsCollision`): receives both body handles
 /// and references; pairs it rejects are skipped by the narrow phase and the
 /// CCD sweep, on top of the group & mask test.
-pub type PairFilter = dyn Fn(usize, &RigidBody, usize, &RigidBody) -> bool;
+pub type PairFilter = dyn Fn(BodyHandle, &RigidBody, BodyHandle, &RigidBody) -> bool;
 
 /// A discrete rigid-body simulation world, mirroring `btDiscreteDynamicsWorld`
 /// extended with the Featherstone multibody list of `btMultiBodyDynamicsWorld`
@@ -460,13 +461,13 @@ impl PhysicsWorld {
         &self.step_timings
     }
 
-    /// Add a body and return its index.
+    /// Add a body and return its handle.
     ///
     /// Broad-phase proxy ids are shared with multibody link colliders, so
     /// they are tracked in [`PhysicsWorld::body_proxies`] (visible to tests).
-    /// Indices are stable: removing a body never renumbers the others (see
-    /// [`PhysicsWorld::remove_body`]).
-    pub fn add_body(&mut self, mut body: RigidBody) -> usize {
+    /// Rigid-body handles are stable: removing a body never renumbers the
+    /// others (see [`PhysicsWorld::remove_body`]).
+    pub fn add_body(&mut self, mut body: RigidBody) -> BodyHandle {
         // Bullet's `addRigidBody`: a dynamic body inherits the world gravity
         // unless it detached itself (`BT_DISABLE_WORLD_GRAVITY`).
         if !body.is_static()
@@ -492,27 +493,31 @@ impl PhysicsWorld {
             self.proxy_owners[proxy] = ProxyOwner::Body(index);
         }
         self.body_proxies.push(proxy);
-        index
+        BodyHandle::from_index(index)
     }
 
-    /// The body at `index`. Panics if the body was removed
+    /// The body at `handle`. Panics if the body was removed
     /// ([`PhysicsWorld::remove_body`]) — the slot itself stays readable
     /// through [`PhysicsWorld::bodies`] for bookkeeping, but a removed body
     /// no longer takes part in anything.
-    pub fn body(&self, index: usize) -> &RigidBody {
+    pub fn body(&self, handle: BodyHandle) -> &RigidBody {
+        let index = handle.index();
         assert!(
             !self.bodies[index].is_removed(),
-            "body {index} has been removed"
+            "body {} has been removed",
+            index
         );
         &self.bodies[index]
     }
 
-    /// Mutable access to the body at `index` (panics if removed, see
+    /// Mutable access to the body at `handle` (panics if removed, see
     /// [`PhysicsWorld::body`]).
-    pub fn body_mut(&mut self, index: usize) -> &mut RigidBody {
+    pub fn body_mut(&mut self, handle: BodyHandle) -> &mut RigidBody {
+        let index = handle.index();
         assert!(
             !self.bodies[index].is_removed(),
-            "body {index} has been removed"
+            "body {} has been removed",
+            index
         );
         &mut self.bodies[index]
     }
@@ -528,15 +533,17 @@ impl PhysicsWorld {
     /// Constraints referencing the body are removed automatically — joints,
     /// multibody-vs-rigidbody constraints and the collision suppression the
     /// joints contributed (Bullet leaves that to the caller and dangles
-    /// otherwise; recorded deviation). Body indices are stable: the other
-    /// bodies keep their indices and the removed slot is never reused, so a
-    /// stale index reads inert data instead of a different body. External
-    /// users of the index (a vehicle's chassis, a character controller) must
+    /// otherwise; recorded deviation). Body handles are stable: the other
+    /// bodies keep their handles and the removed slot is never reused, so a
+    /// stale handle reads inert data instead of a different body. External
+    /// users of the handle (a vehicle's chassis, a character controller) must
     /// stop using it, exactly like Bullet's pointer holders.
-    pub fn remove_body(&mut self, index: usize) {
+    pub fn remove_body(&mut self, handle: BodyHandle) {
+        let index = handle.index();
         assert!(
             !self.bodies[index].is_removed(),
-            "body {index} has already been removed"
+            "body {} has already been removed",
+            index
         );
         // Destroy the broad-phase proxy first: its pairs die with it, so no
         // future step can pair or query the body.
@@ -549,17 +556,18 @@ impl PhysicsWorld {
         self.bodies[index].mark_removed();
         self.manifold_cache
             .retain(|&(i, j), _| i != index && j != index);
-        self.constraints
-            .retain(|c| c.body_a() != index && c.body_b() != index);
+        self.constraints.retain(|c| {
+            c.body_a().index() != index && c.body_b().index() != index
+        });
         self.mb_constraints
-            .retain(|c| c.rigid_body_b() != Some(index));
+            .retain(|c| c.rigid_body_b() != Some(handle));
         // Soft-body anchors pinning this body die with it (the anchors'
         // body indices would dangle, exactly like the joint cascade above —
         // a recorded deviation: Bullet leaves the user to remove them).
         for sb in &mut self.soft_bodies {
             let mut unanchored = false;
             sb.anchors.retain(|a| {
-                let keep = a.body != index;
+                let keep = a.body != handle;
                 unanchored |= !keep;
                 keep
             });
@@ -591,12 +599,16 @@ impl PhysicsWorld {
             let (a, b) = (pair[0] as usize, pair[1] as usize);
             let sensor = self.pair_sensor(a, b);
             self.contact_events
-                .push(CollisionEvent::Stopped { a, b, sensor });
+                .push(CollisionEvent::Stopped {
+                    a: BodyHandle::from_index(a),
+                    b: BodyHandle::from_index(b),
+                    sensor,
+                });
         }
         self.no_collision_pairs.clear();
         for c in &self.constraints {
             if c.disable_collisions() {
-                let (a, b) = (c.body_a(), c.body_b());
+                let (a, b) = (c.body_a().index(), c.body_b().index());
                 self.no_collision_pairs.insert((a.min(b), a.max(b)));
             }
         }
@@ -642,18 +654,18 @@ impl PhysicsWorld {
     }
 
     /// Add a finalized multibody (Bullet's `addMultiBody`) and return its
-    /// index.
-    pub fn add_multibody(&mut self, body: MultiBody) -> usize {
+    /// handle.
+    pub fn add_multibody(&mut self, body: MultiBody) -> MultiBodyHandle {
         self.multibodies.push(body);
-        self.multibodies.len() - 1
+        MultiBodyHandle::from_index(self.multibodies.len() - 1)
     }
 
-    pub fn multibody(&self, index: usize) -> &MultiBody {
-        &self.multibodies[index]
+    pub fn multibody(&self, handle: MultiBodyHandle) -> &MultiBody {
+        &self.multibodies[handle.index()]
     }
 
-    pub fn multibody_mut(&mut self, index: usize) -> &mut MultiBody {
-        &mut self.multibodies[index]
+    pub fn multibody_mut(&mut self, handle: MultiBodyHandle) -> &mut MultiBody {
+        &mut self.multibodies[handle.index()]
     }
 
     pub fn multibodies(&self) -> &[MultiBody] {
@@ -665,10 +677,10 @@ impl PhysicsWorld {
     }
 
     /// Add a soft body (Bullet's `btSoftRigidDynamicsWorld::addSoftBody`)
-    /// and return its index. The body owns one broad-phase proxy over its
+    /// and return its handle. The body owns one broad-phase proxy over its
     /// node-hull bounds and collides with rigid bodies through the SDF_RS
     /// node-contacts (phase B).
-    pub fn add_soft_body(&mut self, mut body: SoftBody) -> usize {
+    pub fn add_soft_body(&mut self, mut body: SoftBody) -> SoftBodyHandle {
         body.update_bounds();
         let aabb = Aabb::new(body.bounds[0], body.bounds[1]);
         let proxy = self.broadphase.create_proxy(aabb);
@@ -683,13 +695,16 @@ impl PhysicsWorld {
         let index = self.soft_bodies.len();
         self.soft_bodies.push(body);
         self.soft_proxies.push(proxy);
-        index
+        SoftBodyHandle::from_index(index)
     }
 
     /// Remove a soft body: its proxy is destroyed (slot recycled) and any
     /// anchors of *rigid* bodies pinning it become inert (Bullet removes
-    /// the soft body's anchors with it).
-    pub fn remove_soft_body(&mut self, index: usize) {
+    /// the soft body's anchors with it). The other soft bodies renumber —
+    /// their handles shift down past the removed slot (index semantics,
+    /// unlike the stable rigid-body handles).
+    pub fn remove_soft_body(&mut self, handle: SoftBodyHandle) {
+        let index = handle.index();
         let proxy = self.soft_proxies[index];
         self.broadphase.destroy_proxy(proxy);
         self.proxy_owners[proxy] = ProxyOwner::Free;
@@ -705,12 +720,12 @@ impl PhysicsWorld {
         }
     }
 
-    pub fn soft_body(&self, index: usize) -> &SoftBody {
-        &self.soft_bodies[index]
+    pub fn soft_body(&self, handle: SoftBodyHandle) -> &SoftBody {
+        &self.soft_bodies[handle.index()]
     }
 
-    pub fn soft_body_mut(&mut self, index: usize) -> &mut SoftBody {
-        &mut self.soft_bodies[index]
+    pub fn soft_body_mut(&mut self, handle: SoftBodyHandle) -> &mut SoftBody {
+        &mut self.soft_bodies[handle.index()]
     }
 
     pub fn soft_bodies(&self) -> &[SoftBody] {
@@ -723,17 +738,17 @@ impl PhysicsWorld {
 
     /// Install a linear joint between soft body `soft`'s master cluster
     /// (`clusters[0]`, Bullet's `appendLinearJoint(specs, body)` overload)
-    /// and any other side — a rigid body index or another soft body's
-    /// master cluster. Requires the soft body to have clusters
+    /// and any other side — a rigid body or another soft body's master
+    /// cluster. Requires the soft body to have clusters
     /// (`generate_clusters` first).
     pub fn add_soft_linear_joint(
         &mut self,
-        soft: usize,
+        soft: SoftBodyHandle,
         specs: LinearJointSpecs,
         body1: Side,
     ) {
         let xform1 = self.side_xform(body1);
-        self.soft_bodies[soft].append_linear_joint(soft, 0, &specs, body1, xform1);
+        self.soft_bodies[soft.index()].append_linear_joint(soft.index(), 0, &specs, body1, xform1);
     }
 
     /// Install an angular joint between soft body `soft`'s master cluster
@@ -741,12 +756,12 @@ impl PhysicsWorld {
     /// overload). Requires the soft body to have clusters.
     pub fn add_soft_angular_joint(
         &mut self,
-        soft: usize,
+        soft: SoftBodyHandle,
         specs: AngularJointSpecs,
         body1: Side,
     ) {
         let xform1 = self.side_xform(body1);
-        self.soft_bodies[soft].append_angular_joint(soft, 0, &specs, body1, xform1);
+        self.soft_bodies[soft.index()].append_angular_joint(soft.index(), 0, &specs, body1, xform1);
     }
 
     /// The world frame of one joint side: a rigid body's transform or a
@@ -754,10 +769,13 @@ impl PhysicsWorld {
     fn side_xform(&self, side: Side) -> (Vector3, Matrix3) {
         match side {
             Side::Cluster { soft, cluster } => {
-                let c = &self.soft_bodies[soft].clusters[cluster];
+                let c = &self.soft_bodies[soft.index()].clusters[cluster];
                 (c.framepos, c.framerot)
             }
-            Side::Rigid(i) => (self.bodies[i].position, Matrix3::from_quat(self.bodies[i].orientation)),
+            Side::Rigid(i) => (
+                self.bodies[i.index()].position,
+                Matrix3::from_quat(self.bodies[i.index()].orientation),
+            ),
         }
     }
 
@@ -869,27 +887,31 @@ impl PhysicsWorld {
     }
 
     /// Cast a ray against every body and return the closest hit together with
-    /// the body index (Bullet's `rayTest` with a closest-result callback).
+    /// the body handle (Bullet's `rayTest` with a closest-result callback).
     ///
     /// The broad phase first prunes proxies whose AABB the segment does not
     /// cross, so the (more expensive) exact per-shape test only runs on
     /// candidates — mirroring `btAxisSweep3::rayTest` feeding a
     /// `ClosestRayResultCallback`. The AABB test is conservative, so the
     /// result is identical to testing every body.
-    pub fn raycast_closest(&self, ray_from: Vector3, ray_to: Vector3) -> Option<(usize, RayHit)> {
+    pub fn raycast_closest(
+        &self,
+        ray_from: Vector3,
+        ray_to: Vector3,
+    ) -> Option<(BodyHandle, RayHit)> {
         self.raycast_closest_excluding(ray_from, ray_to, None)
     }
 
     /// Closest ray hit against the soft bodies' surface faces (Bullet's
-    /// per-body `btSoftBody::rayTest`): returns the soft-body index, the
+    /// per-body `btSoftBody::rayTest`): returns the soft-body handle, the
     /// face index and the segment fraction. Rigid-body hits are not
     /// considered — a combined query joins the world-API cleanup (phase E).
     pub fn raycast_soft_closest(
         &self,
         ray_from: Vector3,
         ray_to: Vector3,
-    ) -> Option<(usize, usize, Real)> {
-        let mut best: Option<(usize, usize, Real)> = None;
+    ) -> Option<(SoftBodyHandle, usize, Real)> {
+        let mut best: Option<(SoftBodyHandle, usize, Real)> = None;
         for (i, sb) in self.soft_bodies.iter().enumerate() {
             if let Some((face, fraction)) = sb.ray_test(ray_from, ray_to) {
                 let closer = match best {
@@ -897,7 +919,7 @@ impl PhysicsWorld {
                     None => true,
                 };
                 if closer {
-                    best = Some((i, face, fraction));
+                    best = Some((SoftBodyHandle::from_index(i), face, fraction));
                 }
             }
         }
@@ -913,9 +935,9 @@ impl PhysicsWorld {
         &self,
         ray_from: Vector3,
         ray_to: Vector3,
-        ignore: Option<usize>,
-    ) -> Option<(usize, RayHit)> {
-        let mut best: Option<(usize, RayHit)> = None;
+        ignore: Option<BodyHandle>,
+    ) -> Option<(BodyHandle, RayHit)> {
+        let mut best: Option<(BodyHandle, RayHit)> = None;
         self.raycast_walk(ray_from, ray_to, ignore, RayFilter::DEFAULT, |i, hit| {
             if best.is_none_or(|(_, b)| hit.fraction < b.fraction) {
                 best = Some((i, hit));
@@ -928,7 +950,7 @@ impl PhysicsWorld {
     /// with an all-hits callback). Bodies whose collision group/mask pair
     /// test rejects the query's [`RayFilter::DEFAULT`] group and mask are
     /// not tested.
-    pub fn raycast_all(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<(usize, RayHit)> {
+    pub fn raycast_all(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<(BodyHandle, RayHit)> {
         self.raycast_all_filtered(ray_from, ray_to, RayFilter::DEFAULT)
     }
 
@@ -938,8 +960,8 @@ impl PhysicsWorld {
         ray_from: Vector3,
         ray_to: Vector3,
         filter: RayFilter,
-    ) -> Vec<(usize, RayHit)> {
-        let mut hits: Vec<(usize, RayHit)> = Vec::new();
+    ) -> Vec<(BodyHandle, RayHit)> {
+        let mut hits: Vec<(BodyHandle, RayHit)> = Vec::new();
         self.raycast_walk(ray_from, ray_to, None, filter, |i, hit| {
             hits.push((i, hit));
         });
@@ -954,8 +976,8 @@ impl PhysicsWorld {
         ray_from: Vector3,
         ray_to: Vector3,
         filter: RayFilter,
-    ) -> Option<(usize, RayHit)> {
-        let mut best: Option<(usize, RayHit)> = None;
+    ) -> Option<(BodyHandle, RayHit)> {
+        let mut best: Option<(BodyHandle, RayHit)> = None;
         self.raycast_walk(ray_from, ray_to, None, filter, |i, hit| {
             if best.is_none_or(|(_, b)| hit.fraction < b.fraction) {
                 best = Some((i, hit));
@@ -972,9 +994,9 @@ impl PhysicsWorld {
         &self,
         ray_from: Vector3,
         ray_to: Vector3,
-        ignore: Option<usize>,
+        ignore: Option<BodyHandle>,
         filter: RayFilter,
-        mut out: impl FnMut(usize, RayHit),
+        mut out: impl FnMut(BodyHandle, RayHit),
     ) {
         for p in self.broadphase.raycast_candidates(ray_from, ray_to) {
             // Link colliders join the world queries together with their
@@ -983,7 +1005,8 @@ impl PhysicsWorld {
             let ProxyOwner::Body(i) = self.proxy_owners[p] else {
                 continue;
             };
-            if Some(i) == ignore {
+            let handle = BodyHandle::from_index(i);
+            if Some(handle) == ignore {
                 continue;
             }
             let body = &self.bodies[i];
@@ -997,28 +1020,28 @@ impl PhysicsWorld {
                 ray_from,
                 ray_to,
             ) {
-                out(i, hit);
+                out(handle, hit);
             }
         }
     }
 
-    /// Indices of bodies whose broad-phase AABB overlaps `aabb` (exact AABB
-    /// test; the caller then runs the narrow phase on the candidates).
+    /// Handles of the bodies whose broad-phase AABB overlaps `aabb` (exact
+    /// AABB test; the caller then runs the narrow phase on the candidates).
     /// Multibody link colliders overlap too but are not reported until they
     /// join the queries in phase C.
-    pub fn aabb_candidates(&self, aabb: Aabb) -> Vec<usize> {
+    pub fn aabb_candidates(&self, aabb: Aabb) -> Vec<BodyHandle> {
         self.broadphase
             .aabb_candidates(aabb)
             .into_iter()
             .filter_map(|p| match self.proxy_owners[p] {
-                ProxyOwner::Body(i) => Some(i),
+                ProxyOwner::Body(i) => Some(BodyHandle::from_index(i)),
                 ProxyOwner::Collider(_) | ProxyOwner::Soft(_) | ProxyOwner::Free => None,
             })
             .collect()
     }
 
     /// Closest convex sweep of `shape` from `from` to `to` against every body
-    /// except `ignore`, returning the hit body index and the closest hit.
+    /// except `ignore`, returning the hit body handle and the closest hit.
     ///
     /// Mirrors `btCollisionWorld::convexSweep` feeding a
     /// `ClosestConvexResultCallback` (the character controller's step
@@ -1030,17 +1053,18 @@ impl PhysicsWorld {
         from: Vector3,
         ori: Quaternion,
         to: Vector3,
-        ignore: Option<usize>,
-    ) -> Option<(usize, SweepHit)> {
+        ignore: Option<BodyHandle>,
+    ) -> Option<(BodyHandle, SweepHit)> {
         let swept = shape
             .world_aabb(from, ori)
             .merged(&shape.world_aabb(to, ori));
-        let mut best: Option<(usize, SweepHit)> = None;
+        let mut best: Option<(BodyHandle, SweepHit)> = None;
         for p in self.broadphase.aabb_candidates(swept) {
             let ProxyOwner::Body(i) = self.proxy_owners[p] else {
                 continue;
             };
-            if Some(i) == ignore {
+            let handle = BodyHandle::from_index(i);
+            if Some(handle) == ignore {
                 continue;
             }
             let body = &self.bodies[i];
@@ -1054,7 +1078,7 @@ impl PhysicsWorld {
                 body.orientation,
             ) && best.is_none_or(|(_, b)| hit.fraction < b.fraction)
             {
-                best = Some((i, hit));
+                best = Some((handle, hit));
             }
         }
         best
@@ -1068,15 +1092,16 @@ impl PhysicsWorld {
         shape: &bullet_collision::shapes::CollisionShape,
         pos: Vector3,
         ori: Quaternion,
-        ignore: Option<usize>,
-    ) -> Vec<(usize, ContactManifold)> {
+        ignore: Option<BodyHandle>,
+    ) -> Vec<(BodyHandle, ContactManifold)> {
         let aabb = shape.world_aabb(pos, ori);
         let mut out = Vec::new();
         for p in self.broadphase.aabb_candidates(aabb) {
             let ProxyOwner::Body(i) = self.proxy_owners[p] else {
                 continue;
             };
-            if Some(i) == ignore {
+            let handle = BodyHandle::from_index(i);
+            if Some(handle) == ignore {
                 continue;
             }
             let body = &self.bodies[i];
@@ -1088,7 +1113,7 @@ impl PhysicsWorld {
                 body.position,
                 body.orientation,
             ) {
-                out.push((i, m));
+                out.push((handle, m));
             }
         }
         out
@@ -1097,10 +1122,17 @@ impl PhysicsWorld {
     /// Set a body's pose directly and refresh its broad-phase AABB. Used by
     /// the character controller to move its kinematic body; the solver still
     /// treats the body as immovable (static bodies are never integrated).
-    pub fn set_body_transform(&mut self, index: usize, position: Vector3, orientation: Quaternion) {
+    pub fn set_body_transform(
+        &mut self,
+        handle: BodyHandle,
+        position: Vector3,
+        orientation: Quaternion,
+    ) {
+        let index = handle.index();
         assert!(
             !self.bodies[index].is_removed(),
-            "body {index} has been removed"
+            "body {} has been removed",
+            index
         );
         let body = &mut self.bodies[index];
         body.position = position;
@@ -1117,7 +1149,7 @@ impl PhysicsWorld {
     /// default, see [`Constraint::set_disable_collisions`]).
     pub fn add_constraint(&mut self, constraint: Constraint) -> usize {
         if constraint.disable_collisions() {
-            let (a, b) = (constraint.body_a(), constraint.body_b());
+            let (a, b) = (constraint.body_a().index(), constraint.body_b().index());
             self.no_collision_pairs.insert((a.min(b), a.max(b)));
         }
         self.constraints.push(constraint);
@@ -1143,7 +1175,7 @@ impl PhysicsWorld {
         self.no_collision_pairs.clear();
         for c in &self.constraints {
             if c.disable_collisions() {
-                let (a, b) = (c.body_a(), c.body_b());
+                let (a, b) = (c.body_a().index(), c.body_b().index());
                 self.no_collision_pairs.insert((a.min(b), a.max(b)));
             }
         }
@@ -1477,7 +1509,12 @@ impl PhysicsWorld {
             // & mask test (Bullet's `btOverlapFilterCallback` order: both
             // must accept).
             if let Some(filter) = self.pair_filter.as_deref()
-                && !filter(i, &self.bodies[i], j, &self.bodies[j])
+                && !filter(
+                    BodyHandle::from_index(i),
+                    &self.bodies[i],
+                    BodyHandle::from_index(j),
+                    &self.bodies[j],
+                )
             {
                 continue;
             }
@@ -1651,9 +1688,17 @@ impl PhysicsWorld {
             let (a, b) = (pair[0] as usize, pair[1] as usize);
             let sensor = self.pair_sensor(a, b);
             let event = if started {
-                CollisionEvent::Started { a, b, sensor }
+                CollisionEvent::Started {
+                    a: BodyHandle::from_index(a),
+                    b: BodyHandle::from_index(b),
+                    sensor,
+                }
             } else {
-                CollisionEvent::Stopped { a, b, sensor }
+                CollisionEvent::Stopped {
+                    a: BodyHandle::from_index(a),
+                    b: BodyHandle::from_index(b),
+                    sensor,
+                }
             };
             self.contact_events.push(event);
         }
@@ -1667,7 +1712,9 @@ impl PhysicsWorld {
         // island and produces no rows.
         self.joint_rows.clear();
         for c in &mut self.constraints {
-            if !self.bodies[c.body_a()].is_active() && !self.bodies[c.body_b()].is_active() {
+            if !self.bodies[c.body_a().index()].is_active()
+                && !self.bodies[c.body_b().index()].is_active()
+            {
                 continue;
             }
             constraint::prepare_rows(c, &self.bodies, inv_dt, BAUMGARTE, &mut self.joint_rows);
@@ -1790,7 +1837,12 @@ impl PhysicsWorld {
                     }
                     // The custom overlap filter gates the CCD sweep as well.
                     if let Some(filter) = self.pair_filter.as_deref()
-                        && !filter(i, &self.bodies[i], j, other)
+                        && !filter(
+                            BodyHandle::from_index(i),
+                            &self.bodies[i],
+                            BodyHandle::from_index(j),
+                            other,
+                        )
                     {
                         continue;
                     }
@@ -2096,7 +2148,7 @@ impl PhysicsWorld {
             if !c.enabled() {
                 continue;
             }
-            let (a, b) = (c.body_a(), c.body_b());
+            let (a, b) = (c.body_a().index(), c.body_b().index());
             if self.bodies[a].participates_in_islands()
                 && self.bodies[b].participates_in_islands()
             {
@@ -2108,10 +2160,14 @@ impl PhysicsWorld {
             // rigid body's island node (Bullet's `getIslandIdB` on
             // `m_rigidBodyB`); static bodies sit outside the node space.
             match c.rigid_body_b() {
-                None => uf.unite(num_bodies + c.body_a(), num_bodies + c.body_b()),
+                None => uf.unite(
+                    num_bodies + c.body_a().index(),
+                    num_bodies + c.body_b().index(),
+                ),
                 Some(rb) => {
+                    let rb = rb.index();
                     if self.bodies[rb].participates_in_islands() {
-                        uf.unite(num_bodies + c.body_a(), rb);
+                        uf.unite(num_bodies + c.body_a().index(), rb);
                     }
                 }
             }
@@ -2204,10 +2260,10 @@ impl PhysicsWorld {
             } = self;
             for (i, c) in constraints.iter_mut().enumerate() {
                 let side_b_awake = match c.rigid_body_b() {
-                    Some(rb) => bodies[rb].is_active(),
-                    None => multibodies[c.body_b()].is_awake(),
+                    Some(rb) => bodies[rb.index()].is_active(),
+                    None => multibodies[c.body_b().index()].is_awake(),
                 };
-                if !multibodies[c.body_a()].is_awake() && !side_b_awake {
+                if !multibodies[c.body_a().index()].is_awake() && !side_b_awake {
                     continue;
                 }
                 c.create_constraint_rows(i, rows, data, scratch, multibodies, bodies, dt, *erp);
@@ -2297,10 +2353,10 @@ impl PhysicsWorld {
                 // Constraints of a sleeping island (both sides asleep after
                 // the island pass) produce no rows.
                 let side_b_awake = match c.rigid_body_b() {
-                    Some(rb) => bodies[rb].is_active(),
-                    None => multibodies[c.body_b()].is_awake(),
+                    Some(rb) => bodies[rb.index()].is_active(),
+                    None => multibodies[c.body_b().index()].is_awake(),
                 };
-                if !multibodies[c.body_a()].is_awake() && !side_b_awake {
+                if !multibodies[c.body_a().index()].is_awake() && !side_b_awake {
                     continue;
                 }
                 c.create_constraint_rows(i, mb_rows, data, scratch, multibodies, bodies, dt, *erp);
@@ -2569,7 +2625,7 @@ mod tests {
         let (index, hit) = world
             .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
             .unwrap();
-        assert_eq!(index, 1);
+        assert_eq!(index, BodyHandle::from_index(1));
         assert_relative_eq!(hit.fraction, 0.1, epsilon = 1e-4);
         assert_relative_eq!(hit.normal.x, -1.0, epsilon = 1e-4);
     }
@@ -2701,7 +2757,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(started, Some((0, 1, true)));
+        assert_eq!(started, Some((BodyHandle::from_index(0), ball, true)));
         assert!(
             world.body(ball).position.y < -1.0,
             "trigger did not let the ball through: y = {}",
@@ -2807,7 +2863,7 @@ mod tests {
         else {
             panic!("removal did not emit Stopped");
         };
-        assert_eq!((a, b), (0, ball));
+        assert_eq!((a, b), (BodyHandle::from_index(0), ball));
         assert!(!sensor);
     }
 
@@ -2865,7 +2921,7 @@ mod tests {
             world.step_simulation(dt);
         }
         let min_y = world
-            .soft_body(0)
+            .soft_body(SoftBodyHandle::from_index(0))
             .nodes
             .iter()
             .map(|n| n.x.y)
@@ -2903,9 +2959,9 @@ mod tests {
             world.step_simulation(dt);
         }
         assert!(
-            world.multibody(0).base_pos.y < -1.0,
+            world.multibody(MultiBodyHandle::from_index(0)).base_pos.y < -1.0,
             "filtered plane stopped the mb base: y = {}",
-            world.multibody(0).base_pos.y
+            world.multibody(MultiBodyHandle::from_index(0)).base_pos.y
         );
     }
 
@@ -2929,7 +2985,7 @@ mod tests {
             Vector3::new(1.0, 0.0, 0.0),
         ));
         let hits = world.raycast_all(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0));
-        let indices: Vec<usize> = hits.iter().map(|(i, _)| *i).collect();
+        let indices: Vec<BodyHandle> = hits.iter().map(|(i, _)| *i).collect();
         assert_eq!(indices, vec![near, far]);
         assert!(hits[0].1.fraction < hits[1].1.fraction);
     }
@@ -3115,7 +3171,7 @@ mod tests {
 
         // The downward ray through the balloon's column reports every body
         let hits = world.raycast_all(Vector3::new(0.0, 12.0, 0.0), Vector3::new(0.0, -5.0, 0.0));
-        let indices: Vec<usize> = hits.iter().map(|(i, _)| *i).collect();
+        let indices: Vec<BodyHandle> = hits.iter().map(|(i, _)| *i).collect();
         assert_eq!(indices, vec![balloon, sensor, floor]);
         assert!(hits.windows(2).all(|w| w[0].1.fraction < w[1].1.fraction));
         // A TRIGGER-group query sees only the sensor.
@@ -3189,7 +3245,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(index, 1);
+        assert_eq!(index, BodyHandle::from_index(1));
         assert_relative_eq!(hit.fraction, (8.0 - 6.5) / 10.0, epsilon = 1e-4);
         assert_relative_eq!(hit.normal.x, 1.0, epsilon = 1e-3);
     }
@@ -3219,7 +3275,7 @@ mod tests {
                 Vector3::new(5.0, 0.0, 0.0),
                 Quaternion::IDENTITY,
                 Vector3::new(0.0, 0.0, 0.0),
-                Some(0),
+                Some(BodyHandle::from_index(0)),
             )
             .is_none());
     }
@@ -3240,11 +3296,16 @@ mod tests {
         // x-extent [-1, 1]) but not the second.
         let hits = world.contact_test(&probe, Vector3::new(0.9, 0.0, 0.0), Quaternion::IDENTITY, None);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].0, 0);
+        assert_eq!(hits[0].0, BodyHandle::from_index(0));
         assert!(hits[0].1.points.iter().any(|p| p.penetration > 0.0));
         // The probe itself can be ignored.
         assert!(world
-            .contact_test(&probe, Vector3::new(0.9, 0.0, 0.0), Quaternion::IDENTITY, Some(0))
+            .contact_test(
+                &probe,
+                Vector3::new(0.9, 0.0, 0.0),
+                Quaternion::IDENTITY,
+                Some(BodyHandle::from_index(0)),
+            )
             .is_empty());
     }
 
@@ -3270,7 +3331,7 @@ mod tests {
             world.manifold_cache.values().flat_map(|m| m.points()).collect();
         assert!(!cached.is_empty());
         assert!(cached.iter().any(|c| c.normal_impulse > 0.0));
-        let sphere = world.body(1);
+        let sphere = world.body(BodyHandle::from_index(1));
         assert_relative_eq!(sphere.position.y, 0.5, epsilon = 0.05);
         assert!(sphere.linear_velocity.length() < 0.1);
     }
@@ -3361,7 +3422,7 @@ mod tests {
         for _ in 0..(3.0 / dt) as usize {
             world.step_simulation(dt);
         }
-        let sphere = world.body(1);
+        let sphere = world.body(BodyHandle::from_index(1));
         assert_eq!(sphere.activation_state(), ActivationState::IslandSleeping);
         assert_eq!(sphere.linear_velocity, Vector3::ZERO);
         let y_at_sleep = sphere.position.y;
@@ -3369,7 +3430,7 @@ mod tests {
         for _ in 0..60 {
             world.step_simulation(dt);
         }
-        assert_relative_eq!(world.body(1).position.y, y_at_sleep, epsilon = 1e-6);
+        assert_relative_eq!(world.body(BodyHandle::from_index(1)).position.y, y_at_sleep, epsilon = 1e-6);
     }
 
     /// A sleeping body whose island gains an active member is woken up
@@ -3393,7 +3454,7 @@ mod tests {
         for _ in 0..(3.0 / dt) as usize {
             world.step_simulation(dt);
         }
-        assert_eq!(world.body(1).activation_state(), ActivationState::IslandSleeping);
+        assert_eq!(world.body(BodyHandle::from_index(1)).activation_state(), ActivationState::IslandSleeping);
         // ...then a fast ball hits it: the sleeping sphere must wake up.
         world.add_body(RigidBody::new_dynamic(
             bullet_collision::shapes::CollisionShape::sphere(0.25),
@@ -3405,11 +3466,11 @@ mod tests {
             world.step_simulation(dt);
         }
         assert!(
-            world.body(1).is_active(),
+            world.body(BodyHandle::from_index(1)).is_active(),
             "sleeping body was not woken by the impact"
         );
         assert_ne!(
-            world.body(1).activation_state(),
+            world.body(BodyHandle::from_index(1)).activation_state(),
             ActivationState::IslandSleeping
         );
     }
@@ -3431,8 +3492,8 @@ mod tests {
         for _ in 0..(3.0 / dt) as usize {
             world.step_simulation(dt);
         }
-        world.body_mut(1).apply_force(Vector3::new(0.0, 5.0, 0.0));
-        assert_eq!(world.body(1).activation_state(), ActivationState::Active);
+        world.body_mut(BodyHandle::from_index(1)).apply_force(Vector3::new(0.0, 5.0, 0.0));
+        assert_eq!(world.body(BodyHandle::from_index(1)).activation_state(), ActivationState::Active);
     }
 
     /// Static bodies start asleep, like Bullet's static `btRigidBody`.
@@ -3479,9 +3540,9 @@ mod tests {
         let dt: Real = 1.0 / 60.0;
         world.step_simulation(dt);
         // The CCD ball is clamped at the wall's top surface (0.6 + 0.3).
-        assert_relative_eq!(world.body(1).position.y, 0.9, epsilon = 0.05);
+        assert_relative_eq!(world.body(BodyHandle::from_index(1)).position.y, 0.9, epsilon = 0.05);
         // The control ball crossed the whole wall.
-        assert!(world.body(2).position.y < -0.5);
+        assert!(world.body(BodyHandle::from_index(2)).position.y < -0.5);
     }
 
     /// CCD only sweeps when the per-step motion exceeds the threshold; slower
@@ -3505,7 +3566,7 @@ mod tests {
         );
         // Per-step motion 5/60 < threshold 1.0: plain integration, no clamp.
         world.step_simulation(1.0 / 60.0);
-        assert_relative_eq!(world.body(1).position.y, 1.0 - 5.0 / 60.0, epsilon = 1e-5);
+        assert_relative_eq!(world.body(BodyHandle::from_index(1)).position.y, 1.0 - 5.0 / 60.0, epsilon = 1e-5);
     }
 
     /// CCD skips pairs with suppressed collisions: Bullet's dispatcher
@@ -3531,13 +3592,18 @@ mod tests {
             .velocity(Vector3::new(0.0, -120.0, 0.0))
             .ccd(0.1, 0.3),
         );
-        let mut joint = Constraint::point2point(0, 1, Vector3::new(0.0, 0.5, 0.0), Vector3::new(0.0, -0.5, 0.0));
+        let mut joint = Constraint::point2point(
+            BodyHandle::from_index(0),
+            BodyHandle::from_index(1),
+            Vector3::new(0.0, 0.5, 0.0),
+            Vector3::new(0.0, -0.5, 0.0),
+        );
         joint.point2point_mut().set_impulse_clamp(0.001);
         world.add_constraint(joint);
         // The suppressed pair is not swept: the ball crosses the wall (the
         // unsuppressed control is `ccd_clamps_fast_bodies_at_the_impact`).
         world.step_simulation(1.0 / 60.0);
-        assert!(world.body(1).position.y < -0.5);
+        assert!(world.body(BodyHandle::from_index(1)).position.y < -0.5);
     }
 
     /// A fixed-base pendulum with a sphere collider on the link: the collider
@@ -3579,7 +3645,7 @@ mod tests {
         assert_relative_eq!(aabb.min.y, -1.52, epsilon = 1e-4);
         assert_relative_eq!(aabb.max.y, -0.48, epsilon = 1e-4);
         // Moving the base moves the collider with the next FK pass.
-        world.multibody_mut(0).base_pos = Vector3::new(0.0, 5.0, 0.0);
+        world.multibody_mut(MultiBodyHandle::from_index(0)).base_pos = Vector3::new(0.0, 5.0, 0.0);
         world.step_simulation(1.0 / 60.0);
         let aabb = world.broadphase.proxy_aabb(proxy).unwrap();
         assert_relative_eq!(aabb.min.y, 3.48, epsilon = 1e-4);
@@ -3614,11 +3680,11 @@ mod tests {
             // 2.5 s > the 2 s sleep timeout.
             world.step_simulation(1.0 / 60.0);
         }
-        assert!(!world.multibody(0).is_awake());
+        assert!(!world.multibody(MultiBodyHandle::from_index(0)).is_awake());
         let proxy = world.collider_entries[0].proxy.unwrap();
         let before = world.broadphase.proxy_aabb(proxy).unwrap();
         // Teleport the base: the sleeping body skips the AABB refresh.
-        world.multibody_mut(0).base_pos = Vector3::new(3.0, 0.0, 0.0);
+        world.multibody_mut(MultiBodyHandle::from_index(0)).base_pos = Vector3::new(3.0, 0.0, 0.0);
         world.step_simulation(1.0 / 60.0);
         let after = world.broadphase.proxy_aabb(proxy).unwrap();
         assert_eq!(before, after);
@@ -3825,7 +3891,7 @@ mod tests {
         for _ in 0..240 {
             world.step_simulation(dt);
         }
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         let q = body.joint_pos_multidof(0)[0];
         let qd = body.joint_vel_multidof(0)[0];
         assert!(q.abs() < 0.05, "pendulum did not settle hanging down: q = {q}");
@@ -3898,7 +3964,7 @@ mod tests {
         // plane and the frictionless box drifts with the contact details
         // (the persistent-manifold warm start shifts the trajectory within
         // this noise), so the direction check carries a small tolerance.
-        let box_end = world.body(1).position;
+        let box_end = world.body(BodyHandle::from_index(1)).position;
         assert!(
             (box_end - box_start).length() > 0.1,
             "box was not pushed: {box_end:?}"
@@ -3994,7 +4060,7 @@ mod tests {
         for _ in 0..240 {
             world.step_simulation(dt);
         }
-        let body = world.multibody(0);
+        let body = world.multibody(MultiBodyHandle::from_index(0));
         // The half-extent box rests on the plane: y ≈ 0.5 within the slop
         // tolerance, with a small residual velocity (damped settling).
         assert_relative_eq!(body.base_pos().y, 0.5, epsilon = 0.05);
@@ -4036,7 +4102,7 @@ mod tests {
             world.step_simulation(dt);
         }
         let ball_vy = world.body(ball).linear_velocity.y;
-        let mb_vy = world.multibody(0).base_vel().y;
+        let mb_vy = world.multibody(MultiBodyHandle::from_index(0)).base_vel().y;
         assert!(mb_vy < -1.5, "multibody was not kicked: {mb_vy}");
         // Equal-mass head-on, restitution 0: both sides leave at ~-3 m/s
         // (plus a small Baumgarte bounce that separates them slightly).
@@ -4073,15 +4139,15 @@ mod tests {
             world.step_simulation(dt);
         }
         // The whole island sleeps together.
-        assert!(!world.body(1).is_active(), "left box should sleep");
-        assert!(!world.body(2).is_active(), "right box should sleep");
+        assert!(!world.body(BodyHandle::from_index(1)).is_active(), "left box should sleep");
+        assert!(!world.body(BodyHandle::from_index(2)).is_active(), "right box should sleep");
         // Sleeping means frozen: further steps do not move either box.
-        let (pa, pb) = (world.body(1).position, world.body(2).position);
+        let (pa, pb) = (world.body(BodyHandle::from_index(1)).position, world.body(BodyHandle::from_index(2)).position);
         for _ in 0..60 {
             world.step_simulation(dt);
         }
-        assert!((world.body(1).position - pa).length() < 1e-9);
-        assert!((world.body(2).position - pb).length() < 1e-9);
+        assert!((world.body(BodyHandle::from_index(1)).position - pa).length() < 1e-9);
+        assert!((world.body(BodyHandle::from_index(2)).position - pb).length() < 1e-9);
         // A fast ball lands on the right box: the impact joins its island
         // and both boxes wake.
         world.add_body(
@@ -4095,8 +4161,8 @@ mod tests {
         for _ in 0..30 {
             world.step_simulation(dt);
         }
-        assert!(world.body(1).is_active(), "left box should wake with its island");
-        assert!(world.body(2).is_active(), "right box should wake with its island");
+        assert!(world.body(BodyHandle::from_index(1)).is_active(), "left box should wake with its island");
+        assert!(world.body(BodyHandle::from_index(2)).is_active(), "right box should wake with its island");
     }
 
     /// Phase D: a `DisableDeactivation` member keeps its whole island awake
@@ -4131,9 +4197,9 @@ mod tests {
         for _ in 0..(10.0 / dt) as usize {
             world.step_simulation(dt);
         }
-        assert!(world.body(1).is_active());
+        assert!(world.body(BodyHandle::from_index(1)).is_active());
         assert!(
-            world.body(2).is_active(),
+            world.body(BodyHandle::from_index(2)).is_active(),
             "neighbor of a disable-deactivation body must never sleep"
         );
     }
@@ -4197,7 +4263,7 @@ mod tests {
             world.step_simulation(dt);
         }
         assert!(world.body(ball).position.y > 0.4);
-        let ground_y = world.bodies()[ground].position.y;
+        let ground_y = world.bodies()[ground.index()].position.y;
         world.remove_body(ground);
         // With the ground gone the ball falls freely through the old plane.
         for _ in 0..30 {
@@ -4208,9 +4274,9 @@ mod tests {
             "ball must fall through the removed ground"
         );
         // The removed body itself is inert data.
-        assert_eq!(world.bodies()[ground].position.y, ground_y);
-        assert!(world.bodies()[ground].is_removed());
-        assert!(!world.bodies()[ground].is_active());
+        assert_eq!(world.bodies()[ground.index()].position.y, ground_y);
+        assert!(world.bodies()[ground.index()].is_removed());
+        assert!(!world.bodies()[ground.index()].is_active());
     }
 
     /// Removed bodies disappear from every world query (ray casts, sweeps,
@@ -4249,15 +4315,15 @@ mod tests {
             bullet_collision::shapes::CollisionShape::sphere(0.5),
             Vector3::new(3.0, 0.0, 0.0),
         ));
-        let freed = world.body_proxies[first];
+        let freed = world.body_proxies[first.index()];
         world.remove_body(first);
         // The new body reuses the freed proxy slot and gets a fresh body slot.
         let third = world.add_body(RigidBody::new_static(
             bullet_collision::shapes::CollisionShape::sphere(0.5),
             Vector3::new(1.0, 2.0, 0.0),
         ));
-        assert_eq!(third, 2);
-        assert_eq!(world.body_proxies[third], freed);
+        assert_eq!(third, BodyHandle::from_index(2));
+        assert_eq!(world.body_proxies[third.index()], freed);
         // Queries resolve to the right owners afterwards.
         let (index, _) = world
             .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
@@ -4397,8 +4463,8 @@ mod tests {
         }
         // B landed on the still-present ground; the indices never moved.
         assert_relative_eq!(world.body(b).position.y, 0.5, epsilon = 0.05);
-        assert_eq!(ground, 0);
-        assert!(world.bodies()[a].is_removed());
+        assert_eq!(ground, BodyHandle::from_index(0));
+        assert!(world.bodies()[a.index()].is_removed());
     }
 
     #[test]

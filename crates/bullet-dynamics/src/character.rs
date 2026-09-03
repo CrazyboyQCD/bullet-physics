@@ -17,6 +17,7 @@ use bullet_collision::shapes::CollisionShape;
 use bullet_math::{Quaternion, Real, Vector3};
 use bullet_math::compat::{quat_from_scaled_axis};
 
+use crate::handles::BodyHandle;
 use crate::world::PhysicsWorld;
 
 /// Kinematic character controller that slides along surfaces (Bullet's
@@ -24,8 +25,8 @@ use crate::world::PhysicsWorld;
 /// shape for the world queries; the matching body must be created by the user
 /// with the same shape and `RigidBody::new_static`.
 pub struct KinematicCharacterController {
-    /// The character's body index in the world.
-    body: usize,
+    /// The character's body handle in the world.
+    body: BodyHandle,
     shape: CollisionShape,
     /// Up direction (default `Vector3::Y`).
     up: Vector3,
@@ -65,7 +66,7 @@ pub struct KinematicCharacterController {
 impl KinematicCharacterController {
     /// Create a controller for the static body `body` (whose shape must match
     /// `shape`), with the given `step_height` and up axis.
-    pub fn new(body: usize, shape: CollisionShape, step_height: Real, up: Vector3) -> Self {
+    pub fn new(body: BodyHandle, shape: CollisionShape, step_height: Real, up: Vector3) -> Self {
         let up = if up.length_squared() > 0.0 { up.normalize() } else { Vector3::Y };
         Self {
             body,
