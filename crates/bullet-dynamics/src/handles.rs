@@ -22,6 +22,7 @@ use std::num::NonZeroU32;
 macro_rules! world_handle {
     ($doc:expr, $name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[repr(transparent)]
         #[doc = $doc]
         pub struct $name(NonZeroU32);
 
