@@ -3022,6 +3022,128 @@ mod tests {
         assert_eq!(world.body(detached).gravity(), Vector3::new(0.0, 5.0, 0.0));
     }
 
+    /// A composite "game moment" exercising the consumer-API tier together:
+    /// an anti-gravity balloon rises through a trigger volume (per-body
+    /// gravity + sensor events), a fast ball is CCD-clamped by a thin plate,
+    /// a filter-rejected pair overlaps without colliding, and the settled
+    /// state is probed with filtered all-hits rays.
+    #[test]
+    fn composite_consumer_scene() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+
+        let floor = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(20.0, 0.5, 20.0)),
+            Vector3::new(0.0, -0.5, 0.0),
+        ));
+        // The thin CCD target sits off the balloon's column (x >= 1) so the
+        // balloon rises unobstructed and the ray below sees only three
+        // bodies.
+        let _plate = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.5, 0.05, 1.5)),
+            Vector3::new(2.5, 1.0, 0.0),
+        ));
+        let sensor = world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 1.0, 1.0)),
+                Vector3::new(0.0, 2.0, 0.0),
+            )
+            .collision_filter(filter_groups::TRIGGER, filter_groups::ALL)
+            .no_contact_response(true)
+            .collision_events(true),
+        );
+        let pillar = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.4, 1.0, 0.4)),
+            Vector3::new(-2.0, 0.5, 0.0),
+        ));
+
+        // The balloon carries its own upward gravity, detached from the
+        // world propagation.
+        let mut balloon_body = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 0.6, 0.0),
+            1.0,
+        );
+        balloon_body.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+        balloon_body.set_gravity(Vector3::new(0.0, 3.0, 0.0));
+        let balloon = world.add_body(balloon_body);
+
+        // The fast ball drops at 30 m/s (a 0.5 m step) toward the
+        // 0.1-thick plate.
+        let mut fast_body = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.2),
+            Vector3::new(1.5, 8.0, 0.0),
+            1.0,
+        );
+        fast_body.linear_velocity = Vector3::new(0.0, -30.0, 0.0);
+        let fast = world.add_body(fast_body.ccd(0.05, 0.15));
+
+        // A ball starting inside the pillar: the pair filter lets it fall
+        // through and land on the floor instead of being pushed out.
+        let ghost = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(-2.0, 0.8, 0.0),
+            1.0,
+        ));
+        world.set_pair_filter(Some(Box::new(move |a, _: &RigidBody, b, _: &RigidBody| {
+            let (lo, hi) = (a.min(b), a.max(b));
+            !(lo == pillar.min(ghost) && hi == pillar.max(ghost))
+        })));
+
+        let mut saw_sensor_start = false;
+        for _ in 0..150 {
+            world.step_simulation(1.0 / 60.0);
+            for ev in world.contact_events() {
+                if matches!(ev, CollisionEvent::Started { sensor: true, .. }) {
+                    saw_sensor_start = true;
+                }
+            }
+        }
+
+        // The balloon rose through the sensor, which reported the touch.
+        assert!(world.body(balloon).position.y > 3.0);
+        assert!(saw_sensor_start);
+        // The fast ball was CCD-clamped onto the plate instead of reaching
+        // the floor below it.
+        let fast_y = world.body(fast).position.y;
+        assert!(fast_y > 0.9 && fast_y < 1.45, "fast ball at {fast_y}");
+        // The ghost ball fell through the pillar and rests on the floor,
+        // still overlapping the pillar's footprint.
+        let ghost_pos = world.body(ghost).position;
+        assert!((ghost_pos.x + 2.0).abs() < 1e-3);
+        assert!(ghost_pos.y > 0.2 && ghost_pos.y < 0.45, "ghost at {}", ghost_pos.y);
+
+        // The downward ray through the balloon's column reports every body
+        let hits = world.raycast_all(Vector3::new(0.0, 12.0, 0.0), Vector3::new(0.0, -5.0, 0.0));
+        let indices: Vec<usize> = hits.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, vec![balloon, sensor, floor]);
+        assert!(hits.windows(2).all(|w| w[0].1.fraction < w[1].1.fraction));
+        // A TRIGGER-group query sees only the sensor.
+        let trigger_only = RayFilter {
+            group: filter_groups::TRIGGER,
+            mask: filter_groups::TRIGGER,
+        };
+        let hits = world.raycast_all_filtered(
+            Vector3::new(0.0, 12.0, 0.0),
+            Vector3::new(0.0, -5.0, 0.0),
+            trigger_only,
+        );
+        assert_eq!(
+            hits.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![sensor]
+        );
+        assert_eq!(
+            world
+                .raycast_closest_filtered(
+                    Vector3::new(0.0, 12.0, 0.0),
+                    Vector3::new(0.0, -5.0, 0.0),
+                    trigger_only,
+                )
+                .map(|(i, _)| i),
+            Some(sensor)
+        );
+    }
+
     /// The broad-phase AABB test is conservative: a ray crossing a proxy's
     /// AABB corner must not produce a hit when the exact shape test misses.
     #[test]
