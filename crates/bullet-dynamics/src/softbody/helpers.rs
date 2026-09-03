@@ -243,7 +243,9 @@ pub fn create_from_convex_hull(vertices: &[Vector3]) -> SoftBody {
 pub fn create_from_tri_mesh(vertices: &[Vector3], triangles: &[u32]) -> SoftBody {
     let masses = vec![0.0 as Real; vertices.len()];
     let mut psb = SoftBody::new(vertices, &masses);
-    let mut seen = std::collections::HashSet::new();
+    // BTreeSet (alloc, no hasher) instead of HashSet: one less std-type to
+    // shed for no_std, same dedup semantics at modeling-time sizes.
+    let mut seen = std::collections::BTreeSet::new();
     let (triangles, _) = triangles.as_chunks::<3>();
     for t in triangles {
         let idx = [t[0] as usize, t[1] as usize, t[2] as usize];

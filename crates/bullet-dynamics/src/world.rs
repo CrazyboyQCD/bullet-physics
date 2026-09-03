@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::hash::{BuildHasherDefault, Hasher};
 use std::time::{Duration, Instant};
 
 use bullet_collision::broadphase::{BroadPhase, BroadPhaseBackend};
@@ -22,49 +19,20 @@ use crate::softbody::{AngularJointSpecs, LinearJointSpecs, Side, SoftBody};
 use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
 use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, SLOP, SPLIT_TURN_ERP};
 
-/// FxHash-style hasher (rustc's `FxHashMap` recipe) for the pair-keyed maps
-/// below: the keys are `(usize, usize)` proxy pairs looked up several times
-/// per broad-phase pair per step (mark/refresh/seed/writeback — ~24k lookups
-/// on the 1000-body stack), where SipHash's collision-resistance is pure
-/// overhead (the SipHash of `RandomState` measured ~12% of the step
-/// inclusive; a multiply-xor-rotate mix is collision-safe enough for index
-/// pairs and several times cheaper). The hash only picks the bucket — every
-/// consumer keys its access, so lookups stay semantically identical.
+/// One entry of the persistent-manifold cache: the owning broad-phase pair
+/// plus the manifold itself. The cache is an adjacency structure — one
+/// bucket per body (indexed by `min(a, b)`, each entry naming the other
+/// side) — because contact pairs are strongly local: a body only ever
+/// holds cached manifolds against its few neighbours, so bucket-linear
+/// lookups stay at a handful of comparisons while insertions and removals
+/// never shift the large manifold entries around (a sorted array's
+/// memmove-per-churn measured +21% on the 1000-body stack).
 #[derive(Default)]
-struct FxHasher {
-    hash: u64,
+struct ManifoldCacheEntry {
+    /// The other body of the pair.
+    other: usize,
+    manifold: PersistentManifold,
 }
-
-const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-
-impl Hasher for FxHasher {
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        // Byte-wise fallback; never hit by the usize-only pair keys.
-        for &b in bytes {
-            self.add_to_hash(b as u64);
-        }
-    }
-
-    #[inline]
-    fn write_usize(&mut self, i: usize) {
-        self.add_to_hash(i as u64);
-    }
-
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-}
-
-impl FxHasher {
-    #[inline]
-    fn add_to_hash(&mut self, i: u64) {
-        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(FX_SEED);
-    }
-}
-
-type FxBuild = BuildHasherDefault<FxHasher>;
 
 /// Every broad-phase AABB is padded by the global contact-breaking
 /// threshold (Bullet's `btCollisionWorld::updateSingleAabb` — "need to
@@ -257,7 +225,11 @@ pub struct PhysicsWorld {
     /// pairs that drifted past the redetect thresholds re-run the narrow
     /// phase. Entries whose broad-phase pair disappeared are dropped at the
     /// end of the step (Bullet destroys the manifold with the pair).
-    manifold_cache: HashMap<(usize, usize), PersistentManifold, FxBuild>,
+    /// Adjacency layout: `manifold_cache[min(i, j)]` holds the entries of
+    /// every pair `(i, j)` (see [`ManifoldCacheEntry`]). The hash-based
+    /// layout this replaces matched Bullet's hand-rolled integer-pair hash;
+    /// the buckets serve the same lookups without the hash + a dependency.
+    manifold_cache: Vec<Vec<ManifoldCacheEntry>>,
     /// Solver contact rows of the current step, pooled across steps (the
     /// capacity survives `clear`, so the steady state allocates nothing).
     contact_rows: Vec<ContactConstraint>,
@@ -286,8 +258,8 @@ pub struct PhysicsWorld {
     constraints: Vec<Constraint>,
     /// Body pairs whose collision response is suppressed by a joint
     /// (`disableCollisionsBetweenLinkedBodies`, Bullet's
-    /// `checkCollideWithOverride`), sorted `(min, max)`.
-    no_collision_pairs: HashSet<(usize, usize), FxBuild>,
+    /// `checkCollideWithOverride`), sorted `(min, max)`, deduplicated.
+    no_collision_pairs: Vec<(usize, usize)>,
     /// Opt-in pairs that touched last step, sorted (`[min, max]` body
     /// indices): the baseline of the Started/Stopped diff.
     prev_touching: Vec<[u32; 2]>,
@@ -376,7 +348,7 @@ impl PhysicsWorld {
             broadphase,
             gravity: Vector3::new(0.0, -9.81, 0.0),
             iterations: 10,
-            manifold_cache: HashMap::with_hasher(FxBuild::default()),
+            manifold_cache: Vec::new(),
             contact_rows: Vec::new(),
             joint_rows: Vec::new(),
             predicted_poses: Vec::new(),
@@ -386,7 +358,7 @@ impl PhysicsWorld {
             prev_simulate: false,
             pair_filter: None,
             constraints: Vec::new(),
-            no_collision_pairs: HashSet::with_hasher(FxBuild::default()),
+            no_collision_pairs: Vec::new(),
             prev_touching: Vec::new(),
             touching: Vec::new(),
             contact_events: Vec::new(),
@@ -554,8 +526,12 @@ impl PhysicsWorld {
         // body panics instead of writing a recycled proxy.
         self.body_proxies[index] = usize::MAX;
         self.bodies[index].mark_removed();
-        self.manifold_cache
-            .retain(|&(i, j), _| i != index && j != index);
+        for bucket in &mut self.manifold_cache {
+            bucket.retain(|e| e.other != index);
+        }
+        if let Some(bucket) = self.manifold_cache.get_mut(index) {
+            bucket.clear();
+        }
         self.constraints.retain(|c| {
             c.body_a().index() != index && c.body_b().index() != index
         });
@@ -609,7 +585,7 @@ impl PhysicsWorld {
         for c in &self.constraints {
             if c.disable_collisions() {
                 let (a, b) = (c.body_a().index(), c.body_b().index());
-                self.no_collision_pairs.insert((a.min(b), a.max(b)));
+                Self::insert_suppressed(&mut self.no_collision_pairs, a, b);
             }
         }
     }
@@ -628,6 +604,81 @@ impl PhysicsWorld {
     /// empty.
     pub fn take_contact_events(&mut self) -> Vec<CollisionEvent> {
         std::mem::take(&mut self.contact_events)
+    }
+
+    /// Insert into the sorted, deduplicated suppression set. A free
+    /// associated function so callers can borrow `self.constraints` and
+    /// `self.no_collision_pairs` disjointly inside rebuild loops.
+    fn insert_suppressed(set: &mut Vec<(usize, usize)>, a: usize, b: usize) {
+        let pair = (a.min(b), a.max(b));
+        if let Err(pos) = set.binary_search(&pair) {
+            set.insert(pos, pair);
+        }
+    }
+
+    /// Binary-search the manifold cache: `Ok(index)` when the pair has a
+    /// cached manifold, `Err(insert position)` otherwise. Associated
+    /// functions taking the cache directly (instead of `&self`/`&mut self`)
+    /// so callers can borrow `self.bodies` / `self.refresh_out` /
+    /// `self.manifold_cache` disjointly inside the pair pass.
+    fn cache_get(
+        cache: &[Vec<ManifoldCacheEntry>],
+        a: usize,
+        b: usize,
+    ) -> Option<&PersistentManifold> {
+        let (lo, hi) = (a.min(b), a.max(b));
+        cache
+            .get(lo)?
+            .iter()
+            .find(|e| e.other == hi)
+            .map(|e| &e.manifold)
+    }
+
+    fn cache_get_mut(
+        cache: &mut [Vec<ManifoldCacheEntry>],
+        a: usize,
+        b: usize,
+    ) -> Option<&mut PersistentManifold> {
+        let (lo, hi) = (a.min(b), a.max(b));
+        cache
+            .get_mut(lo)?
+            .iter_mut()
+            .find(|e| e.other == hi)
+            .map(|e| &mut e.manifold)
+    }
+
+    /// The pair's cached manifold, inserting an empty one on first touch
+    /// (the `entry().or_default()` of the hash version). New entries append
+    /// to the bucket — membership, not order, is what the cache serves.
+    fn cache_entry_default(
+        cache: &mut Vec<Vec<ManifoldCacheEntry>>,
+        a: usize,
+        b: usize,
+    ) -> &mut PersistentManifold {
+        let (lo, hi) = (a.min(b), a.max(b));
+        if lo >= cache.len() {
+            cache.resize_with(lo + 1, Vec::new);
+        }
+        let bucket = &mut cache[lo];
+        match bucket.iter().position(|e| e.other == hi) {
+            Some(slot) => &mut bucket[slot].manifold,
+            None => {
+                bucket.push(ManifoldCacheEntry {
+                    other: hi,
+                    manifold: PersistentManifold::default(),
+                });
+                &mut bucket.last_mut().expect("just pushed").manifold
+            }
+        }
+    }
+
+    /// Drop the pair's entry, if cached (Bullet destroys the manifold with
+    /// the pair). Bucket-linear, like the lookups.
+    fn cache_remove(cache: &mut [Vec<ManifoldCacheEntry>], a: usize, b: usize) {
+        let (lo, hi) = (a.min(b), a.max(b));
+        if let Some(bucket) = cache.get_mut(lo) {
+            bucket.retain(|e| e.other != hi);
+        }
     }
 
     /// Whether either body of the pair is a trigger volume
@@ -1149,8 +1200,11 @@ impl PhysicsWorld {
     /// default, see [`Constraint::set_disable_collisions`]).
     pub fn add_constraint(&mut self, constraint: Constraint) -> usize {
         if constraint.disable_collisions() {
-            let (a, b) = (constraint.body_a().index(), constraint.body_b().index());
-            self.no_collision_pairs.insert((a.min(b), a.max(b)));
+            Self::insert_suppressed(
+                &mut self.no_collision_pairs,
+                constraint.body_a().index(),
+                constraint.body_b().index(),
+            );
         }
         self.constraints.push(constraint);
         self.constraints.len() - 1
@@ -1176,7 +1230,7 @@ impl PhysicsWorld {
         for c in &self.constraints {
             if c.disable_collisions() {
                 let (a, b) = (c.body_a().index(), c.body_b().index());
-                self.no_collision_pairs.insert((a.min(b), a.max(b)));
+                Self::insert_suppressed(&mut self.no_collision_pairs, a, b);
             }
         }
     }
@@ -1499,7 +1553,8 @@ impl PhysicsWorld {
                 });
                 continue;
             };
-            if self.no_collision_pairs.contains(&(i.min(j), i.max(j)))
+            let pair = (i.min(j), i.max(j));
+            if self.no_collision_pairs.binary_search(&pair).is_ok()
                 || self.bodies[i].collision_group & self.bodies[j].collision_mask == 0
                 || self.bodies[j].collision_group & self.bodies[i].collision_mask == 0
             {
@@ -1523,7 +1578,7 @@ impl PhysicsWorld {
             // overlap), matching Bullet's persistent manifolds on a
             // sleeping island.
             if simulate
-                && let Some(cache) = self.manifold_cache.get_mut(&(i, j))
+                && let Some(cache) = Self::cache_get_mut(&mut self.manifold_cache, i, j)
             {
                 cache.mark_paired(stamp);
             }
@@ -1566,7 +1621,7 @@ impl PhysicsWorld {
             let fast = self.settled_speeds[i] > REDETECT_SPEED_SQUARED
                 || self.settled_speeds[j] > REDETECT_SPEED_SQUARED;
             let mut served_from_cache = false;
-            if let Some(cache) = self.manifold_cache.get_mut(&(i, j))
+            if let Some(cache) = Self::cache_get_mut(&mut self.manifold_cache, i, j)
                 && !cache.needs_redetect(pa, a.orientation, pb, b.orientation)
             {
                 // Refresh path: re-project the cached anchors, drop points
@@ -1601,10 +1656,8 @@ impl PhysicsWorld {
             if served_from_cache {
                 continue;
             }
-            let seed = self
-                .manifold_cache
-                .get(&(i, j))
-                .and_then(PersistentManifold::seed);
+            let seed =
+                Self::cache_get(&self.manifold_cache, i, j).and_then(PersistentManifold::seed);
             if let Some(manifold) = narrowphase::collide_seeded(
                 &a.shape,
                 pa,
@@ -1625,7 +1678,7 @@ impl PhysicsWorld {
                 // its single first-touch point to the full four-corner
                 // support set (see the flat-box probe notes). Stamp the
                 // new entry right away so this step's prune keeps it.
-                let cache = self.manifold_cache.entry((i, j)).or_default();
+                let cache = Self::cache_entry_default(&mut self.manifold_cache, i, j);
                 cache.mark_paired(stamp);
                 let threshold = a
                     .shape
@@ -1646,7 +1699,7 @@ impl PhysicsWorld {
             } else {
                 // Detection found nothing: the pair separated past the
                 // breaking threshold — drop the cache entry entirely.
-                self.manifold_cache.remove(&(i, j));
+                Self::cache_remove(&mut self.manifold_cache, i, j);
             }
         }
 
@@ -1747,20 +1800,37 @@ impl PhysicsWorld {
         // `m_appliedImpulse` on the manifold point), and drop cache entries
         // whose broad-phase pair disappeared this step (Bullet destroys the
         // manifold when the pair dies).
+        // Rows arrive grouped by pair (the pair pass walks pairs in order),
+        // so re-locating the cache entry once per pair keeps the writeback
+        // at one bucket scan per pair instead of one per contact row.
+        let mut located: Option<((usize, usize), usize, usize)> = None;
         for c in &contact_rows {
             if c.point_index == u32::MAX {
                 continue;
             }
-            if let Some(point) = self
-                .manifold_cache
-                .get_mut(&(c.body_a, c.body_b))
-                .and_then(|m| m.point_mut(c.point_index as usize))
+            let pair = (c.body_a, c.body_b);
+            if located.as_ref().is_none_or(|&(p, _, _)| p != pair) {
+                let (lo, hi) = (pair.0.min(pair.1), pair.0.max(pair.1));
+                located = self
+                    .manifold_cache
+                    .get(lo)
+                    .and_then(|bucket| bucket.iter().position(|e| e.other == hi))
+                    .map(|slot| (pair, lo, slot));
+            }
+            let Some(&(_, lo, slot)) = located.as_ref() else {
+                continue;
+            };
+            if let Some(point) = self.manifold_cache[lo][slot]
+                .manifold
+                .point_mut(c.point_index as usize)
             {
                 point.normal_impulse = c.normal_impulse;
             }
         }
         if prune {
-            self.manifold_cache.retain(|_, m| m.paired_at(stamp));
+            for bucket in &mut self.manifold_cache {
+                bucket.retain(|e| e.manifold.paired_at(stamp));
+            }
         }
         self.contact_rows = contact_rows;
         self.joint_rows = joint_rows;
@@ -1825,7 +1895,7 @@ impl PhysicsWorld {
                     // Joint-linked pairs with suppressed collisions skip the
                     // sweep as well (Bullet's dispatcher `needsCollision` →
                     // `checkCollideWithOverride` gates the CCD sweep too).
-                    if self.no_collision_pairs.contains(&(i.min(j), i.max(j))) {
+                    if self.no_collision_pairs.binary_search(&(i.min(j), i.max(j))).is_ok() {
                         continue;
                     }
                     // The group/mask filter gates the CCD sweep too, like
@@ -3327,8 +3397,12 @@ mod tests {
         for _ in 0..90 {
             world.step_simulation(1.0 / 60.0);
         }
-        let cached: Vec<&bullet_collision::manifold::PersistentPoint> =
-            world.manifold_cache.values().flat_map(|m| m.points()).collect();
+        let cached: Vec<&bullet_collision::manifold::PersistentPoint> = world
+            .manifold_cache
+            .iter()
+            .flatten()
+            .flat_map(|e| e.manifold.points())
+            .collect();
         assert!(!cached.is_empty());
         assert!(cached.iter().any(|c| c.normal_impulse > 0.0));
         let sphere = world.body(BodyHandle::from_index(1));
@@ -3368,8 +3442,9 @@ mod tests {
         // reports actual penetration.
         let points: Vec<bullet_collision::manifold::PersistentPoint> = world
             .manifold_cache
-            .values()
-            .flat_map(|m| m.points().to_vec())
+            .iter()
+            .flatten()
+            .flat_map(|e| e.manifold.points().to_vec())
             .collect();
         assert!(points.iter().any(|p| p.penetration < 0.0));
     }
