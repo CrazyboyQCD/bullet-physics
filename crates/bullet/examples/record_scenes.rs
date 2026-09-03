@@ -17,7 +17,8 @@
 use std::fs::File;
 use std::io::Write;
 
-use bullet::dynamics::{PhysicsWorld, RigidBody};
+use bullet::dynamics::body::RayFilter;
+use bullet::dynamics::{CollisionFlags, PhysicsWorld, RigidBody};
 use bullet::math::{Real, Vector3};
 use bullet::shapes::CollisionShape;
 
@@ -43,6 +44,32 @@ fn main() {
         spec.gravity[2] as Real,
     ));
     world.set_iterations(spec.iterations);
+
+    // Pair filter (optional): exclude the named pair from collision, same
+    // one-layer gate (group & mask, then the exclusion) as the C++ recorder's
+    // broadphase callback.
+    if let Some((a_name, b_name)) = spec.pair_filter {
+        let mut ia = None;
+        let mut ib = None;
+        for (i, b) in spec.bodies.iter().enumerate() {
+            if b.name == a_name {
+                ia = Some(i);
+            }
+            if b.name == b_name {
+                ib = Some(i);
+            }
+        }
+        let (Some(ia), Some(ib)) = (ia, ib) else {
+            eprintln!("record_scenes: pair_filter body not found");
+            std::process::exit(2);
+        };
+        let (lo, hi) = (ia.min(ib), ia.max(ib));
+        world.set_pair_filter(Some(Box::new(
+            move |a: usize, _: &RigidBody, b: usize, _: &RigidBody| {
+                !(a.min(b) == lo && a.max(b) == hi)
+            },
+        )));
+    }
 
     // Build bodies; remember the index of each body whose trajectory is
     // recorded (scene bodies are added in spec order, matching the C++ side).
@@ -93,6 +120,20 @@ fn main() {
                 b.ccd_swept_sphere_radius as Real,
             );
         }
+        // Consumer-API fields, set before add_body like the C++ recorder
+        // (flags first so the add-time world-gravity sync respects them).
+        if b.no_contact_response {
+            body = body.no_contact_response(true);
+        }
+        if b.disable_world_gravity {
+            body.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+            body.set_gravity(Vector3::new(
+                b.body_gravity[0] as Real,
+                b.body_gravity[1] as Real,
+                b.body_gravity[2] as Real,
+            ));
+        }
+        body = body.collision_filter(b.group, b.mask);
         world.add_body(body);
         if spec.record.contains(&b.name) {
             record_idx.push(i);
@@ -120,6 +161,36 @@ fn main() {
             writeln!(out[k], "{line} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
                      p.x, p.y, p.z, q.x, q.y, q.z, q.w)
                 .expect("write csv");
+        }
+    }
+
+    // Rays (probed once after the last frame): one line per hit in
+    // <scene>_rays_<suffix>.csv - ray_idx body_idx fraction, sorted by
+    // fraction (raycast_all already reports nearest-first; the sort keeps the
+    // contract explicit and mirrors the C++ recorder).
+    if !spec.rays.is_empty() {
+        let fname = format!("{scene_name}_rays_{suffix}.csv");
+        let mut rf = File::create(&fname).unwrap_or_else(|e| {
+            eprintln!("record_scenes: cannot open {fname}: {e}");
+            std::process::exit(2);
+        });
+        for (i, r) in spec.rays.iter().enumerate() {
+            let from = Vector3::new(r.from[0] as Real, r.from[1] as Real, r.from[2] as Real);
+            let to = Vector3::new(r.to[0] as Real, r.to[1] as Real, r.to[2] as Real);
+            let filter = RayFilter { group: r.group, mask: r.mask };
+            if r.all_hits {
+                let mut hits: Vec<(usize, Real)> = world
+                    .raycast_all_filtered(from, to, filter)
+                    .into_iter()
+                    .map(|(idx, hit)| (idx, hit.fraction))
+                    .collect();
+                hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                for (idx, fraction) in hits {
+                    writeln!(rf, "{i} {idx} {fraction:.6}").expect("write csv");
+                }
+            } else if let Some((idx, hit)) = world.raycast_closest_filtered(from, to, filter) {
+                writeln!(rf, "{i} {idx} {:.6}", hit.fraction).expect("write csv");
+            }
         }
     }
 }

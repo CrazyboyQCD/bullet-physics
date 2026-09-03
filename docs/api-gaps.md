@@ -8,6 +8,13 @@ context in `api-usability.md` §2. Each entry carries an implementation
 sketch (verified against the codebase 2026-09-02); sizes are S ≤ one
 session, M a couple, L a dedicated round.
 
+Verification note (2026-09-03): the landed consumer-API tier is covered
+by the `composite_consumer` parity scene against real Bullet (trigger +
+per-body gravity + pair filter + CCD + filtered all-hits/closest rays in
+one scene; impact transients classified under the predicted-pose
+trade-off, rest states and ray probes exact) — see
+`docs/bullet-compare.md` and `docs/parity-harness.md`.
+
 Legend: **Impl** = core logic · **Files** = touched modules · **Risk** =
 performance traps / API debates / upstream-semantics gaps · **Size** =
 S/M/L · **See** = existing notes.

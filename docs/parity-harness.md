@@ -1,8 +1,9 @@
 # Parity Harness — frame-by-frame numerical comparison with Bullet
 
 > Design for verifying that this Rust reimplementation reproduces Bullet's
-> behavior numerically, not just semantically. All six scenes are landed in
-> both precisions (f32 + f64 pairs, 2026-08-14); see `docs/bullet-compare.md`
+> behavior numerically, not just semantically. All seven scenes are landed in
+> both precisions (f32 + f64 pairs, 2026-08-14; `composite_consumer`
+> 2026-09-03); see `docs/bullet-compare.md`
 > for the ledger. This document records the harness design and run protocol.
 
 ## Goal and key preconditions
@@ -46,14 +47,32 @@ docs/
   (shapes/poses/masses/friction/restitution, dt as a fraction, iterations,
   recorded bodies); `tools/generate_scenes.py` derives the C++ and Rust scene
   tables, so the two recorders can never drift apart. Current scenes:
-  `falling_box`, `falling_capsule`, `stacking`, `mesh`, `ccd`, `sleeping`
-  (all landed in both precisions).
+  `falling_box`, `falling_capsule`, `stacking`, `mesh`, `ccd`, `sleeping`,
+  `composite_consumer` (all landed in both precisions).
   Adding a scene = one JSON block + a parity run + a classification entry.
+  Consumer-API scene fields (all optional, ignored by scenes that omit them):
+  body `gravity[x,y,z]` (implies `DISABLE_WORLD_GRAVITY`), body
+  `no_contact_response`, body `group`/`mask` (`-1` = all), scene
+  `pair_filter [nameA, nameB]`, and scene `rays` probes
+  (`from`/`to`/`mode all|closest`/`group`/`mask`).
 - **Output format**: one line per frame,
   `t px py pz qx qy qz qw` (10 columns, `%.6f`), redirected to
-  `*_bullet.csv` / `*_rust.csv`.
-- **Tolerance**: position `1e-2`, orientation angle `1e-2` (f32 reachability).
-  Exceedances are logged, not auto-failed — differences are collected first.
+  `*_bullet.csv` / `*_rust.csv`. Scenes with rays additionally write
+  `<scene>_rays_*.csv`, one line per hit, `ray_idx body_idx fraction`
+  (`%.6f`), sorted by fraction — the C++ `AllHitsRayResultCallback`
+  collects in broadphase pair order, so the recorder sorts to match the
+  Rust recorder's nearest-first order.
+- **Tolerance**: position `1e-2`, orientation angle `1e-2`, ray fraction
+  `1e-3` (f32 reachability). Exceedances are logged, not auto-failed —
+  differences are collected first.
+- **Consumer-API alignment notes**: the C++ side attaches the pair filter as
+  a `btOverlapFilterCallback` on the broadphase pair cache — upstream
+  *replaces* the default group/mask test, so the callback re-does it before
+  the exclusion, matching the Rust one-layer gate (the dispatcher's
+  `needsCollision` still tests group & mask a second time). Collision
+  events (`Started`/`Stopped`) are a Rapier-style surface with no Bullet
+  counterpart, so they stay covered by Rust unit tests only, not this
+  harness.
 
 ## Difference classification
 

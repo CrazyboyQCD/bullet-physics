@@ -1,5 +1,5 @@
 {
-  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/src/parity_scenes.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant), mesh(grid[nx,nz], origin[x0,z0], cell[dx,dz], heights[nx*nz] in z-major order; indices derived with the falling_mesh winding). Body fields: mass (0 = static), friction, restitution, position, optional velocity[vx,vy,vz] (initial linear velocity) and ccd{motion_threshold, swept_sphere_radius}.",
+  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/src/parity_scenes.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant), mesh(grid[nx,nz], origin[x0,z0], cell[dx,dz], heights[nx*nz] in z-major order; indices derived with the falling_mesh winding). Body fields: mass (0 = static), friction, restitution, position, optional velocity[vx,vy,vz] (initial linear velocity) and ccd{motion_threshold, swept_sphere_radius}. Consumer-API body fields (all optional): gravity[x,y,z] (implies DISABLE_WORLD_GRAVITY: the body keeps its own gravity detached from world propagation), no_contact_response (true = trigger/sensor, CF_NO_CONTACT_RESPONSE), group/mask (collision filter group & mask, -1 = all; default group 1 / mask -1). Consumer-API scene fields (optional): pair_filter [nameA, nameB] (this pair is excluded from collision, btOverlapFilterCallback style), rays [{from, to, mode 'all'|'closest', group, mask}] (probed once after the last frame, recorded to <scene>_rays_*.csv: ray_idx body_idx fraction, sorted by fraction).",
   "scenes": {
     "falling_box": {
       "dt": [
@@ -604,6 +604,201 @@
         "b2",
         "b3",
         "ball"
+      ]
+    },
+    "composite_consumer": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 150,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -10,
+        0
+      ],
+      "pair_filter": [
+        "pillar",
+        "ghost"
+      ],
+      "bodies": [
+        {
+          "name": "floor",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              20,
+              0.5,
+              20
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "plate",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              1.5,
+              0.05,
+              1.5
+            ]
+          },
+          "position": [
+            2.5,
+            1.0,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "sensor",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              1,
+              1,
+              1
+            ]
+          },
+          "position": [
+            0,
+            2.0,
+            0
+          ],
+          "mass": 0,
+          "group": 16,
+          "mask": -1,
+          "no_contact_response": true
+        },
+        {
+          "name": "pillar",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.4,
+              1,
+              0.4
+            ]
+          },
+          "position": [
+            -2,
+            0.5,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "balloon",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.3
+          },
+          "position": [
+            0,
+            0.6,
+            0
+          ],
+          "mass": 1,
+          "gravity": [
+            0,
+            3,
+            0
+          ]
+        },
+        {
+          "name": "fast",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.2
+          },
+          "position": [
+            1.5,
+            8,
+            0
+          ],
+          "mass": 1,
+          "velocity": [
+            0,
+            -30,
+            0
+          ],
+          "ccd": {
+            "motion_threshold": 0.05,
+            "swept_sphere_radius": 0.15
+          }
+        },
+        {
+          "name": "ghost",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.3
+          },
+          "position": [
+            -2,
+            0.8,
+            0
+          ],
+          "mass": 1
+        }
+      ],
+      "record": [
+        "balloon",
+        "fast",
+        "ghost"
+      ],
+      "rays": [
+        {
+          "from": [
+            0,
+            12,
+            0
+          ],
+          "to": [
+            0,
+            -5,
+            0
+          ],
+          "mode": "all",
+          "group": 1,
+          "mask": -1
+        },
+        {
+          "from": [
+            0,
+            12,
+            0
+          ],
+          "to": [
+            0,
+            -5,
+            0
+          ],
+          "mode": "all",
+          "group": 16,
+          "mask": 16
+        },
+        {
+          "from": [
+            0,
+            12,
+            0
+          ],
+          "to": [
+            0,
+            -5,
+            0
+          ],
+          "mode": "closest",
+          "group": 16,
+          "mask": 16
+        }
       ]
     }
   }

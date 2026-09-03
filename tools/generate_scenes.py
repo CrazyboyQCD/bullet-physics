@@ -117,7 +117,17 @@ def gen_c(scenes):
         "  btScalar velocity[3];",
         "  int ccd_on;",
         "  btScalar ccd_motion_threshold, ccd_swept_sphere_radius;",
+        "  btScalar body_gravity[3];  // per-body gravity (implies disable_world_gravity)",
+        "  int disable_world_gravity;  // BT_DISABLE_WORLD_GRAVITY: detach from world gravity",
+        "  int no_contact_response;  // CF_NO_CONTACT_RESPONSE: trigger/sensor",
+        "  int group, mask;  // collision filter; addRigidBody(body, group, mask)",
         "  const MeshSpec* mesh;  // non-null only for SHAPE_MESH",
+        "};",
+        "",
+        "struct RaySpec {",
+        "  btScalar from[3], to[3];",
+        "  int all_hits;  // 1 = all-hits probe, 0 = closest",
+        "  int group, mask;  // ray filter (RayResultCallback::needsCollision order)",
         "};",
         "",
         "struct SceneSpec {",
@@ -130,6 +140,9 @@ def gen_c(scenes):
         "  int frames;",
         "  int iterations;",
         "  btScalar gravity[3];",
+        "  const char* const* pair_filter;  // {nameA, nameB} excluded pair, or null",
+        "  int num_rays;",
+        "  const RaySpec* rays;",
         "};",
         "",
     ]
@@ -167,19 +180,46 @@ def gen_c(scenes):
             ccd_mt = ccd.get("motion_threshold", 0.0) if ccd else 0.0
             ccd_sr = ccd.get("swept_sphere_radius", 0.0) if ccd else 0.0
             mesh_ref = f"&k{name}_{b['name']}_mesh" if t == "mesh" else "nullptr"
+            bg = b.get("gravity")
+            dwg = 1 if bg else 0
+            bg_s = ", ".join(f"btScalar({fmt(x)})" for x in (bg if bg else [0.0, 0.0, 0.0]))
+            ncr = 1 if b.get("no_contact_response") else 0
+            grp = b.get("group", 1)
+            msk = b.get("mask", -1)
             lines.append(f"  {{\"{b['name']}\", {SHAPE_ENUM[t]}, {{{p}}}, {{{pos}}}, "
                          f"btScalar({mass}), btScalar({fr}), btScalar({re}), {st}, "
                          f"{{{vel_s}}}, {ccd_on}, btScalar({fmt(ccd_mt)}), "
-                         f"btScalar({fmt(ccd_sr)}), {mesh_ref}}},")
+                         f"btScalar({fmt(ccd_sr)}), {{{bg_s}}}, {dwg}, {ncr}, {grp}, {msk}, "
+                         f"{mesh_ref}}},")
         lines.append("};")
         lines.append("")
         rec = ", ".join(f"\"{r}\"" for r in sc["record"])
         dt_num, dt_den = sc["dt"]
         g = ", ".join(fmt(x) for x in sc["gravity"])
         lines.append(f"static const char* const k{name}_record[] = {{{rec}}};")
+        pf = sc.get("pair_filter")
+        if pf:
+            lines.append(f"static const char* const k{name}_pair_filter[] = "
+                         f"{{ \"{pf[0]}\", \"{pf[1]}\" }};")
+        pf_ref = f"k{name}_pair_filter" if pf else "nullptr"
+        rays = sc.get("rays", [])
+        if rays:
+            lines.append(f"static const RaySpec k{name}_rays[] = {{")
+            for r in rays:
+                if r["mode"] not in ("all", "closest"):
+                    raise ValueError(f"bad ray mode {r['mode']!r}")
+                fr = ", ".join(f"btScalar({fmt(x)})" for x in r["from"])
+                to = ", ".join(f"btScalar({fmt(x)})" for x in r["to"])
+                mode = 1 if r["mode"] == "all" else 0
+                rgrp = r.get("group", 1)
+                rmsk = r.get("mask", -1)
+                lines.append(f"  {{{{{fr}}}, {{{to}}}, {mode}, {rgrp}, {rmsk}}},")
+            lines.append("};")
+        rays_ref = f"k{name}_rays" if rays else "nullptr"
         lines.append(f"static const SceneSpec k{name} = {{\"{name}\", {len(sc['bodies'])}, k{name}_bodies, "
                      f"{len(sc['record'])}, k{name}_record, {dt_num}, {dt_den}, "
-                     f"{sc['frames']}, {sc['iterations']}, {{{g}}}}};")
+                     f"{sc['frames']}, {sc['iterations']}, {{{g}}}, "
+                     f"{pf_ref}, {len(rays)}, {rays_ref}}};")
         lines.append("")
     lines.append("static const SceneSpec* kScenes[] = {")
     for name in scenes:
@@ -219,6 +259,19 @@ def gen_rs(scenes):
         "    pub ccd_on: bool,",
         "    pub ccd_motion_threshold: f32,",
         "    pub ccd_swept_sphere_radius: f32,",
+        "    pub body_gravity: [f32; 3],",
+        "    pub disable_world_gravity: bool,",
+        "    pub no_contact_response: bool,",
+        "    pub group: u16,",
+        "    pub mask: u16,",
+        "}",
+        "",
+        "pub struct RaySpec {",
+        "    pub from: [f32; 3],",
+        "    pub to: [f32; 3],",
+        "    pub all_hits: bool,",
+        "    pub group: u16,",
+        "    pub mask: u16,",
         "}",
         "",
         "pub struct SceneSpec {",
@@ -229,6 +282,8 @@ def gen_rs(scenes):
         "    pub frames: u32,",
         "    pub iterations: u32,",
         "    pub gravity: [f32; 3],",
+        "    pub pair_filter: Option<(&'static str, &'static str)>,",
+        "    pub rays: &'static [RaySpec],",
         "}",
         "",
         "pub const SCENES: &[(&str, SceneSpec)] = &[",
@@ -267,11 +322,19 @@ def gen_rs(scenes):
             ccd_on = "true" if ccd else "false"
             ccd_mt = ccd.get("motion_threshold", 0.0) if ccd else 0.0
             ccd_sr = ccd.get("swept_sphere_radius", 0.0) if ccd else 0.0
+            bg = b.get("gravity")
+            dwg = "true" if bg else "false"
+            bg_s = ", ".join(fmt(x) for x in (bg if bg else [0.0, 0.0, 0.0]))
+            ncr = "true" if b.get("no_contact_response") else "false"
+            grp = b.get("group", 1) & 0xFFFF
+            msk = b.get("mask", -1) & 0xFFFF
             lines.append(f"            BodySpec {{ name: \"{b['name']}\", shape: {shape}, "
                          f"position: {pos}, mass: {mass}, friction: {fr}, restitution: {re}, "
                          f"is_static: {st}, velocity: [{vel_s}], ccd_on: {ccd_on}, "
                          f"ccd_motion_threshold: {fmt(ccd_mt)}, "
-                         f"ccd_swept_sphere_radius: {fmt(ccd_sr)} }},")
+                         f"ccd_swept_sphere_radius: {fmt(ccd_sr)}, "
+                         f"body_gravity: [{bg_s}], disable_world_gravity: {dwg}, "
+                         f"no_contact_response: {ncr}, group: {grp}u16, mask: {msk}u16 }},")
         lines.append("        ],")
         rec = ", ".join(f"\"{r}\"" for r in sc["record"])
         dt_num, dt_den = sc["dt"]
@@ -280,6 +343,25 @@ def gen_rs(scenes):
         lines.append(f"        dt_num: {dt_num}, dt_den: {dt_den},")
         lines.append(f"        frames: {sc['frames']}, iterations: {sc['iterations']},")
         lines.append(f"        gravity: [{g}],")
+        pf = sc.get("pair_filter")
+        pf_rs = f"Some((\"{pf[0]}\", \"{pf[1]}\"))" if pf else "None"
+        lines.append(f"        pair_filter: {pf_rs},")
+        rays = sc.get("rays", [])
+        if rays:
+            lines.append("        rays: &[")
+            for r in rays:
+                if r["mode"] not in ("all", "closest"):
+                    raise ValueError(f"bad ray mode {r['mode']!r}")
+                fr = ", ".join(fmt(x) for x in r["from"])
+                to = ", ".join(fmt(x) for x in r["to"])
+                mode = "true" if r["mode"] == "all" else "false"
+                rgrp = r.get("group", 1) & 0xFFFF
+                rmsk = r.get("mask", -1) & 0xFFFF
+                lines.append(f"            RaySpec {{ from: [{fr}], to: [{to}], "
+                             f"all_hits: {mode}, group: {rgrp}u16, mask: {rmsk}u16 }},")
+            lines.append("        ],")
+        else:
+            lines.append("        rays: &[],")
         lines.append("    }),")
     lines.append("];")
     lines.append("")

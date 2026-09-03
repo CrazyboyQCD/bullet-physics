@@ -13,15 +13,42 @@
 //
 // Usage: bullet_record.exe [scene_name]
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "btBulletDynamicsCommon.h"
 #include "bullet_scenes.h"
 
 namespace {
+
+// Broadphase pair filter mirroring the crate's set_pair_filter: the group &
+// mask gate first, then the excluded pair is rejected. Bullet's own
+// btOverlapFilterCallback REPLACES the default test entirely
+// (btHashedOverlappingPairCache::needsBroadphaseCollision), so the gate is
+// re-done here - matching the one-layer consumer API on the Rust side (the
+// dispatcher's needsCollision still tests group & mask a second time).
+class PairExcludeFilter : public btOverlapFilterCallback {
+ public:
+  PairExcludeFilter() : exclude_a(-1), exclude_b(-1) {}
+  int exclude_a, exclude_b;  // body indices of the excluded pair; -1 = none
+  bool needBroadphaseCollision(btBroadphaseProxy* p0, btBroadphaseProxy* p1) const override {
+    bool collides = (p0->m_collisionFilterGroup & p1->m_collisionFilterMask) != 0;
+    collides = collides && (p1->m_collisionFilterGroup & p0->m_collisionFilterMask) != 0;
+    if (!collides) return false;
+    if (exclude_a >= 0) {
+      const int i0 = static_cast<const btCollisionObject*>(p0->m_clientObject)->getUserIndex();
+      const int i1 = static_cast<const btCollisionObject*>(p1->m_clientObject)->getUserIndex();
+      const int lo = i0 < i1 ? i0 : i1;
+      const int hi = i0 < i1 ? i1 : i0;
+      if (lo == exclude_a && hi == exclude_b) return false;
+    }
+    return true;
+  }
+};
 
 btCollisionShape* make_shape(const BodySpec& b,
                              std::vector<std::unique_ptr<btTriangleMesh>>& meshes) {
@@ -90,6 +117,24 @@ int main(int argc, char** argv) {
   btDiscreteDynamicsWorld world(&dispatcher, &broadphase, &solver, &config);
   world.setGravity(btVector3(spec->gravity[0], spec->gravity[1], spec->gravity[2]));
 
+  // Pair filter (optional): resolve the excluded pair's names to body
+  // indices. Lives on the stack and outlives the simulation loop.
+  PairExcludeFilter pair_filter;
+  if (spec->pair_filter) {
+    int ia = -1, ib = -1;
+    for (int i = 0; i < spec->num_bodies; ++i) {
+      if (std::strcmp(spec->bodies[i].name, spec->pair_filter[0]) == 0) ia = i;
+      if (std::strcmp(spec->bodies[i].name, spec->pair_filter[1]) == 0) ib = i;
+    }
+    if (ia < 0 || ib < 0) {
+      std::fprintf(stderr, "bullet_record: pair_filter body not found\n");
+      return 2;
+    }
+    pair_filter.exclude_a = ia < ib ? ia : ib;
+    pair_filter.exclude_b = ia < ib ? ib : ia;
+    broadphase.getOverlappingPairCache()->setOverlapFilterCallback(&pair_filter);
+  }
+
   // Reproducibility precondition (docs/parity-harness.md).
   btContactSolverInfo& info = world.getSolverInfo();
   info.m_solverMode &= ~SOLVER_RANDMIZE_ORDER;
@@ -118,6 +163,19 @@ int main(int argc, char** argv) {
     btRigidBody* body = bodies.back().get();
     body->setFriction(b.friction);
     body->setRestitution(b.restitution);
+    if (b.no_contact_response) {
+      body->setCollisionFlags(body->getCollisionFlags() |
+                              btCollisionObject::CF_NO_CONTACT_RESPONSE);
+    }
+    // Per-body gravity: detach from world propagation first (the addRigidBody
+    // sync and world setGravity respect the flag), then set the body's own
+    // acceleration - every step still applies it (world applyGravity has no
+    // flag check, it just uses each body's own m_gravity_acceleration).
+    if (b.disable_world_gravity) {
+      body->setFlags(body->getFlags() | BT_DISABLE_WORLD_GRAVITY);
+      body->setGravity(
+          btVector3(b.body_gravity[0], b.body_gravity[1], b.body_gravity[2]));
+    }
     if (!b.is_static) {
       body->setLinearVelocity(btVector3(b.velocity[0], b.velocity[1], b.velocity[2]));
       if (b.ccd_on) {
@@ -125,7 +183,8 @@ int main(int argc, char** argv) {
         body->setCcdSweptSphereRadius(b.ccd_swept_sphere_radius);
       }
     }
-    world.addRigidBody(body);
+    body->setUserIndex(i);
+    world.addRigidBody(body, b.group, b.mask);
   }
 
   // Map recorded body names to indices.
@@ -169,5 +228,48 @@ int main(int argc, char** argv) {
     }
   }
   for (FILE* f : out) std::fclose(f);
+
+  // --- Rays (probed once after the last frame) ---
+  // One line per hit in <scene>_rays_<suffix>.csv: ray_idx body_idx fraction.
+  // The all-hits callback collects in broadphase pair order, so the hits are
+  // sorted by fraction to match the Rust recorder's nearest-first order.
+  if (spec->num_rays > 0) {
+    char rname[256];
+    std::snprintf(rname, sizeof(rname), "%s_rays_%s.csv", scene_name, suffix);
+    FILE* rf = std::fopen(rname, "w");
+    if (!rf) {
+      std::fprintf(stderr, "bullet_record: cannot open %s\n", rname);
+      return 2;
+    }
+    for (int i = 0; i < spec->num_rays; ++i) {
+      const RaySpec& ray = spec->rays[i];
+      const btVector3 from(ray.from[0], ray.from[1], ray.from[2]);
+      const btVector3 to(ray.to[0], ray.to[1], ray.to[2]);
+      if (ray.all_hits) {
+        btCollisionWorld::AllHitsRayResultCallback cb(from, to);
+        cb.m_collisionFilterGroup = ray.group;
+        cb.m_collisionFilterMask = ray.mask;
+        world.rayTest(from, to, cb);
+        std::vector<std::pair<btScalar, int>> hits;
+        for (int h = 0; h < cb.m_collisionObjects.size(); ++h) {
+          hits.push_back({cb.m_hitFractions[h], cb.m_collisionObjects[h]->getUserIndex()});
+        }
+        std::sort(hits.begin(), hits.end());
+        for (const auto& hit : hits) {
+          std::fprintf(rf, "%d %d %.6f\n", i, hit.second, hit.first);
+        }
+      } else {
+        btCollisionWorld::ClosestRayResultCallback cb(from, to);
+        cb.m_collisionFilterGroup = ray.group;
+        cb.m_collisionFilterMask = ray.mask;
+        world.rayTest(from, to, cb);
+        if (cb.hasHit()) {
+          std::fprintf(rf, "%d %d %.6f\n", i, cb.m_collisionObject->getUserIndex(),
+                       cb.m_closestHitFraction);
+        }
+      }
+    }
+    std::fclose(rf);
+  }
   return 0;
 }
