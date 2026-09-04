@@ -128,10 +128,12 @@ builds:
   results (glam's internal math follows the same split via
   `glam/std` vs `glam/nostd-libm`). The ledgers are recorded on std
   builds and remain authoritative.
-- **EPA scratch pooling**: `epa::penetration` pools its buffers in a
-  `thread_local!` under `std`; `no_std` has no `thread_local!`, so the
-  fallback allocates a fresh scratch per call — same results, one extra
-  allocation per EPA pass.
+- **EPA scratch pooling**: `EpaScratch` (vertex/face/boundary buffers) is
+  caller-owned: `PhysicsWorld` holds one and threads it through the
+  narrow-phase detection calls, so steady-state passes allocate nothing
+  on any platform. The former `thread_local!` pool (std-only, one pool
+  per thread shared by every world) became a per-world pool with the
+  same no-allocation steady state and no TLS requirement.
 - **Step timings**: `StepTimings` defaults to the std monotonic `Instant`
   (process-relative `OnceLock` start; `Instant` arithmetic is i64
   nanoseconds, so the derived spans are identical to direct diffs).

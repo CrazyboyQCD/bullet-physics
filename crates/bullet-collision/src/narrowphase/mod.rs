@@ -1,5 +1,7 @@
 //! Narrow-phase collision: exact shape-pair tests and contact generation.
 
+pub use epa::EpaScratch;
+
 use crate::manifold::ContactManifold;
 use bullet_math::{Quaternion, Real, Vector3};
 use crate::shapes::{CollisionShape, Compound};
@@ -28,6 +30,10 @@ pub fn collide(
     position_b: Vector3,
     orientation_b: Quaternion,
 ) -> Option<ContactManifold> {
+    // Convenience path: a fresh EPA scratch per call. Detection loops
+    // should thread one shared scratch through `collide_seeded` instead
+    // (steady-state calls then allocate nothing).
+    let mut scratch = epa::EpaScratch::default();
     collide_seeded(
         shape_a,
         position_a,
@@ -36,6 +42,7 @@ pub fn collide(
         position_b,
         orientation_b,
         None,
+        &mut scratch,
     )
 }
 
@@ -52,6 +59,7 @@ fn pair_threshold(shape_a: &CollisionShape, shape_b: &CollisionShape) -> Real {
 /// [`collide`] with an optional GJK warm-start seed (a cached separating
 /// normal from a previous step of the same pair, forwarded to the generic
 /// convex paths; the analytic fast paths ignore it).
+#[allow(clippy::too_many_arguments)]
 pub fn collide_seeded(
     shape_a: &CollisionShape,
     position_a: Vector3,
@@ -60,9 +68,10 @@ pub fn collide_seeded(
     position_b: Vector3,
     orientation_b: Quaternion,
     seed: Option<Vector3>,
+    scratch: &mut EpaScratch,
 ) -> Option<ContactManifold> {
     let threshold = pair_threshold(shape_a, shape_b);
-    // Compounds are expanded into their children (recursive; each child pair
+    // Compounds are expanded into their children (recursive; each child pair   
     // computes its own threshold like Bullet's per-child collision
     // algorithms).
     if let CollisionShape::Compound(ca) = shape_a {
@@ -74,6 +83,7 @@ pub fn collide_seeded(
             position_b,
             orientation_b,
             seed,
+            scratch,
         );
     }
     if let CollisionShape::Compound(cb) = shape_b {
@@ -85,6 +95,7 @@ pub fn collide_seeded(
             position_a,
             orientation_a,
             seed,
+            scratch,
         )
         .map(|m| m.flipped());
     }
@@ -98,6 +109,7 @@ pub fn collide_seeded(
         (CollisionShape::TriangleMesh(ma), CollisionShape::TriangleMesh(mb)) => {
             mesh_mesh::mesh_mesh(
                 ma, position_a, orientation_a, mb, position_b, orientation_b, seed, threshold,
+                scratch,
             )
         }
         (CollisionShape::TriangleMesh(ma), CollisionShape::Heightfield(hb)) => {
@@ -110,6 +122,7 @@ pub fn collide_seeded(
                 orientation_b,
                 seed,
                 threshold,
+                scratch,
             )
         }
         (CollisionShape::Heightfield(ha), CollisionShape::TriangleMesh(mb)) => mesh_mesh::mesh_mesh(
@@ -121,6 +134,7 @@ pub fn collide_seeded(
             orientation_b,
             seed,
             threshold,
+            scratch,
         ),
         // Plane-vs-mesh (Bullet's `gimpacttrimeshpart_vs_plane_collision`):
         // per-vertex plane distances. These must precede the generic
@@ -170,6 +184,7 @@ pub fn collide_seeded(
                 orientation_a,
                 seed,
                 threshold,
+                scratch,
             )
             .map(|m| m.flipped())
         }
@@ -184,6 +199,7 @@ pub fn collide_seeded(
                 orientation_a,
                 seed,
                 threshold,
+                scratch,
             )
             .map(|m| m.flipped())
         }
@@ -198,6 +214,7 @@ pub fn collide_seeded(
                 orientation_b,
                 seed,
                 threshold,
+                scratch,
             )
         }
         (_, CollisionShape::TriangleMesh(_)) => None,
@@ -211,6 +228,7 @@ pub fn collide_seeded(
                 orientation_b,
                 seed,
                 threshold,
+                scratch,
             )
         }
         (_, CollisionShape::Heightfield(_)) => None,
@@ -262,11 +280,13 @@ pub fn collide_seeded(
             orientation_b,
             seed,
             threshold,
+            scratch,
         ),
     }
 }
 
-/// Collide every child of a compound against `other`, merging the manifolds.
+/// Collide every child of a compound against `other`, merging the manifolds.   
+#[allow(clippy::too_many_arguments)]
 fn compound_collide(
     compound: &Compound,
     position: Vector3,
@@ -275,6 +295,7 @@ fn compound_collide(
     other_position: Vector3,
     other_orientation: Quaternion,
     seed: Option<Vector3>,
+    scratch: &mut EpaScratch,
 ) -> Option<ContactManifold> {
     let mut manifold = ContactManifold::new();
     for child in &compound.children {
@@ -288,6 +309,7 @@ fn compound_collide(
             other_position,
             other_orientation,
             seed,
+            scratch,
         ) {
             manifold.points.extend(m.points);
         }
@@ -515,9 +537,17 @@ mod tests {
                 -unseeded.points[0].normal,
                 Vector3::new(0.3, -0.5, 0.8).normalize(),
             ] {
-                let seeded =
-                    collide_seeded(&a, Vector3::ZERO, q, &b, offset, Quaternion::IDENTITY, Some(seed))
-                        .unwrap();
+                let seeded = collide_seeded(
+                    &a,
+                    Vector3::ZERO,
+                    q,
+                    &b,
+                    offset,
+                    Quaternion::IDENTITY,
+                    Some(seed),
+                    &mut EpaScratch::default(),
+                )
+                .unwrap();
                 assert_eq!(seeded.points.len(), unseeded.points.len());
                 for (s, u) in seeded.points.iter().zip(&unseeded.points) {
                     // EPA accuracy floor (1e-4): different starting simplices

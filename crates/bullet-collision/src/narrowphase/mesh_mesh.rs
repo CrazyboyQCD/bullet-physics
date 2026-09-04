@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 
 use crate::manifold::{ContactManifold, ContactPoint};
 use crate::narrowphase::convex_convex::convex_convex;
+use crate::narrowphase::epa::EpaScratch;
 use crate::narrowphase::gjk;
 use crate::shapes::TriangleMesh;
 
@@ -50,6 +51,7 @@ pub fn mesh_mesh(
     orientation_b: Quaternion,
     seed: Option<Vector3>,
     threshold: Real,
+    scratch: &mut EpaScratch,
 ) -> Option<ContactManifold> {
     let threshold = threshold.max(MESH_MESH_BAND);
     // B-to-A local pose product (Bullet's `trans1to0 = trans0.inverse() *
@@ -118,6 +120,7 @@ pub fn mesh_mesh(
                     orientation_b,
                     seed,
                     threshold,
+                    scratch,
                 ) {
                     manifold.points.extend(m.points);
                 }
@@ -194,6 +197,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             t(),
+            &mut EpaScratch::default(),
         )
         .unwrap();
         let p = m.points[0];
@@ -218,6 +222,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             t(),
+            &mut EpaScratch::default(),
         )
         .unwrap();
         let p = m.points[0];
@@ -247,6 +252,7 @@ mod tests {
             q,
             None,
             t(),
+            &mut EpaScratch::default(),
         )
         .unwrap();
         // The surviving contacts hug the low edge (normal from A to B).
@@ -268,6 +274,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             t(),
+            &mut EpaScratch::default(),
         )
         .is_none());
     }
@@ -287,6 +294,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             t(),
+            &mut EpaScratch::default(),
         )
         .is_none());
     }

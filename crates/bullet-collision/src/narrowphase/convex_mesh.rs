@@ -11,6 +11,7 @@ use bullet_math::{math, Aabb, Quaternion, Real, Vector3};
 
 use crate::manifold::{ContactManifold, ContactPoint};
 use crate::narrowphase::convex_convex::convex_convex;
+use crate::narrowphase::epa::EpaScratch;
 use crate::shapes::{CollisionShape, TriangleMesh};
 
 /// Contact between a convex shape and a static triangle mesh.
@@ -30,6 +31,7 @@ pub fn convex_mesh(
     orientation_mesh: Quaternion,
     seed: Option<Vector3>,
     threshold: Real,
+    scratch: &mut EpaScratch,
 ) -> Option<ContactManifold> {
     // Sweep the convex's world AABB corners into the mesh's local frame.
     let convex_world = convex.world_aabb(position_convex, orientation_convex);
@@ -95,6 +97,7 @@ pub fn convex_mesh(
                 orientation_mesh,
                 seed,
                 threshold,
+                scratch,
             ) {
                 manifold.points.extend(m.points);
             }
@@ -254,6 +257,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             t(&sphere),
+            &mut EpaScratch::default(),
         )
         .unwrap();
         let p = m.points[0];
@@ -292,6 +296,7 @@ mod tests {
                 Quaternion::IDENTITY,
                 None,
                 th,
+                &mut EpaScratch::default(),
             );
             let slow = convex_convex(
                 &sphere,
@@ -302,6 +307,7 @@ mod tests {
                 Quaternion::IDENTITY,
                 None,
                 th,
+                &mut EpaScratch::default(),
             );
             match (&fast, &slow) {
                 (Some(f), Some(s)) => {
@@ -351,6 +357,7 @@ mod tests {
                 Quaternion::IDENTITY,
                 None,
                 th,
+                &mut EpaScratch::default(),
             )
         };
 
@@ -404,6 +411,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             t(&sphere),
+            &mut EpaScratch::default(),
         )
         .is_none());
     }
@@ -425,6 +433,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             t(&box_shape),
+            &mut EpaScratch::default(),
         )
         .unwrap();
         let p = m.points[0];
@@ -450,6 +459,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             t(&box_shape),
+            &mut EpaScratch::default(),
         )
         .unwrap();
         assert!(m.points.len() <= 4);

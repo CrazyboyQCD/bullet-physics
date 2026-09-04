@@ -49,34 +49,25 @@ struct Face {
 /// origin and the Minkowski support function. `support` maps a direction to
 /// the farthest point of `A - B` along it.
 ///
-/// Under `std` the vertex, face and boundary-edge buffers are pooled per
-/// thread (the allocations used to dominate the EPA profile — `Vec<Face>`
-/// churn from the per-iteration `retain`/push cycle and the per-`expand`
-/// boundary set). `no_std` builds have no `thread_local!`; they fall back
-/// to a fresh scratch per call (same results, one extra allocation).
+/// The vertex, face and boundary-edge buffers are caller-owned (the
+/// allocations used to dominate the EPA profile — `Vec<Face>` churn from
+/// the per-iteration `retain`/push cycle and the per-`expand` boundary
+/// set): pass the same `EpaScratch` for every pair of a detection phase
+/// and steady-state calls allocate nothing; a fresh one simply costs one
+/// allocation per call.
 pub fn penetration(
     simplex: &[Vector3; 4],
     support: impl Fn(Vector3) -> Vector3,
+    scratch: &mut EpaScratch,
 ) -> (Vector3, Real) {
-    #[cfg(feature = "std")]
-    {
-        thread_local! {
-            static SCRATCH: core::cell::RefCell<EpaScratch> =
-                core::cell::RefCell::new(EpaScratch::default());
-        }
-        SCRATCH.with_borrow_mut(|s| penetration_inner(simplex, support, s))
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        let mut scratch = EpaScratch::default();
-        penetration_inner(simplex, support, &mut scratch)
-    }
+    penetration_inner(simplex, support, scratch)
 }
 
 /// Pooled EPA buffers (capacity survives `clear()`, so steady-state calls
-/// allocate nothing).
+/// allocate nothing). Owned by the caller — `PhysicsWorld` holds one and
+/// reuses it across every pair of a detection phase.
 #[derive(Default)]
-struct EpaScratch {
+pub struct EpaScratch {
     vertices: Vec<Vector3>,
     faces: Vec<Face>,
     boundary: Vec<(usize, usize)>,
@@ -350,7 +341,7 @@ mod tests {
                 dir,
             )
         };
-        let (normal, depth) = penetration(&sp, support);
+        let (normal, depth) = penetration(&sp, support, &mut EpaScratch::default());
         let expected = 2.0 - pb.length();
         assert_relative_eq!(depth, expected, epsilon = 1e-2);
         // Normal should point from A to B (i.e. along `pb`).
@@ -386,7 +377,7 @@ mod tests {
                 dir,
             )
         };
-        let (normal, depth) = penetration(&sp, support);
+        let (normal, depth) = penetration(&sp, support, &mut EpaScratch::default());
         assert_relative_eq!(depth, 0.5, epsilon = 1e-3);
         assert_relative_eq!(normal.x, 1.0, epsilon = 1e-4);
     }

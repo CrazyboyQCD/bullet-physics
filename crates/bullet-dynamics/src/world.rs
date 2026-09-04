@@ -8,7 +8,7 @@ use crate::timing::{default_step_clock, StepClock, StepStage, StepTimings};
 
 use bullet_collision::broadphase::{BroadPhase, BroadPhaseBackend};
 use bullet_collision::manifold::{ContactManifold, PersistentManifold, CONTACT_BREAKING_THRESHOLD};
-use bullet_collision::narrowphase::{self, SweepHit};
+use bullet_collision::narrowphase::{self, epa::EpaScratch, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
 use crate::body::{CollisionFlags, RayFilter, RigidBody};
 use crate::constraint::{self, Constraint};
@@ -237,6 +237,11 @@ pub struct PhysicsWorld {
     /// monotonic clock (zero without the `std` feature); replaced via
     /// [`PhysicsWorld::set_step_clock`].
     pub(crate) step_clock_fn: fn() -> Duration,
+    /// Shared EPA scratch buffers, reused across every pair of a
+    /// detection phase so steady-state narrow-phase passes allocate
+    /// nothing (the thread-local pool this replaced lived for the whole
+    /// process; one world keeps its own).
+    epa_scratch: EpaScratch,
 }
 
 impl Default for PhysicsWorld {
@@ -294,6 +299,7 @@ impl PhysicsWorld {
             soft_mb_delta: Vec::new(),
             step_timings: StepTimings::default(),
             step_clock_fn: default_step_clock,
+            epa_scratch: EpaScratch::default(),
         }
     }
 
@@ -1430,7 +1436,16 @@ impl PhysicsWorld {
                 {
                     continue;
                 }
-                let Some(manifold) = narrowphase::collide(shape_a, pa, qa, shape_b, pb, qb)
+                let Some(manifold) = narrowphase::collide_seeded(
+                    shape_a,
+                    pa,
+                    qa,
+                    shape_b,
+                    pb,
+                    qb,
+                    None,
+                    &mut self.epa_scratch,
+                )
                 else {
                     continue;
                 };
@@ -1564,6 +1579,7 @@ impl PhysicsWorld {
                 pb,
                 b.orientation,
                 seed,
+                &mut self.epa_scratch,
             ) {
                 // Detection path: merge the fresh manifold into the
                 // persistent one (Bullet's `addManifoldPoint`: matched
@@ -1910,7 +1926,8 @@ impl PhysicsWorld {
             if c.contains(SoftCollision::CL_SS) && c.contains(SoftCollision::CL_SELF) {
                 let (soft_bodies, scratch) =
                     (&mut self.soft_bodies, &mut self.soft_pair_scratch);
-                soft_bodies[i].collide_cluster_self(i, scratch);
+                let epa = &mut self.epa_scratch;
+                soft_bodies[i].collide_cluster_self(i, scratch, epa);
             }
         }
 
@@ -1966,6 +1983,7 @@ impl PhysicsWorld {
                 rigid,
                 &bodies[rigid],
                 &mut self.soft_scratch,
+                &mut self.epa_scratch,
             );
         } else if mode == SoftCollision::SDF_RS.0 {
             soft_bodies[soft].collide_rigid(rigid, &bodies[rigid], &mut self.soft_scratch);
@@ -2026,6 +2044,7 @@ impl PhysicsWorld {
         let effective = self.soft_bodies[a].cfg.collisions.0 & self.soft_bodies[b].cfg.collisions.0;
         if effective & SoftCollision::SVS_MASK.0 == SoftCollision::CL_SS.0 {
             let (soft_bodies, scratch) = (&mut self.soft_bodies, &mut self.soft_pair_scratch);
+            let epa = &mut self.epa_scratch;
             let (before, rest) = soft_bodies.split_at_mut(a.min(b));
             let _ = before;
             let (sa, sb) = if a < b {
@@ -2038,9 +2057,9 @@ impl PhysicsWorld {
                 (sa, sb)
             };
             if a < b {
-                sa.collide_cluster_soft(a, sb, b, scratch);
+                sa.collide_cluster_soft(a, sb, b, scratch, epa);
             } else {
-                sb.collide_cluster_soft(b, sa, a, scratch);
+                sb.collide_cluster_soft(b, sa, a, scratch, epa);
             }
             return;
         }

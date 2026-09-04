@@ -12,7 +12,7 @@
 use crate::manifold::{ContactManifold, ContactPoint};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
-use crate::narrowphase::{epa, gjk};
+use crate::narrowphase::{epa, gjk, EpaScratch};
 use crate::shapes::CollisionShape;
 use bullet_math::{Quaternion, Real, Vector3};
 
@@ -31,6 +31,7 @@ pub fn convex_convex(
     orientation_b: Quaternion,
     seed: Option<Vector3>,
     threshold: Real,
+    scratch: &mut EpaScratch,
 ) -> Option<ContactManifold> {
     let simplex = match gjk::gjk_contact(
         shape_a,
@@ -77,7 +78,7 @@ pub fn convex_convex(
     };
     // `normal` points from A to B (EPA convention); `core_depth` is the core
     // overlap, the true overlap adds the margin shell back.
-    let (normal, core_depth) = epa::penetration(&seed, support);
+    let (normal, core_depth) = epa::penetration(&seed, support, scratch);
     if core_depth <= 0.0 {
         return None;
     }
@@ -125,6 +126,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             threshold,
+            &mut EpaScratch::default(),
         )
         .map(|m| {
             let p = m.points[0];
@@ -233,6 +235,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             a.contact_breaking_threshold().min(b.contact_breaking_threshold()),
+            &mut EpaScratch::default(),
         )
         .unwrap();
         let p = m.points[0];
@@ -262,6 +265,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             a.contact_breaking_threshold().min(b.contact_breaking_threshold()),
+            &mut EpaScratch::default(),
         )
         .unwrap();
         let p = m.points[0];
@@ -290,6 +294,7 @@ mod tests {
             Quaternion::IDENTITY,
             None,
             a.contact_breaking_threshold().min(b.contact_breaking_threshold()),
+            &mut EpaScratch::default(),
         )
         .unwrap();
         let p = m.points[0];

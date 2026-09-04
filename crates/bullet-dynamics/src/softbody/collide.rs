@@ -14,6 +14,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bullet_collision::narrowphase::epa;
+use bullet_collision::narrowphase::epa::EpaScratch;
 use bullet_collision::narrowphase::gjk::{core_support_minkowski, gjk_contact, GjkOutcome};
 use bullet_collision::narrowphase::point_triangle_distance;
 use bullet_collision::shapes::CollisionShape;
@@ -540,6 +541,7 @@ fn cluster_vs_convex(
     hull: &CollisionShape,
     body: &RigidBody,
     margin: Real,
+    epa: &mut EpaScratch,
 ) -> Option<ClusterDistance> {
     if let CollisionShape::Plane(plane) = &body.shape {
         // Analytic: the closest hull point to the plane is the extreme
@@ -593,7 +595,7 @@ fn cluster_vs_convex(
                     dir,
                 )
             };
-            let (normal_a_to_b, core_depth) = epa::penetration(&seed, support);
+            let (normal_a_to_b, core_depth) = epa::penetration(&seed, support, epa);
             if core_depth <= 0.0 {
                 return None;
             }
@@ -620,6 +622,7 @@ fn cluster_vs_cluster(
     com_a: Vector3,
     com_b: Vector3,
     margin: Real,
+    epa: &mut EpaScratch,
 ) -> Option<ClusterDistance> {
     let guess = com_a - com_b;
     let threshold = margin;
@@ -653,7 +656,7 @@ fn cluster_vs_cluster(
                     dir,
                 )
             };
-            let (normal_a_to_b, core_depth) = epa::penetration(&seed, support);
+            let (normal_a_to_b, core_depth) = epa::penetration(&seed, support, epa);
             if core_depth <= 0.0 {
                 return None;
             }
@@ -749,9 +752,10 @@ fn cluster_pair_joint(
     friction: Real,
     erp_mul: Real,
     split_mul: Real,
+    epa: &mut EpaScratch,
 ) -> Option<CJoint> {
     let res =
-        cluster_vs_cluster(hull_a, hull_b, cluster_a.com, cluster_b.com, margin)?;
+        cluster_vs_cluster(hull_a, hull_b, cluster_a.com, cluster_b.com, margin, epa)?;
     let velocity_a = cluster_a.lv + cluster_a.av.cross(res.witness_a - cluster_a.com);
     let velocity_b = cluster_b.lv + cluster_b.av.cross(res.witness_b - cluster_b.com);
     let mut joint = solve_cluster_contact(
@@ -787,6 +791,7 @@ impl SoftBody {
         body_idx: usize,
         body: &RigidBody,
         scratch: &mut Vec<usize>,
+        epa: &mut EpaScratch,
     ) {
         if !self.cfg.collisions.contains(SoftCollision::CL_RS) {
             return;
@@ -807,7 +812,7 @@ impl SoftBody {
                 continue;
             }
             let hull = cluster_hull_shape(self, cluster);
-            let Some(res) = cluster_vs_convex(&hull, body, margin) else {
+            let Some(res) = cluster_vs_convex(&hull, body, margin, epa) else {
                 continue;
             };
             let velocity_a = cluster.lv + cluster.av.cross(res.witness_a - cluster.com);
@@ -853,6 +858,7 @@ impl SoftBody {
         other: &SoftBody,
         b_idx: usize,
         pairs: &mut Vec<(usize, usize)>,
+        epa: &mut EpaScratch,
     ) {
         let margin = self.margin + other.margin;
         let friction = self.cfg.k_df.min(other.cfg.k_df);
@@ -891,6 +897,7 @@ impl SoftBody {
                 friction,
                 self.cfg.k_sshr_cl.max(other.cfg.k_sshr_cl),
                 (self.cfg.k_ss_splt_cl + other.cfg.k_ss_splt_cl) / 2.0,
+                epa,
             ) {
                 new_joints.push(SoftJoint::Contact(joint));
             }
@@ -903,7 +910,7 @@ impl SoftBody {
     /// both sides on this body). The tree-tree pass on the same tree visits
     /// each unordered leaf pair once (Bullet's `a == b` branch); connected
     /// clusters are skipped via the connectivity matrix.
-    pub fn collide_cluster_self(&mut self, self_idx: usize, pairs: &mut Vec<(usize, usize)>) {
+    pub fn collide_cluster_self(&mut self, self_idx: usize, pairs: &mut Vec<(usize, usize)>, epa: &mut EpaScratch) {
         let margin = self.margin + self.margin;
         let friction = self.cfg.k_df;
         pairs.clear();
@@ -939,6 +946,7 @@ impl SoftBody {
                 friction,
                 self.cfg.k_sshr_cl,
                 self.cfg.k_ss_splt_cl,
+                epa,
             ) {
                 new_joints.push(SoftJoint::Contact(joint));
             }
