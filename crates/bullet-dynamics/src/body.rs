@@ -83,6 +83,13 @@ impl CollisionFlags {
     /// propagation: the per-body value (synced from the world at `add_body`
     /// time) stays as set (Bullet's `BT_DISABLE_WORLD_GRAVITY`).
     pub const DISABLE_WORLD_GRAVITY: Self = Self(0x0002);
+    
+    /// The body is a kinematic prop (Bullet's `CF_KINEMATIC_OBJECT`): its
+    /// pose is driven by the velocities you set (no gravity, damping or
+    /// accumulated forces ever touch them), while its infinite mass pushes
+    /// dynamic bodies out of the way through contacts. See
+    /// [`RigidBody::new_kinematic`](RigidBody::new_kinematic).
+    pub const KINEMATIC: Self = Self(0x0004);
 
     /// Whether every bit of `other` is set.
     pub const fn contains(self, other: Self) -> bool {
@@ -201,6 +208,23 @@ impl RigidBody {
         }
     }
 
+    /// A kinematic prop (Bullet's `CF_KINEMATIC_OBJECT`): infinite mass,
+    /// pose driven by the velocities you set - moving platforms, elevators,
+    /// doors, slamming pistons. Gravity, damping and accumulated forces
+    /// never touch it; contacts push dynamic bodies out of the way using
+    /// its velocity. It never sleeps (an idle kinematic body is the
+    /// activation source its contacts rely on).
+    pub fn new_kinematic(shape: CollisionShape, position: Vector3) -> Self {
+        let mut body = Self::new_static(shape, position);
+        body.is_static = false;
+        body.collision_flags.0 |= CollisionFlags::KINEMATIC.0;
+        // The activation source its sleeping contacts rely on; Bullet
+        // kinematics live in the non-static list and are typically driven
+        // every frame anyway.
+        body.activation_state = ActivationState::DisableDeactivation;
+        body
+    }
+
     /// A static (immovable) body, e.g. the ground.
     ///
     /// Static bodies start in the sleeping state, like Bullet's static
@@ -241,6 +265,22 @@ impl RigidBody {
     #[inline]
     pub fn is_static(&self) -> bool {
         self.is_static
+    }
+
+    /// Whether the body is a kinematic prop
+    /// ([`CollisionFlags::KINEMATIC`]): pose driven by the user-set
+    /// velocities, infinite mass to everything else.
+    #[inline]
+    pub fn is_kinematic(&self) -> bool {
+        self.collision_flags.contains(CollisionFlags::KINEMATIC)
+    }
+
+    /// Whether the body can never be moved by the solver (Bullet's
+    /// `isStaticOrKinematicObject`): the gate for gravity, damping, force
+    /// integration, split impulses and CCD on the world paths.
+    #[inline]
+    pub fn is_static_or_kinematic(&self) -> bool {
+        self.is_static || self.is_kinematic()
     }
 
     /// Whether the body participates in this step's integration (Bullet's
@@ -312,7 +352,8 @@ impl RigidBody {
     pub(crate) fn participates_in_islands(&self) -> bool {
         !self.removed
             && !self.is_static
-            && self.activation_state != ActivationState::DisableSimulation
+            && !self.is_kinematic()
+            && self.activation_state != ActivationState::DisableSimulation      
     }
 
     /// Whether this body keeps its island awake (the `buildIslands`
@@ -457,7 +498,21 @@ impl RigidBody {
         self
     }
 
-    /// Builder: opt this body's pairs in for collision events (Rapier's
+    /// Builder: set or clear the kinematic flag
+    /// ([`CollisionFlags::KINEMATIC`]; see [`RigidBody::new_kinematic`]).
+    /// Turning the flag on also disables deactivation for the body.
+    pub fn kinematic(mut self, on: bool) -> Self {
+        self.collision_flags.0 &= !CollisionFlags::KINEMATIC.0;
+        if on {
+            self.collision_flags.0 |= CollisionFlags::KINEMATIC.0;
+            if self.activation_state != ActivationState::DisableDeactivation {
+                self.activation_state = ActivationState::DisableDeactivation;
+            }
+        }
+        self
+    }
+    
+    /// Builder: opt this body's pairs in for collision events (Rapier's        
     /// `ActiveEvents::COLLISION_EVENTS`).
     pub fn collision_events(mut self, on: bool) -> Self {
         self.collision_events = on;
@@ -611,12 +666,14 @@ impl RigidBody {
         }
     }
 
-    /// Integrate velocities from gravity and accumulated forces (semi-implicit
-    /// Euler velocity update), damping the previous-step velocity first
-    /// (Bullet's `applyDamping`). Sleeping and disabled bodies are not touched.
+    /// Integrate velocities from gravity and accumulated forces (semi-implicit 
+    /// Euler velocity update), damping the previous-step velocity first        
+    /// (Bullet's `applyDamping`). Sleeping and disabled bodies are not touched;
+    /// a kinematic body's velocities are user property and stay untouched too
+    /// (Bullet's `integrateVelocities` static-or-kinematic gate).
     #[inline]
     pub fn integrate_velocities(&mut self, dt: Real) {
-        if self.is_static || !self.is_active() {
+        if self.is_static || self.is_kinematic() || !self.is_active() {
             return;
         }
         self.apply_damping(dt);

@@ -278,7 +278,7 @@ impl SoftBody {
             &body.inv_inertia_world(),
             |ra| body.velocity_at_local_point(ra),
             body.friction,
-            body.is_static(),
+            body.is_static_or_kinematic(),
             scratch,
         );
     }
@@ -807,8 +807,9 @@ impl SoftBody {
         let mut new_joints: Vec<SoftJoint> = Vec::new();
         for &ci in &*scratch {
             let cluster = &self.clusters[ci];
-            // Anchored clusters do not collide with static bodies.
-            if body.is_static() && cluster.contains_anchor {
+            // Anchored clusters do not collide with static or kinematic
+            // bodies (Bullet's `isStaticOrKinematicObject` branch).
+            if body.is_static_or_kinematic() && cluster.contains_anchor {
                 continue;
             }
             let hull = cluster_hull_shape(self, cluster);
@@ -835,7 +836,7 @@ impl SoftBody {
                 margin,
                 friction,
             ) {
-                if body.is_static() {
+                if body.is_static_or_kinematic() {
                     joint.erp *= self.cfg.k_skhr_cl;
                     joint.split *= self.cfg.k_sk_splt_cl;
                 } else {

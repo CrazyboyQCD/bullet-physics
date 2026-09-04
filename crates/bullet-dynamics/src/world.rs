@@ -344,9 +344,10 @@ impl PhysicsWorld {
     /// Rigid-body handles are stable: removing a body never renumbers the
     /// others (see [`PhysicsWorld::remove_body`]).
     pub fn add_body(&mut self, mut body: RigidBody) -> BodyHandle {
-        // Bullet's `addRigidBody`: a dynamic body inherits the world gravity
-        // unless it detached itself (`BT_DISABLE_WORLD_GRAVITY`).
-        if !body.is_static()
+        // Bullet's `addRigidBody`: a dynamic body inherits the world gravity   
+        // unless it detached itself (`BT_DISABLE_WORLD_GRAVITY`); kinematic
+        // bodies are excluded like static ones (`isStaticOrKinematicObject`).
+        if !body.is_static_or_kinematic()
             && !body
                 .collision_flags
                 .contains(CollisionFlags::DISABLE_WORLD_GRAVITY)
@@ -1521,6 +1522,13 @@ impl PhysicsWorld {
                 .contains(CollisionFlags::NO_CONTACT_RESPONSE)
                 || b.collision_flags
                     .contains(CollisionFlags::NO_CONTACT_RESPONSE);
+            // Both sides immovable (Bullet's broadphase StaticFilter group
+            // excludes static-kinematic and kinematic-kinematic pairs
+            // outright): detection could only produce rows the solver would
+            // discard (both inv masses are zero), so skip them entirely.
+            if a.is_static_or_kinematic() && b.is_static_or_kinematic() {
+                continue;
+            }
             let (pa, pb) = (self.predicted_poses[i], self.predicted_poses[j]);
             // Fast-moving pairs re-detect *when the cache would serve a
             // positional bias*: a refreshed point deeper than the slop feeds
@@ -1776,7 +1784,7 @@ impl PhysicsWorld {
             .map(|i| {
                 let body = &self.bodies[i];
                 let threshold = body.ccd_motion_threshold();
-                if !body.is_active() || body.is_static() || threshold <= 0.0 {
+                if !body.is_active() || body.is_static_or_kinematic() || threshold <= 0.0 {  
                     return 1.0;
                 }
                 let radius = body.ccd_swept_sphere_radius();
@@ -1865,13 +1873,13 @@ impl PhysicsWorld {
             let push_lin = body.push_linear;
             let push_ang = body.push_angular;
             if body.is_active()
-                && !body.is_static()
+                && !body.is_static_or_kinematic()
                 && (push_lin.x != 0.0 || push_lin.y != 0.0 || push_lin.z != 0.0)
             {
                 body.position += push_lin * dt;
             }
             if body.is_active()
-                && !body.is_static()
+                && !body.is_static_or_kinematic()
                 && (push_ang.x != 0.0 || push_ang.y != 0.0 || push_ang.z != 0.0)
             {
                 let w = push_ang * SPLIT_TURN_ERP;
@@ -2175,6 +2183,32 @@ impl PhysicsWorld {
         // walks the rigid list), so they pin their islands awake.
         for i in 0..self.soft_bodies.len() {
             island_awake[uf.find(soft_base + i)] = true;
+        }
+
+        // A moving kinematic body wakes every island it pairs with (Bullet
+        // activates both bodies at contact-point creation; done here because
+        // the island pass runs before the narrow phase, so the broadphase
+        // pair is the overlap signal). An idle kinematic (zero velocities)
+        // keeps its resting contacts sleeping, like Bullet.
+        for &(pi, pj) in pairs {
+            for (pa, pb) in [(pi, pj), (pj, pi)] {
+                let ProxyOwner::Body(k) = self.proxy_owners[pa] else {
+                    continue;
+                };
+                let kb = &bodies[k];
+                if !kb.is_kinematic()
+                    || (kb.linear_velocity.length_squared() == 0.0
+                        && kb.angular_velocity.length_squared() == 0.0)
+                {
+                    continue;
+                }
+                let node = match self.proxy_owners[pb] {
+                    ProxyOwner::Body(i) if bodies[i].participates_in_islands() => i,
+                    ProxyOwner::Collider(e) => num_bodies + collider_entries[e].mb,
+                    _ => continue,
+                };
+                island_awake[uf.find(node)] = true;
+            }
         }
 
         // Resolve every member's island state first (the decisions borrow

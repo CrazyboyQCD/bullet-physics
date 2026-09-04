@@ -2149,3 +2149,169 @@ fn step_clock_injection_contract() {
     world.set_step_clock(fake_clock);
     world.step_simulation(1.0 / 60.0);
 }
+
+// --- kinematic rigid bodies (Bullet's `CF_KINEMATIC_OBJECT`) --------------
+
+/// A kinematic body driven by its velocity pushes a dynamic body out of the
+/// way: the contact rows use the kinematic's velocity in the relative
+/// velocity, so the dynamic side gains momentum (velocity propagation).
+#[test]
+fn kinematic_pushes_dynamic_body() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+    world.add_body(RigidBody::new_static(
+        bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+        Vector3::ZERO,
+    ));
+    // Sliding kinematic slab (its top face is at y = 0.5) and a dynamic box
+    // resting in its path.
+    let slab = world.add_body(RigidBody::new_kinematic(
+        bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.5, 1.0)),
+        Vector3::new(-3.0, 0.5, 0.0),
+    ));
+    let target = world.add_body(RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.25, 0.25, 0.25)),
+        Vector3::new(0.0, 0.75, 0.0),
+        1.0,
+    ));
+    world.body_mut(slab).linear_velocity = Vector3::new(2.0, 0.0, 0.0);
+
+    let start_x = world.body(target).position.x;
+    for _ in 0..120 {
+        world.step_simulation(1.0 / 60.0);
+    }
+    // The slab (2 m/s for 2 s) reached and shoved the box well past its
+    // starting point.
+    assert!(world.body(target).position.x > start_x + 0.5);
+    assert!(world.body(target).is_active());
+}
+
+/// Gravity, damping and accumulated forces never touch a kinematic body's
+/// velocities; the pose integrates from the user-set velocity every step.
+#[test]
+fn kinematic_ignores_gravity_forces_and_damping() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+    let body = world.add_body(RigidBody::new_kinematic(
+        bullet_collision::shapes::CollisionShape::sphere(0.5),
+        Vector3::new(0.0, 5.0, 0.0),
+    ));
+    world.body_mut(body).set_damping(0.2, 0.2);
+    let v = Vector3::new(1.0, 0.0, 0.0);
+    world.body_mut(body).linear_velocity = v;
+    world.body_mut(body).angular_velocity = Vector3::new(0.0, 0.0, 1.0);
+
+    let dt = 1.0 / 60.0;
+    let frames = 60;
+    for i in 0..frames {
+        world.body_mut(body).apply_force(Vector3::new(0.0, 100.0, 0.0));
+        world.step_simulation(dt);
+        let b = world.body(body);
+        // Gravity must not move the kinematic body.
+        assert_relative_eq!(b.position.y, 5.0, epsilon = 1e-4);
+        assert_eq!(b.linear_velocity, v, "velocity must stay user-set (frame {i})");
+    }
+    // Pose integrated from the velocity: x ~= v * t (per-frame `+=` rounding
+    // aside), and it never fell.
+    assert_relative_eq!(world.body(body).position.x, 1.0, epsilon = 1e-3);
+    assert!(world.body(body).is_active());
+}
+
+/// A moving kinematic body wakes the sleeping island it runs into; an idle
+/// one lets its resting contacts sleep.
+#[test]
+fn moving_kinematic_wakes_sleeping_island() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+    world.add_body(RigidBody::new_static(
+        bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+        Vector3::ZERO,
+    ));
+    let box_body = world.add_body(RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.25, 0.25, 0.25)),
+        Vector3::new(0.0, 0.25, 0.0),
+        1.0,
+    ));
+    for _ in 0..600 {
+        world.step_simulation(1.0 / 60.0);
+    }
+    assert!(!world.body(box_body).is_active(), "precondition: asleep");
+
+    // A slab flying in from the side.
+    let slab = world.add_body(RigidBody::new_kinematic(
+        bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.5)),
+        Vector3::new(-4.0, 0.25, 0.0),
+    ));
+    world.body_mut(slab).linear_velocity = Vector3::new(6.0, 0.0, 0.0);
+
+    let mut woke = false;
+    for _ in 0..120 {
+        world.step_simulation(1.0 / 60.0);
+        if world.body(box_body).is_active() {
+            woke = true;
+            break;
+        }
+    }
+    assert!(woke, "the moving kinematic must wake the sleeping island");
+}
+
+/// A dynamic body resting on an *idle* kinematic platform settles and goes
+/// to sleep; the kinematic-static pair produces no solver rows.
+#[test]
+fn dynamic_body_rests_and_sleeps_on_idle_kinematic_platform() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+    let platform = world.add_body(RigidBody::new_kinematic(
+        bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.25, 2.0)),
+        Vector3::new(0.0, 0.25, 0.0),
+    ));
+    let cargo = world.add_body(RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.25, 0.25, 0.25)),
+        Vector3::new(0.0, 2.0, 0.0),
+        1.0,
+    ));
+    for _ in 0..480 {
+        world.step_simulation(1.0 / 60.0);
+    }
+    let b = world.body(cargo);
+    assert_relative_eq!(b.position.y, 0.75, epsilon = 0.05);
+    assert!(!b.is_active(), "idle kinematic contacts must let it sleep");
+    // The platform itself never moved and keeps its velocity.
+    assert_eq!(world.body(platform).position, Vector3::new(0.0, 0.25, 0.0));
+}
+
+/// Kinematic-vs-kinematic and kinematic-vs-static overlaps are skipped
+/// entirely and leave both bodies untouched (Bullet's broadphase
+/// StaticFilter excludes them).
+#[test]
+fn kinematic_static_and_kinematic_kinematic_pairs_are_inert() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+    let ground = world.add_body(RigidBody::new_static(
+        bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+        Vector3::ZERO,
+    ));
+    let a = world.add_body(RigidBody::new_kinematic(
+        bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.5)),
+        Vector3::new(0.0, 0.5, 0.0),
+    ));
+    let b = world.add_body(RigidBody::new_kinematic(
+        bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.5)),
+        Vector3::new(0.3, 0.5, 0.0),
+    ));
+    let va = Vector3::new(0.5, 0.0, 0.0);
+    let vb = Vector3::new(-0.5, 0.0, 0.0);
+    world.body_mut(a).linear_velocity = va;
+    world.body_mut(b).linear_velocity = vb;
+
+    for _ in 0..120 {
+        world.step_simulation(1.0 / 60.0);
+    }
+    // They flew apart (or through each other) but no solver row ever touched
+    // their velocities, and the static ground still holds them where their
+    // velocities put them.
+    assert_eq!(world.body(a).linear_velocity, va);
+    assert_eq!(world.body(b).linear_velocity, vb);
+    assert!(world.body(a).position.y > 0.0);
+    let _ = ground;
+}

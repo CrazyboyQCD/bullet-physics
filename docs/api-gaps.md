@@ -139,20 +139,36 @@ S/M/L · **See** = existing notes.
     it must stay off the solver path (call once per step, not per
     contact). Ownership: `Box` per body only when opted in.
   - Size: S–M (the design debate is the cost, not the code).
-- **kinematic rigid body**: the full kinematic type surface
+- **kinematic rigid body** ✅ (2026-09-04): the full kinematic type surface
   (`CF_KINEMATIC_OBJECT` + velocity propagation).
-  - Impl: `CollisionFlags::KINEMATIC` (next free bit after
-    `NO_CONTACT_RESPONSE` = 0x0001) + `is_kinematic()`; integration
-    moves the pose from velocity but applies no gravity/damping/forces;
-    solver and island paths treat it as infinite mass (its `inv_mass`
-    is already 0 — mostly gating, not new math).
-  - Files: `body.rs` (flag + accessors), `world.rs` — every
-    `is_static()` gate in integrate / islands / solver prepare / CCD
-    needs an `is_static_or_kinematic()` review pass (~20 sites).
-  - Risk: the widest blast radius in this tier — a missed gate lets a
-    kinematic body gain impulses or join islands; kinematic bodies must
-    wake dynamic contacts they move into (Bullet's contact generation
-    does this for free since pairs are detected).
+  - Shipped: `CollisionFlags::KINEMATIC` (bit 0x0004; `DISABLE_WORLD_GRAVITY`
+    had already taken 0x0002) + `is_kinematic()` / `is_static_or_kinematic()`;
+    `RigidBody::new_kinematic(shape, position)` (infinite mass via the static
+    inertia path, `DisableDeactivation` - a kinematic body is the activation
+    source its resting contacts rely on) and a `kinematic(on)` builder.
+  - Gates (the `is_static_or_kinematic()` review pass): velocity integration
+    (gravity/damping/forces never touch the user-set velocities), `add_body`
+    gravity inheritance, split-impulse pushes, CCD clamping, the pair pass
+    (both-sides-immovable pairs skipped, mirroring Bullet's broadphase
+    `StaticFilter` group exclusion), `participates_in_islands` (kinematics
+    sit outside the island node space like statics) and the softbody cluster
+    contact branches (`kSKHR_CL` / anchored-cluster skip).
+  - Wake propagation: a *moving* kinematic (nonzero velocities) wakes every
+    island it pairs with, decided in the island pass (which runs before the
+    narrow phase); an idle one keeps its resting contacts sleeping, like
+    Bullet's contact-point activation on a resting manifold.
+  - Solver needed zero changes: `inv_mass == 0` degrades every row
+    mathematically, and the kinematic's velocity still feeds the relative
+    velocity (velocity propagation).
+  - Deviations recorded (bullet-deviations §3): pose integration from the
+    user-set velocity (Bullet drives the pose from the user/motion state and
+    only uses the velocity for contacts; here a user `set_translation` every
+    frame composes with the velocity integration the same way), and
+    `new_kinematic` starts `DisableDeactivation` (Bullet kinematics walk the
+    sleep state machine; without it the velocity-driven pose would stall).
+  - Tests: 5 scene tests (push, force/gravity/damping immunity + pose
+    integration, wake propagation, idle-platform sleeping, inert
+    kinematic-kinematic/static pairs).
   - Size: M.
 - **per-body gravity** ✅ (2026-09-02): `btRigidBody::setGravity` — only world gravity
   exists here.

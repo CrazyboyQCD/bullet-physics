@@ -98,6 +98,20 @@ for _ in 0..300 {
 }
 ```
 
+### Kinematic bodies (moving platforms)
+
+```rust
+use bullet::dynamics::RigidBody;
+
+// Infinite mass, pose driven by the velocities you set; gravity, damping
+// and forces never touch it, and it pushes dynamic bodies through contacts.
+let platform = world.add_body(RigidBody::new_kinematic(
+    CollisionShape::box_shape(Vector3::new(2.0, 0.25, 2.0)),
+    Vector3::new(0.0, 1.0, 0.0),
+));
+world.body_mut(platform).linear_velocity = Vector3::new(1.5, 0.0, 0.0);
+```
+
 ## License
 
 Licensed under the [zlib license](LICENSE). This project is a reimplementation
