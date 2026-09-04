@@ -19,12 +19,78 @@
 //! stage integrate_velocities_ms <x> ...
 //! ```
 //!
+//! `--mem` instead prints the allocation-accounting trend of one run (both
+//! runners share the protocol, so tools/perf.py can compare the curves;
+//! see `CountingAllocator` below for the accounting design):
+//!
+//! ```text
+//! mem frame <f> live_mb <x> peak_mb <y>
+//! ```
+//!
 //! Run in release for meaningful numbers:
 //! `cargo run --release -p bullet --example perf_scenes -- <scene>`.
 //!
-//! Usage: perf_scenes <scene> [--repeats N] [--stages]
+//! Usage: perf_scenes <scene> [--repeats N] [--stages] [--mem]
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
+
+/// Allocator accounting for the `--mem` run mode: a pass-through wrapper of
+/// `System` that tracks live/peak requested bytes only while `TRACKING` is
+/// set. Timed repeats never enable tracking, so the headline numbers see one
+/// relaxed load + branch per allocation at most (and the accounting itself is
+/// observation only - allocation results are untouched, keeping the physics
+/// bit-identical).
+///
+/// This is the same application-level accounting the C++ runner gets from
+/// its global `operator new` + `btAlignedAllocSetCustomAligned` hooks, so
+/// both sides report the same unit (requested bytes; CRT/runtime-internal
+/// allocations are outside either count).
+struct CountingAllocator;
+
+static TRACKING: AtomicBool = AtomicBool::new(false);
+static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
+static PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() && TRACKING.load(Ordering::Relaxed) {
+            let bytes = layout.size() as i64;
+            let live = LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
+            PEAK_BYTES.fetch_max(live.max(0) as u64, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if TRACKING.load(Ordering::Relaxed) {
+            // Clamp: chunks allocated before tracking was switched on (the
+            // startup window) free late and would otherwise drag the total
+            // below zero.
+            let old = LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
+            if old < layout.size() as i64 {
+                LIVE_BYTES.fetch_add(layout.size() as i64, Ordering::Relaxed);
+            }
+        }
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOC: CountingAllocator = CountingAllocator;
+
+/// Curve sampling interval of the `--mem` run mode (frames).
+const MEM_SAMPLE_EVERY: u32 = 50;
+
+fn mem_live_mb() -> f64 {
+    LIVE_BYTES.load(Ordering::Relaxed).max(0) as f64 / 1048576.0
+}
+
+fn mem_peak_mb() -> f64 {
+    PEAK_BYTES.load(Ordering::Relaxed) as f64 / 1048576.0
+}
 
 use bullet::dynamics::{
     create_patch, BodyHandle, MultiBody, PhysicsWorld, RigidBody, StepStage, STEP_STAGES,
@@ -283,6 +349,22 @@ fn run_stages(spec: &PerfSceneSpec, dt: Real) {
     println!("stage total_ms {:.3}", t.total().as_secs_f64() * 1000.0);
 }
 
+/// Memory-trend run mode: step one run from frame 0 (including warmup) and
+/// sample the accounting allocator every `MEM_SAMPLE_EVERY` frames. Tracking
+/// is switched on before the world is built, so the construction peak is
+/// part of the curve; the timed-repeats protocol never enables it.
+fn run_mem(spec: &PerfSceneSpec, dt: Real) {
+    TRACKING.store(true, Ordering::Relaxed);
+    let (mut world, mut pending) = build_world(spec);
+    let frames = spec.warmup + spec.frames;
+    for f in 0..frames {
+        step_once(&mut world, spec, f as u64, dt, &mut pending);
+        if f % MEM_SAMPLE_EVERY == 0 || f == frames - 1 {
+            println!("mem frame {f} live_mb {:.3} peak_mb {:.3}", mem_live_mb(), mem_peak_mb());
+        }
+    }
+}
+
 /// Widening helper that stays cast-free under both precisions (same
 /// pattern as `frame_relevant` in axis_sweep3.rs).
 fn to_f64(v: impl Into<f64>) -> f64 {
@@ -344,6 +426,7 @@ fn main() {
     let mut repeats: u32 = 5;
     let mut stages = false;
     let mut dump = false;
+    let mut mem = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -353,6 +436,7 @@ fn main() {
             }
             "--stages" => stages = true,
             "--dump" => dump = true,
+            "--mem" => mem = true,
             other => eprintln!("perf_scenes: ignoring unknown arg {other}"),
         }
         i += 1;
@@ -378,6 +462,10 @@ fn main() {
     }
     if stages {
         run_stages(spec, dt);
+        return;
+    }
+    if mem {
+        run_mem(spec, dt);
         return;
     }
     for r in 0..repeats {

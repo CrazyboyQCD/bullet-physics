@@ -15,6 +15,13 @@
 // aggregate stack health every 5 frames (matching the Rust runner's
 // run_dump protocol, for behavioral comparison of settling scenes).
 //
+// `--mem` instead prints the allocation-accounting trend of one run, sampled
+// every 50 frames (same protocol line as the Rust runner's --mem mode, so
+// tools/perf.py can compare the curves). The accounting hooks the two
+// official allocation routes (see the "allocation accounting" block below);
+// tracking stays off for the timed-repeats protocol, which then runs the
+// stock allocators unchanged.
+//
 // Fairness notes (documented in docs/bullet-perf.md):
 //   - the broad phase follows the scene spec: btAxisSweep3 (matching this
 //     crate's default AxisSweep3, scoped with the broadphase_aabb hint) or
@@ -30,14 +37,18 @@
 //     look fast and be meaningless), matching this crate's dynamic
 //     TriangleMesh path; static meshes stay btBvhTriangleMeshShape.
 
-// Usage: bullet_perf.exe <scene_name> [repeats]
+// Usage: bullet_perf.exe <scene_name> [repeats] [--dump] [--mem]
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <malloc.h>
 #include <memory>
+#include <new>
 #include <vector>
 
 #include "btBulletDynamicsCommon.h"
@@ -57,9 +68,72 @@
 #include <BulletDynamics/Featherstone/btMultiBodyConstraintSolver.h>
 #include <BulletDynamics/Featherstone/btMultiBodyLinkCollider.h>
 
+#include <LinearMath/btAlignedAllocator.h>
+
 #include "bullet_perf_scenes.h"
 
 namespace {
+
+// --- allocation accounting (--mem run mode) -------------------------------
+// Two hook points cover the full application-level dynamic footprint:
+//   - the global operator new/delete family below (shape/body/motion-state
+//     objects and the std containers this runner owns);
+//   - btAlignedAllocSetCustomAligned (Bullet's internal btAlignedObjectArray
+//     storage, which routes to _aligned_malloc on Windows and never touches
+//     operator new; installed only by the --mem run mode).
+// Both report requested bytes, matching the Rust runner's global-allocator
+// accounting unit; CRT/runtime-internal allocations are outside either
+// side's count. Tracking stays off for the timed repeats, which then cost
+// one relaxed load + branch per allocation at most.
+static std::atomic<bool> g_track{false};
+static std::atomic<long long> g_live{0};
+static std::atomic<long long> g_peak{0};
+
+static void mem_note_alloc(std::size_t n) {
+  const long long live =
+      g_live.fetch_add(long long(n), std::memory_order_relaxed) + long long(n);
+  long long prev = g_peak.load(std::memory_order_relaxed);
+  // Single CAS loop (no fetch_max in C++17; physics is single-threaded, so
+  // this succeeds on the first try in practice).
+  while (live > prev &&
+         !g_peak.compare_exchange_weak(prev, live, std::memory_order_relaxed)) {
+  }
+}
+
+static void mem_note_free(std::size_t n) {
+  // Clamp: chunks allocated before tracking was switched on (the startup
+  // window) free late and would otherwise drag the total below zero.
+  const long long old = g_live.fetch_sub(long long(n), std::memory_order_relaxed);
+  if (old < long long(n))
+    g_live.fetch_add(long long(n), std::memory_order_relaxed);
+}
+
+// Bullet's aligned allocations carry a 16-byte header so the free path can
+// recover the request size (_aligned_malloc exposes no size query for
+// arbitrary alignments). The header size keeps the user pointer aligned for
+// every alignment >= 16 (Bullet's own BT_MALLOC_ALIGNMENT).
+static void* bt_alloc_custom(std::size_t size, int alignment) {
+  const std::size_t align = alignment < 16 ? 16 : std::size_t(alignment);
+  unsigned char* raw = static_cast<unsigned char*>(
+      _aligned_malloc(size + 2 * sizeof(std::size_t), align));
+  if (!raw) return nullptr;
+  std::size_t* hdr = reinterpret_cast<std::size_t*>(raw);
+  hdr[0] = size;
+  hdr[1] = align;
+  if (g_track.load(std::memory_order_relaxed)) mem_note_alloc(size);
+  return raw + 2 * sizeof(std::size_t);
+}
+
+static void bt_free_custom(void* ptr) {
+  if (!ptr) return;
+  unsigned char* raw =
+      static_cast<unsigned char*>(ptr) - 2 * sizeof(std::size_t);
+  if (g_track.load(std::memory_order_relaxed)) {
+    const std::size_t* hdr = reinterpret_cast<const std::size_t*>(raw);
+    mem_note_free(hdr[0]);
+  }
+  _aligned_free(raw);
+}
 
 btCollisionShape* make_shape(const PerfBodySpec& b, bool is_static,
                              std::vector<std::unique_ptr<btTriangleMesh>>& meshes) {
@@ -380,17 +454,144 @@ void run_dump(const PerfSceneSpec& spec, btScalar dt) {
   }
 }
 
+// Memory-trend run mode (mirrors the Rust runner's --mem protocol): step one
+// run from frame 0 (including warmup) and sample the accounting allocator
+// every 50 frames. Tracking switches on before the SceneRun is built, so the
+// construction peak is part of the curve; the timed-repeats path never
+// enables tracking and never installs the btAligned hook, keeping the
+// headline numbers on the stock allocators.
+void run_mem(const PerfSceneSpec& spec, btScalar dt) {
+  g_track.store(true, std::memory_order_relaxed);
+  btAlignedAllocSetCustomAligned(&bt_alloc_custom, &bt_free_custom);
+  SceneRun run(spec);
+  const int frames = spec.warmup + spec.frames;
+  for (int f = 0; f < frames; ++f) {
+    run.step(dt);
+    if (f % 50 == 0 || f == frames - 1) {
+      std::printf("mem frame %d live_mb %.3f peak_mb %.3f\n", f,
+                  double(std::max<long long>(0, g_live.load(std::memory_order_relaxed))) /
+                      1048576.0,
+                  double(g_peak.load(std::memory_order_relaxed)) / 1048576.0);
+    }
+  }
+}
+
 }  // namespace
+
+// --- global operator new/delete family ------------------------------------
+// Must live at global scope to replace the default allocation functions.
+// With tracking off each allocation costs one relaxed load + branch (same
+// overhead class as the Rust runner's wrapper); the timed repeats therefore
+// keep the same code path with the switch untouched.
+// Sized deletes carry the request size; polymorphic deletes may resolve to
+// the unsized form (live can then lag slightly), while the peak - which only
+// grows on allocation - stays exact.
+void* operator new(std::size_t n) {
+  void* p = std::malloc(n ? n : 1);
+  if (!p) throw std::bad_alloc{};
+  if (g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+  return p;
+}
+
+void* operator new[](std::size_t n) {
+  void* p = std::malloc(n ? n : 1);
+  if (!p) throw std::bad_alloc{};
+  if (g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+  return p;
+}
+
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
+  void* p = std::malloc(n ? n : 1);
+  if (p && g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+  return p;
+}
+
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept {
+  void* p = std::malloc(n ? n : 1);
+  if (p && g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+  return p;
+}
+
+void operator delete(void* p) noexcept { std::free(p); }
+
+void operator delete[](void* p) noexcept { std::free(p); }
+
+void operator delete(void* p, std::size_t n) noexcept {
+  if (p && g_track.load(std::memory_order_relaxed)) mem_note_free(n);
+  std::free(p);
+}
+
+void operator delete[](void* p, std::size_t n) noexcept {
+  if (p && g_track.load(std::memory_order_relaxed)) mem_note_free(n);
+  std::free(p);
+}
+
+// Aligned forms (C++17): no over-aligned type exists in this runner today,
+// but any future one must keep routing through the accounting.
+void* operator new(std::size_t n, std::align_val_t al) {
+  void* p = _aligned_malloc(n ? n : 1, std::size_t(al));
+  if (!p) throw std::bad_alloc{};
+  if (g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+  return p;
+}
+
+void* operator new[](std::size_t n, std::align_val_t al) {
+  void* p = _aligned_malloc(n ? n : 1, std::size_t(al));
+  if (!p) throw std::bad_alloc{};
+  if (g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+  return p;
+}
+
+void* operator new(std::size_t n, std::align_val_t al,
+                   const std::nothrow_t&) noexcept {
+  void* p = _aligned_malloc(n ? n : 1, std::size_t(al));
+  if (p && g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+  return p;
+}
+
+void* operator new[](std::size_t n, std::align_val_t al,
+                     const std::nothrow_t&) noexcept {
+  void* p = _aligned_malloc(n ? n : 1, std::size_t(al));
+  if (p && g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+  return p;
+}
+
+void operator delete(void* p, std::align_val_t) noexcept { _aligned_free(p); }
+
+void operator delete[](void* p, std::align_val_t) noexcept { _aligned_free(p); }
+
+void operator delete(void* p, std::size_t n, std::align_val_t) noexcept {
+  if (p && g_track.load(std::memory_order_relaxed)) mem_note_free(n);
+  _aligned_free(p);
+}
+
+void operator delete[](void* p, std::size_t n, std::align_val_t) noexcept {
+  if (p && g_track.load(std::memory_order_relaxed)) mem_note_free(n);
+  _aligned_free(p);
+}
+
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept {
+  _aligned_free(p);
+}
+
+void operator delete[](void* p, std::align_val_t,
+                       const std::nothrow_t&) noexcept {
+  _aligned_free(p);
+}
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: bullet_perf.exe <scene_name> [repeats] [--dump]\n");
+    std::fprintf(stderr, "usage: bullet_perf.exe <scene_name> [repeats] [--dump] [--mem]\n");
     return 2;
   }
   const char* scene_name = argv[1];
   bool dump = false;
+  bool mem = false;
+  int repeats_arg = 0;
   for (int i = 2; i < argc; ++i) {
     if (std::strcmp(argv[i], "--dump") == 0) dump = true;
+    else if (std::strcmp(argv[i], "--mem") == 0) mem = true;
+    else repeats_arg = std::atoi(argv[i]);
   }
   const PerfSceneSpec* spec = find_scene(scene_name);
   if (!spec) {
@@ -402,7 +603,11 @@ int main(int argc, char** argv) {
     run_dump(*spec, dt);
     return 0;
   }
-  const int repeats = argc > 2 ? std::atoi(argv[2]) : 5;
+  if (mem) {
+    run_mem(*spec, dt);
+    return 0;
+  }
+  const int repeats = repeats_arg > 0 ? repeats_arg : 5;
   const int bodies = spec->num_bodies + (spec->chains.count > 0 ? spec->chains.count : 0)
                      + spec->softs.count;
   std::printf("perf scene %s bodies %d frames %d warmup %d\n", spec->name, bodies,
