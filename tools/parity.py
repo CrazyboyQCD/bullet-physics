@@ -77,7 +77,8 @@ def ensure_bullet_libs(precision):
     (CMake + MSVC). f64 uses a separate tree configured with
     -DUSE_DOUBLE_PRECISION=ON, so the f32 build is never touched."""
     lib_dir = BULLET_LIBS[precision]
-    missing = [n for n in ("LinearMath.lib", "BulletCollision.lib", "BulletDynamics.lib")
+    missing = [n for n in ("LinearMath.lib", "BulletCollision.lib", "BulletDynamics.lib",
+                           "BulletSoftBody.lib")
                if not os.path.exists(os.path.join(lib_dir, n))]
     if not missing:
         return True
@@ -87,6 +88,11 @@ def ensure_bullet_libs(precision):
     r = run(["cmake", "-S", os.path.join(ROOT, "refs", "bullet3"),
              "-B", build_dir, "-A", "x64",
              "-DCMAKE_CONFIGURATION_TYPES=Release",
+             # Static CRT (/MT) to match the probe builds (cl's default): a
+             # /MD Bullet lib resolves its news through the CRT DLL and
+             # silently bypasses the global operator new accounting hook in
+             # tools/bullet_perf.cpp --mem.
+             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
              "-DBUILD_CPU_DEMOS=OFF", "-DBUILD_EXTRAS=OFF", "-DBUILD_UNIT_TESTS=OFF",
              "-DBUILD_OPENGL3_DEMOS=OFF", "-DBUILD_PYBULLET=OFF",
              "-DBUILD_BULLET2_DEMOS=OFF", "-DBUILD_BULLET3=OFF",
@@ -94,7 +100,8 @@ def ensure_bullet_libs(precision):
     if r.returncode != 0:
         return False
     r = run(["cmake", "--build", build_dir,
-             "--config", "Release", "--target", "LinearMath", "BulletCollision", "BulletDynamics"])
+             "--config", "Release", "--target", "LinearMath", "BulletCollision",
+             "BulletDynamics", "BulletSoftBody"])
     return r.returncode == 0
 
 

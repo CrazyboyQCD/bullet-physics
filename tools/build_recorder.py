@@ -99,7 +99,11 @@ def build_perf():
     # The Gimpact headers (btGImpactShape.h et al.) live in the Gimpact
     # subfolder, not next to the other collision headers.
     gimpact_inc = os.path.join(ROOT, "refs", "bullet3", "src", "BulletCollision", "Gimpact")
-    cmd = ["cl", "/nologo", "/O2", "/EHsc", "/std:c++17",
+    # /MT explicitly: the Bullet statics are built with
+    # CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded; mixing /MD (DLL CRT) with
+    # them would route the lib's news through the CRT DLL and bypass the
+    # global operator new hook that --mem relies on.
+    cmd = ["cl", "/nologo", "/O2", "/EHsc", "/std:c++17", "/MT",
            f"/Fo{obj}", f"/I{os.path.join(ROOT, 'refs', 'bullet3', 'src')}",
            f"/I{gimpact_inc}",
            PERF_SRC, f"/Fe:{PERF_EXE}", "/link", *libs("f32"),
@@ -136,7 +140,7 @@ def build(precision="f32"):
     full_env = dict(os.environ)
     full_env.update(env)
 
-    cmd = ["cl", "/nologo", "/O2", "/EHsc", "/std:c++17",
+    cmd = ["cl", "/nologo", "/O2", "/EHsc", "/std:c++17", "/MT",
            f"/Fo{obj}", f"/I{os.path.join(ROOT, 'refs', 'bullet3', 'src')}",
            SRC, f"/Fe:{exe}", "/link", *libs(precision)]
     # The double-precision Bullet build defines BT_USE_DOUBLE_PRECISION

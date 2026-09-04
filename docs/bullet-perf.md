@@ -61,6 +61,22 @@ the analysis text below each report is hand-written).
   columns are directly comparable. Tracking stays off during the timed
   repeats (at most one relaxed load + branch per allocation), keeping the
   headline numbers on the stock allocators.
+  **CRT discipline**: the Bullet statics are configured with
+  `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` (/MT) to match the probe
+  builds (cl default) — a /MD lib resolves its `new` through the CRT DLL
+  and silently bypasses the global operator new hook. Measured impact of
+  the fix was nil (Bullet classes overwhelmingly carry
+  `BT_DECLARE_ALIGNED_ALLOCATOR` and route through the aligned hook), but
+  the /MT build closes the audit hole.
+  **Anchor**: the C++ runner prints `mem mark` lines and a per-sample
+  `ws_mb` (process working set). The ws−live gap stays constant (~3.8 MB:
+  code pages + static CRT) and the live and ws deltas track each other
+  through the run, ruling out systematic undercounting. The dominant
+  term in Bullet's construction-phase baseline is its configuration-layer
+  preallocation — the 4096-entry `btPersistentManifold` pool plus the
+  collision-algorithm pool and the AxisSweep3 edge/handle tables — not
+  per-body objects; our construction baseline is ~14x smaller because the
+  matching structures are lazily grown `Vec`s.
 - **Caveats.** Absolute numbers are machine- and load-sensitive; only the
   rust/bullet ratio (same machine, interleaved runs) is meaningful. Chaotic
   trajectories may diverge slightly between engines, shifting when stacks
@@ -385,14 +401,16 @@ Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hook
 
 **Analysis (2026-09-04, handwritten)**: steady-state residency reads
 ~0.20x (1.75 vs 8.74 MB live; peaks 1.79 vs 8.97 MB). The split already
-exists at construction (frame 0: 0.52 vs 7.33 MB, ~14x): Bullet's
-per-body `btCollisionObject` + `btDefaultMotionState` + per-shape heap
-objects outweigh our value-semantics `RigidBody` slots, and most of that
-gap persists through the run. The rain registration phase (frames 0→100)
-adds a similar slope on both sides (~1.2 MB rust vs ~1.4 MB bullet:
-broadphase proxies + persistent manifolds). Numbers are
-allocator-accounting, machine-independent; sampled every 50 frames over
-one fresh-world run.
+exists at construction (frame 0: 0.52 vs 7.33 MB, ~14x) and is dominated
+by Bullet's configuration-layer preallocation (4096-entry manifold pool,
+collision-algorithm pool, AxisSweep3 edge/handle tables — see the
+methodology anchor note), with per-body `btCollisionObject` +
+`btDefaultMotionState` objects a minor term against our value-semantics
+`RigidBody` slots; most of that gap persists through the run. The rain
+registration phase (frames 0→100) adds a similar slope on both sides
+(~1.2 MB rust vs ~1.4 MB bullet: broadphase proxies + persistent
+manifolds). Numbers are allocator-accounting, machine-independent;
+sampled every 50 frames over one fresh-world run.
 
 ## Scene: mb_chains
 
@@ -588,8 +606,8 @@ Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hook
 22.11 MB live) — the weakest ratio in the set, and the biggest scene:
 2000 bodies' broadphase volume (dbvt nodes + proxies) plus contact
 manifolds grow with body count on both sides, so Bullet's fixed
-per-body overhead shrinks proportionally. The registration slope is
-similar (frame 100→309: +1.2 MB rust vs +1.5 MB bullet).
+construction preallocation shrinks proportionally. The registration
+slope is similar (frame 100→309: +1.2 MB rust vs +1.5 MB bullet).
 
 ## Scene: gimpact_rain_100
 
@@ -655,10 +673,11 @@ Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hook
 | 309 | 1.604 | 1.647 | 7.541 | 7.632 |
 
 **Analysis (2026-09-04, handwritten)**: steady-state ~0.21x (1.60 vs
-7.54 MB live). The BVH inside each GImpact shape dominates on both
-sides (triangle storage + bvh nodes are shape-owned); the flat curves
-after frame 50 show the mesh-mesh path accumulates no per-contact
-memory (GJK pairs, no persistent clipped tris).
+7.54 MB live). Bullet's construction baseline (configuration pools +
+the BVH inside each GImpact shape; triangle storage + bvh nodes are
+shape-owned on both sides) dominates at frame 0; the flat curves after
+frame 50 show the mesh-mesh path accumulates no per-contact memory
+(GJK pairs, no persistent clipped tris).
 
 ## Scene: game_arena
 

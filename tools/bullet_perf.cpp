@@ -72,6 +72,15 @@
 
 #include "bullet_perf_scenes.h"
 
+// OS working-set cross-check for the --mem mode (accounting anchor, not a
+// comparison metric: it includes code pages, CRT and runtime, so it only
+// bounds the hook accounting from above).
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+
 namespace {
 
 // --- allocation accounting (--mem run mode) -------------------------------
@@ -133,6 +142,29 @@ static void bt_free_custom(void* ptr) {
     mem_note_free(hdr[0]);
   }
   _aligned_free(raw);
+}
+
+static double mem_ws_mb() {
+  PROCESS_MEMORY_COUNTERS pmc{};
+  if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return 0.0;
+  return double(pmc.WorkingSetSize) / 1048576.0;
+}
+
+static double mem_live_mb_now() {
+  return double(std::max<long long>(0, g_live.load(std::memory_order_relaxed))) /
+         1048576.0;
+}
+
+static double mem_peak_mb_now() {
+  return double(g_peak.load(std::memory_order_relaxed)) / 1048576.0;
+}
+
+// `mem mark` lines split construction from stepping (with the whole-process
+// working set as the leak/miscount anchor: hook live must stay below ws, and
+// a wide gap would mean allocations the hooks miss).
+static void mem_print_mark(const char* label) {
+  std::printf("mem mark %s live_mb %.3f peak_mb %.3f ws_mb %.3f\n", label,
+              mem_live_mb_now(), mem_peak_mb_now(), mem_ws_mb());
 }
 
 btCollisionShape* make_shape(const PerfBodySpec& b, bool is_static,
@@ -463,15 +495,15 @@ void run_dump(const PerfSceneSpec& spec, btScalar dt) {
 void run_mem(const PerfSceneSpec& spec, btScalar dt) {
   g_track.store(true, std::memory_order_relaxed);
   btAlignedAllocSetCustomAligned(&bt_alloc_custom, &bt_free_custom);
+  mem_print_mark("before_build");
   SceneRun run(spec);
+  mem_print_mark("after_build");
   const int frames = spec.warmup + spec.frames;
   for (int f = 0; f < frames; ++f) {
     run.step(dt);
     if (f % 50 == 0 || f == frames - 1) {
-      std::printf("mem frame %d live_mb %.3f peak_mb %.3f\n", f,
-                  double(std::max<long long>(0, g_live.load(std::memory_order_relaxed))) /
-                      1048576.0,
-                  double(g_peak.load(std::memory_order_relaxed)) / 1048576.0);
+      std::printf("mem frame %d live_mb %.3f peak_mb %.3f ws_mb %.3f\n", f,
+                  mem_live_mb_now(), mem_peak_mb_now(), mem_ws_mb());
     }
   }
 }
