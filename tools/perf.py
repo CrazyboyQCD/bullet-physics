@@ -256,10 +256,10 @@ def build_report(scene, bullet, rust, stages):
 
 def update_ledger_section(header, marker, report_md, append_on_missing=False):
     """Replace the '<marker> ...' section under '<header>' in the ledger; a
-    missing header is appended at the end (the classification text below the
-    numbers stays untouched). A missing marker inserts the section at the end
-    of the scene's block when append_on_missing is set (first --mem run on a
-    scene that already has a wall-clock section); otherwise it skips."""
+    missing marker inserts the section at the end of the scene's block when
+    append_on_missing is set (first --mem run on a scene that already has a
+    wall-clock section); otherwise it skips. A missing scene header always
+    skips (sweep tiers have no '## Scene:' blocks by design)."""
     if not os.path.exists(LEDGER):
         print(f"note: ledger {LEDGER} not found; skipping --update-ledger", file=sys.stderr)
         return
@@ -270,10 +270,10 @@ def update_ledger_section(header, marker, report_md, append_on_missing=False):
 
     scene_pos = text.find(header)
     if scene_pos < 0:
-        section = f"\n{header}\n\n{new_section}\n"
-        with open(LEDGER, "a", encoding="utf-8") as f:
-            f.write(section)
-        print(f"ledger updated: {LEDGER} ({header}, new section)")
+        # Scene sections are hand-curated (the sweep tiers live in the sweep
+        # aggregates, not as their own '## Scene:' blocks); never create one
+        # implicitly.
+        print(f"note: no '{header}' in ledger; skipping", file=sys.stderr)
         return
 
     next_scene = text.find("\n## ", scene_pos + len(header))
