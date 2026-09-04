@@ -108,7 +108,7 @@
       "warmup": 10,
       "iterations": 10,
       "gravity": [0, -9.81, 0],
-      "broadphase": "sweep",
+      "broadphase": "dbvt",
       "broadphase_aabb": [[-25, -2, -25], [25, 20, 25]],
       "bodies": [
         {
