@@ -76,6 +76,15 @@ pub struct ContactConstraint {
     split_active: bool,
     rhs_penetration: Real,
     push_impulse: Real,
+    /// Whether each side actually receives impulses (`inv_mass > 0`):
+    /// static and kinematic bodies carry zero inverse mass and a zero
+    /// inverse-inertia, so applying to them adds exact zeros to their
+    /// velocities — skipped to save the arithmetic and the body
+    /// writeback (Bullet maps static/kinematic sides to a shared fixed
+    /// solver body and skips their writeback). Reading is untouched:
+    /// kinematic velocities are real and must enter `J·v`.
+    applies_a: bool,
+    applies_b: bool,
 }
 
 /// Bounds on the accumulated impulse of a constraint row (Bullet's
@@ -279,6 +288,8 @@ impl ContactConstraint {
             split_active: cp.penetration > SPLIT_IMPULSE_PENETRATION_THRESHOLD,
             rhs_penetration: 0.0,
             push_impulse: 0.0,
+            applies_a: inv_mass_a > 0.0,
+            applies_b: inv_mass_b > 0.0,
         }
     }
 }
@@ -427,10 +438,14 @@ pub(crate) fn split_impulse_pass(
 /// only, so it reuses the pre-folded normal angular components.
 #[inline]
 fn apply_push(a: &mut RigidBody, b: &mut RigidBody, c: &ContactConstraint, j: Real) {
-    a.push_linear -= c.normal * (j * c.inv_mass_a);
-    b.push_linear += c.normal * (j * c.inv_mass_b);
-    a.push_angular -= c.ang_normal_a * j;
-    b.push_angular += c.ang_normal_b * j;
+    if c.applies_a {
+        a.push_linear -= c.normal * (j * c.inv_mass_a);
+        a.push_angular -= c.ang_normal_a * j;
+    }
+    if c.applies_b {
+        b.push_linear += c.normal * (j * c.inv_mass_b);
+        b.push_angular += c.ang_normal_b * j;
+    }
 }
 
 fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Real) {
@@ -559,10 +574,14 @@ fn apply_impulse(
         Dir::Tangent1 => (c.tangent1, c.ang_tangent1_a, c.ang_tangent1_b),
         Dir::Tangent2 => (c.tangent2, c.ang_tangent2_a, c.ang_tangent2_b),
     };
-    a.linear_velocity -= dir_vec * (j * c.inv_mass_a);
-    b.linear_velocity += dir_vec * (j * c.inv_mass_b);
-    a.angular_velocity -= comp_a * j;
-    b.angular_velocity += comp_b * j;
+    if c.applies_a {
+        a.linear_velocity -= dir_vec * (j * c.inv_mass_a);
+        a.angular_velocity -= comp_a * j;
+    }
+    if c.applies_b {
+        b.linear_velocity += dir_vec * (j * c.inv_mass_b);
+        b.angular_velocity += comp_b * j;
+    }
 }
 
 #[cfg(test)]
