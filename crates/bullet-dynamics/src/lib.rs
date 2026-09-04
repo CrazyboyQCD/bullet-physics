@@ -9,6 +9,7 @@ mod island;
 pub mod multibody;
 pub mod softbody;
 pub mod solver;
+pub mod timing;
 pub mod vehicle;
 pub mod world;
 
@@ -29,4 +30,5 @@ pub use softbody::{
     SContact, Side, SoftBody, SoftCollision, SoftJoint, Tetra, ROPE_FIX_END, ROPE_FIX_START,
 };
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
-pub use world::{CollisionEvent, PhysicsWorld, StepStage, StepTimings, STEP_STAGES};
+pub use timing::{StepStage, StepTimings, STEP_STAGES};
+pub use world::{CollisionEvent, PhysicsWorld};
