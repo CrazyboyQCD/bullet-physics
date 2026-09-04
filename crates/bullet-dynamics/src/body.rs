@@ -1,4 +1,4 @@
-use bullet_math::{Matrix3, Quaternion, Real, Vector3};
+use bullet_math::{math, Matrix3, Quaternion, Real, Vector3};
 use bullet_collision::shapes::CollisionShape;
 
 /// Seconds a body must stay below the sleeping thresholds before it sleeps
@@ -604,10 +604,10 @@ impl RigidBody {
         // Zero factors skip the `powf`; multiplying by
         // `powf(1.0, dt) = 1.0` would be exact anyway.
         if self.linear_damping != 0.0 {
-            self.linear_velocity *= (1.0 - self.linear_damping).powf(dt);
+            self.linear_velocity *= math::powf(1.0 - self.linear_damping, dt);
         }
         if self.angular_damping != 0.0 {
-            self.angular_velocity *= (1.0 - self.angular_damping).powf(dt);
+            self.angular_velocity *= math::powf(1.0 - self.angular_damping, dt);
         }
     }
 

@@ -1,4 +1,4 @@
-use bullet_math::{Quaternion, Real, Vector3};
+use bullet_math::{math, Quaternion, Real, Vector3};
 
 /// Distance below which two contact points are the same physical contact,
 /// and how far a cached contact may separate (or drift sideways) before it
@@ -144,7 +144,7 @@ const MANIFOLD_CACHE_SIZE: usize = 4;
 /// Rotation angle of a unit quaternion (`2 * acos(w)`, clamped).
 #[inline]
 fn rotation_angle(q: Quaternion) -> Real {
-    2.0 * q.w.clamp(-1.0, 1.0).acos()
+    2.0 * math::acos(q.w.clamp(-1.0, 1.0))
 }
 
 /// A contact manifold cached per overlapping body pair across steps

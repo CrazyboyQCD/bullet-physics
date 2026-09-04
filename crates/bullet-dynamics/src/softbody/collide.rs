@@ -16,7 +16,7 @@ use bullet_collision::narrowphase::gjk::{core_support_minkowski, gjk_contact, Gj
 use bullet_collision::narrowphase::point_triangle_distance;
 use bullet_collision::shapes::CollisionShape;
 use bullet_collision::shapes::TriangleMesh;
-use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
+use bullet_math::{math, Aabb, Matrix3, Quaternion, Real, Vector3};
 
 use crate::body::RigidBody;
 use crate::handles::{BodyHandle, SoftBodyHandle};
@@ -204,7 +204,7 @@ fn point_mesh_distance(
         }
     }
     let (d2, dir) = best?;
-    let distance = d2.sqrt();
+    let distance = math::sqrt(d2);
     let dst = distance - margin;
     if dst >= 0.0 {
         return None;
@@ -460,7 +460,7 @@ pub fn collide_vf_ss(node_side: &mut SoftBody, face_side: &mut SoftBody, face_bo
             face_body,
             face: fi,
             weights: w,
-            normal: p / -d.sqrt(),
+            normal: p / -math::sqrt(d),
             margin: m,
             friction: k_df_node.max(k_df_face),
             cfm: [ma / ms * k_shr_node, mb / ms * k_shr_face],

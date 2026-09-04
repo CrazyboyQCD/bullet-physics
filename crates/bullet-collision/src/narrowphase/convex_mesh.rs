@@ -7,7 +7,7 @@
 //! `collide` convention that the normal points from `shape_a` to `shape_b`
 //! (callers flip as needed).
 
-use bullet_math::{Aabb, Quaternion, Real, Vector3};
+use bullet_math::{math, Aabb, Quaternion, Real, Vector3};
 
 use crate::manifold::{ContactManifold, ContactPoint};
 use crate::narrowphase::convex_convex::convex_convex;
@@ -133,7 +133,7 @@ fn sphere_triangle_contact(
         // Degenerate triangle (Bullet skips it too).
         return None;
     }
-    normal *= l2.sqrt().recip();
+    normal *= math::sqrt(l2).recip();
     let p1_to_center = center - a;
     let mut distance_from_plane = normal.dot(p1_to_center);
     if distance_from_plane < 0.0 {
@@ -170,7 +170,7 @@ fn sphere_triangle_contact(
         return None;
     }
     if dist_sq > Real::EPSILON {
-        let distance = dist_sq.sqrt();
+        let distance = math::sqrt(dist_sq);
         Some((
             contact_point,
             contact_to_center * distance.recip(),

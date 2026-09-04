@@ -9,7 +9,7 @@
 //! the sphere radius is convex along the segment, so a ternary search finds the
 //! closest approach and a binary search finds the entry point.
 
-use bullet_math::{Aabb, Quaternion, Real, Vector3};
+use bullet_math::{math, Aabb, Quaternion, Real, Vector3};
 
 use crate::narrowphase::gjk::closest_origin;
 use crate::shapes::{CollisionShape, Plane, TriangleMesh};
@@ -131,7 +131,7 @@ fn sweep_triangle(
             // Inside the inflated triangle (or touching it).
             (0.0, Vector3::ZERO)
         } else {
-            let d = d2.sqrt();
+            let d = math::sqrt(d2);
             ((d - radius) * (d - radius), dv / d)
         }
     };

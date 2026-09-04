@@ -1,5 +1,5 @@
 use crate::manifold::{ContactManifold, ContactPoint};
-use bullet_math::{Matrix3, Quaternion, Real, Vector3};
+use bullet_math::{math, Matrix3, Quaternion, Real, Vector3};
 use crate::shapes::BoxShape;
 
 const EPSILON: Real = 1e-6;
@@ -253,7 +253,7 @@ fn box_box_sat(
             if s2 > EPSILON {
                 return None;
             }
-            let l = ($n1 * $n1 + $n2 * $n2 + $n3 * $n3).sqrt();
+            let l = math::sqrt($n1 * $n1 + $n2 * $n2 + $n3 * $n3);
             if l > EPSILON {
                 let s2 = s2 / l;
                 if s2 * FUDGE > s {

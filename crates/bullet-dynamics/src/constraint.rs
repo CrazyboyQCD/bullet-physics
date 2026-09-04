@@ -22,7 +22,7 @@
 //! true)`, a [`Constraint`] suppresses collision response between its two
 //! bodies by default ([`Constraint::set_disable_collisions`]).
 
-use bullet_math::{Matrix3, Quaternion, Real, Vector3};
+use bullet_math::{math, Matrix3, Quaternion, Real, Vector3};
 use bullet_math::compat::{quat_from_axis_angle, quat_from_mat3, quat_from_rotation_arc, quat_xyz};
 
 use crate::body::RigidBody;
@@ -828,7 +828,7 @@ fn get_hinge_angle(tr_a: &Matrix3, tr_b: &Matrix3) -> Real {
     let ref_axis0 = tr_a.col(0);
     let ref_axis1 = tr_a.col(1);
     let swing_axis = tr_b.col(1);
-    swing_axis.dot(ref_axis0).atan2(swing_axis.dot(ref_axis1))
+    math::atan2(swing_axis.dot(ref_axis0), swing_axis.dot(ref_axis1))
 }
 
 /// Wrap an angle into `[-π, π]` (Bullet's `btNormalizeAngle`).
@@ -892,12 +892,12 @@ pub(crate) fn euler_xyz(m: &Matrix3) -> Vector3 {
     let r00 = m.col(0).x; // mat[0][0]
     if r20 < 1.0 {
         if r20 > -1.0 {
-            Vector3::new((-r21).atan2(r22), r20.asin(), (-r10).atan2(r00))
+            Vector3::new(math::atan2(-r21, r22), math::asin(r20), math::atan2(-r10, r00))
         } else {
-            Vector3::new(-(r01).atan2(r11), -bullet_math::FRAC_PI_2, 0.0)
+            Vector3::new(-math::atan2(r01, r11), -bullet_math::FRAC_PI_2, 0.0)
         }
     } else {
-        Vector3::new((r01).atan2(r11), bullet_math::FRAC_PI_2, 0.0)
+        Vector3::new(math::atan2(r01, r11), bullet_math::FRAC_PI_2, 0.0)
     }
 }
 
@@ -1389,7 +1389,7 @@ impl ConeTwistConstraint {
             let swing_axis = quat_xyz(q_delta);
             let len2 = swing_axis.length_squared();
             if len2 > SIMD_EPSILON {
-                self.swing_axis = swing_axis / len2.sqrt();
+                self.swing_axis = swing_axis / math::sqrt(len2);
                 self.swing_correction = quaternion_angle(&q_delta);
                 if self.swing_correction.abs() > SIMD_EPSILON {
                     self.solve_swing_limit = true;
@@ -1446,13 +1446,13 @@ impl ConeTwistConstraint {
                         self.solve_swing_limit = true;
                         if self.swing_span2 >= CONE_TWIST_FIX_THRESH {
                             y = 0.0;
-                            let span2 = z.atan2(x);
+                            let span2 = math::atan2(z, x);
                             if span2 > self.swing_span2 {
-                                x = self.swing_span2.cos();
-                                z = self.swing_span2.sin();
+                                x = math::cos(self.swing_span2);
+                                z = math::sin(self.swing_span2);
                             } else if span2 < -self.swing_span2 {
-                                x = self.swing_span2.cos();
-                                z = -self.swing_span2.sin();
+                                x = math::cos(self.swing_span2);
+                                z = -math::sin(self.swing_span2);
                             }
                         }
                     }
@@ -1462,13 +1462,13 @@ impl ConeTwistConstraint {
                         self.solve_swing_limit = true;
                         if self.swing_span1 >= CONE_TWIST_FIX_THRESH {
                             z = 0.0;
-                            let span1 = y.atan2(x);
+                            let span1 = math::atan2(y, x);
                             if span1 > self.swing_span1 {
-                                x = self.swing_span1.cos();
-                                y = self.swing_span1.sin();
+                                x = math::cos(self.swing_span1);
+                                y = math::sin(self.swing_span1);
                             } else if span1 < -self.swing_span1 {
-                                x = self.swing_span1.cos();
-                                y = -self.swing_span1.sin();
+                                x = math::cos(self.swing_span1);
+                                y = -math::sin(self.swing_span1);
                             }
                         }
                     }
@@ -1517,7 +1517,7 @@ impl ConeTwistConstraint {
                 let mut norm = 1.0 / (self.swing_span2 * self.swing_span2);
                 norm += surface_slope2 / (self.swing_span1 * self.swing_span1);
                 let swing_limit2 = (1.0 + surface_slope2) / norm;
-                swing_limit = swing_limit2.sqrt();
+                swing_limit = math::sqrt(swing_limit2);
             }
             (swing_angle, swing_axis, swing_limit)
         } else {
@@ -1570,7 +1570,7 @@ fn angular_impulse_denominator(axis: Vector3, inv_inertia_world: &Matrix3) -> Re
 
 /// A quaternion's rotation angle in `[0, 2π]` (Bullet's `getAngle`).
 fn quaternion_angle(q: &Quaternion) -> Real {
-    2.0 * q.w.clamp(-1.0, 1.0).acos()
+    2.0 * math::acos(q.w.clamp(-1.0, 1.0))
 }
 
 /// The rotation of a frame's basis, as a quaternion (Bullet's
@@ -1809,7 +1809,7 @@ impl SliderConstraint {
             let axis_a1 = tr_a.col(2);
             let axis_b0 = tr_b.col(1);
             let rot = adjust_angle_to_limits(
-                axis_b0.dot(axis_a1).atan2(axis_b0.dot(axis_a0)),
+                math::atan2(axis_b0.dot(axis_a1), axis_b0.dot(axis_a0)),
                 self.lower_ang_limit,
                 self.upper_ang_limit,
             );

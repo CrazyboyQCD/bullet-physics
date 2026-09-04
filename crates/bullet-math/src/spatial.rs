@@ -88,7 +88,7 @@ impl SpatialMotionVector {
     }
 }
 
-impl std::ops::Add for SpatialMotionVector {
+impl core::ops::Add for SpatialMotionVector {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Self) -> Self {
@@ -99,7 +99,7 @@ impl std::ops::Add for SpatialMotionVector {
     }
 }
 
-impl std::ops::AddAssign for SpatialMotionVector {
+impl core::ops::AddAssign for SpatialMotionVector {
     #[inline]
     fn add_assign(&mut self, rhs: Self) {
         self.top += rhs.top;
@@ -107,7 +107,7 @@ impl std::ops::AddAssign for SpatialMotionVector {
     }
 }
 
-impl std::ops::Sub for SpatialMotionVector {
+impl core::ops::Sub for SpatialMotionVector {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self {
@@ -118,7 +118,7 @@ impl std::ops::Sub for SpatialMotionVector {
     }
 }
 
-impl std::ops::Neg for SpatialMotionVector {
+impl core::ops::Neg for SpatialMotionVector {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self {
@@ -129,7 +129,7 @@ impl std::ops::Neg for SpatialMotionVector {
     }
 }
 
-impl std::ops::Mul<Real> for SpatialMotionVector {
+impl core::ops::Mul<Real> for SpatialMotionVector {
     type Output = Self;
     #[inline]
     fn mul(self, s: Real) -> Self {
@@ -137,7 +137,7 @@ impl std::ops::Mul<Real> for SpatialMotionVector {
     }
 }
 
-impl std::ops::Mul<SpatialMotionVector> for Real {
+impl core::ops::Mul<SpatialMotionVector> for Real {
     type Output = SpatialMotionVector;
     #[inline]
     fn mul(self, v: SpatialMotionVector) -> SpatialMotionVector {
@@ -198,7 +198,7 @@ impl SpatialForceVector {
     }
 }
 
-impl std::ops::Add for SpatialForceVector {
+impl core::ops::Add for SpatialForceVector {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Self) -> Self {
@@ -209,7 +209,7 @@ impl std::ops::Add for SpatialForceVector {
     }
 }
 
-impl std::ops::AddAssign for SpatialForceVector {
+impl core::ops::AddAssign for SpatialForceVector {
     #[inline]
     fn add_assign(&mut self, rhs: Self) {
         self.top += rhs.top;
@@ -217,7 +217,7 @@ impl std::ops::AddAssign for SpatialForceVector {
     }
 }
 
-impl std::ops::Sub for SpatialForceVector {
+impl core::ops::Sub for SpatialForceVector {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self {
@@ -228,7 +228,7 @@ impl std::ops::Sub for SpatialForceVector {
     }
 }
 
-impl std::ops::Neg for SpatialForceVector {
+impl core::ops::Neg for SpatialForceVector {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self {
@@ -239,7 +239,7 @@ impl std::ops::Neg for SpatialForceVector {
     }
 }
 
-impl std::ops::Mul<Real> for SpatialForceVector {
+impl core::ops::Mul<Real> for SpatialForceVector {
     type Output = Self;
     #[inline]
     fn mul(self, s: Real) -> Self {
@@ -247,7 +247,7 @@ impl std::ops::Mul<Real> for SpatialForceVector {
     }
 }
 
-impl std::ops::Mul<SpatialForceVector> for Real {
+impl core::ops::Mul<SpatialForceVector> for Real {
     type Output = SpatialForceVector;
     #[inline]
     fn mul(self, v: SpatialForceVector) -> SpatialForceVector {
@@ -312,7 +312,7 @@ impl SymmetricSpatialDyad {
     }
 }
 
-impl std::ops::SubAssign for SymmetricSpatialDyad {
+impl core::ops::SubAssign for SymmetricSpatialDyad {
     #[inline]
     fn sub_assign(&mut self, rhs: Self) {
         self.top_left -= rhs.top_left;
@@ -321,7 +321,7 @@ impl std::ops::SubAssign for SymmetricSpatialDyad {
     }
 }
 
-impl std::ops::AddAssign for SymmetricSpatialDyad {
+impl core::ops::AddAssign for SymmetricSpatialDyad {
     #[inline]
     fn add_assign(&mut self, rhs: Self) {
         self.top_left += rhs.top_left;

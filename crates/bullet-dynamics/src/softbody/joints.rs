@@ -9,7 +9,7 @@
 //! joints that live until removed. The angular joint's motor hook is the
 //! [`AngularControl`] trait (Bullet's `AJoint::IControl`).
 
-use bullet_math::{Matrix3, Real, Vector3};
+use bullet_math::{math, Matrix3, Real, Vector3};
 
 use crate::body::RigidBody;
 
@@ -517,7 +517,7 @@ impl AJoint {
         self.axis[0] = basis0 * self.refs[0];
         self.axis[1] = basis1 * self.refs[1];
         self.drift = normalize_any(self.axis[1].cross(self.axis[0]));
-        self.drift *= MAXDRIFT.min(self.axis[0].dot(self.axis[1]).clamp(-1.0, 1.0).acos());
+        self.drift *= MAXDRIFT.min(math::acos(self.axis[0].dot(self.axis[1]).clamp(-1.0, 1.0)));
         self.drift *= self.erp / dt;
         self.massmatrix = angular_impulse_matrix(
             &side::inv_world_inertia(self.bodies[0], softs, bodies),

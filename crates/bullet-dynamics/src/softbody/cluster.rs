@@ -4,7 +4,7 @@
 //! impulse accumulators the contact joints push through, and the global
 //! prepare/solve/cleanup pass the world runs before the PBD solve.
 
-use bullet_math::{Aabb, Matrix3, Real, Vector3};
+use bullet_math::{math, Aabb, Matrix3, Real, Vector3};
 
 use crate::body::RigidBody;
 
@@ -53,7 +53,7 @@ pub(crate) fn polar_decompose(a: &Matrix3) -> (Matrix3, Matrix3) {
         if h_norm.abs() < EPS || u_norm.abs() < EPS {
             break;
         }
-        let gamma = (h_norm / u_norm).powf(0.25);
+        let gamma = math::powf(h_norm / u_norm, 0.25);
         let inv_gamma = 1.0 / gamma;
         let delta = (u * (gamma - 2.0) + h.transpose() * inv_gamma) * 0.5;
         u += delta;

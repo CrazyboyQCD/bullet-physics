@@ -14,7 +14,7 @@
 //! sweeps use the exact shape geometry.
 
 use bullet_collision::shapes::CollisionShape;
-use bullet_math::{Quaternion, Real, Vector3};
+use bullet_math::{math, Quaternion, Real, Vector3};
 use bullet_math::compat::{quat_from_scaled_axis};
 
 use crate::handles::BodyHandle;
@@ -77,7 +77,7 @@ impl KinematicCharacterController {
             gravity: 9.8 * 3.0, // Bullet's 3G default.
             fall_speed: 55.0,
             jump_speed: 10.0,
-            max_slope_cosine: (std::f32::consts::FRAC_PI_4 as Real).cos(), // 45 degrees.
+            max_slope_cosine: math::cos(core::f32::consts::FRAC_PI_4 as Real), // 45 degrees.
             max_penetration_depth: 0.2,
             walk_direction: Vector3::ZERO,
             normalized_direction: Vector3::ZERO,
@@ -173,7 +173,7 @@ impl KinematicCharacterController {
 
     /// Maximum walkable slope angle, in radians (Bullet's `setMaxSlope`).
     pub fn set_max_slope(&mut self, slope_radians: Real) {
-        self.max_slope_cosine = slope_radians.cos();
+        self.max_slope_cosine = math::cos(slope_radians);
     }
 
     pub fn set_step_height(&mut self, h: Real) {
@@ -245,7 +245,7 @@ impl KinematicCharacterController {
         // playerStep.
         // Angular velocity (damped) rotates the character.
         if self.angular_velocity.length_squared() > 0.0 {
-            self.angular_velocity *= (1.0 - self.angular_damping).powf(dt);
+            self.angular_velocity *= math::powf(1.0 - self.angular_damping, dt);
             if self.angular_velocity.length_squared() > 0.0 {
                 let dq = quat_from_scaled_axis(self.angular_velocity * dt);
                 self.current_orientation = (dq * self.current_orientation).normalize();
@@ -266,9 +266,9 @@ impl KinematicCharacterController {
         self.was_on_ground = self.on_ground();
 
         if self.walk_direction.length_squared() > 0.0 {
-            self.walk_direction *= (1.0 - self.linear_damping).powf(dt);
+            self.walk_direction *= math::powf(1.0 - self.linear_damping, dt);
         }
-        self.vertical_velocity *= (1.0 - self.linear_damping).powf(dt);
+        self.vertical_velocity *= math::powf(1.0 - self.linear_damping, dt);
 
         // Integrate the fall/jump velocity and clamp it.
         self.vertical_velocity -= self.gravity * dt;

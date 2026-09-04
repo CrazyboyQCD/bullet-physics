@@ -2,7 +2,7 @@
 //! `getVolume`, `updatePose` and the node/face aero kernels
 //! (`btSoftBody.cpp` 708-885 / 1244-1263 / 3049-3085 / 3750-3815).
 
-use bullet_math::{Matrix3, Real, Vector3};
+use bullet_math::{math, Matrix3, Real, Vector3};
 
 use super::body::SoftBody;
 use super::config::AeroModel;
@@ -149,7 +149,7 @@ impl SoftBody {
             let mut f_lift = Vector3::ZERO;
             if 0.0 < n_dot_v && n_dot_v < 0.98480 {
                 f_lift = nrm.cross(rel_v_nrm).cross(rel_v_nrm)
-                    * (0.5 * k_lf * density * rel_v_len * tri_area * (1.0 - n_dot_v * n_dot_v).sqrt());
+                    * (0.5 * k_lf * density * rel_v_len * tri_area * math::sqrt(1.0 - n_dot_v * n_dot_v));
             }
 
             // Keep the drag from reversing the node within dt.
@@ -159,7 +159,7 @@ impl SoftBody {
             let del2 = del_v_by_fdrag.length_squared();
             let v2 = v.length_squared();
             if del2 >= v2 && del2 > 0.0 {
-                f_drag *= 0.8 * (v2.sqrt() / del2.sqrt());
+                f_drag *= 0.8 * (math::sqrt(v2) / math::sqrt(del2));
             }
             self.nodes[node_index].f += f_drag;
             self.nodes[node_index].f += f_lift;
@@ -216,7 +216,7 @@ impl SoftBody {
             let mut f_lift = Vector3::ZERO;
             if 0.0 < n_dot_v && n_dot_v < 0.98480 {
                 f_lift = nrm.cross(rel_v_nrm).cross(rel_v_nrm)
-                    * (0.5 * k_lf * density * rel_v_len * tri_area * (1.0 - n_dot_v * n_dot_v).sqrt());
+                    * (0.5 * k_lf * density * rel_v_len * tri_area * math::sqrt(1.0 - n_dot_v * n_dot_v));
             }
             f_drag /= 3.0;
             f_lift /= 3.0;
@@ -230,7 +230,7 @@ impl SoftBody {
                     let v2 = v.length_squared();
                     let mut fd = f_drag;
                     if del2 >= v2 && del2 > 0.0 {
-                        fd *= 0.8 * (v2.sqrt() / del2.sqrt());
+                        fd *= 0.8 * (math::sqrt(v2) / math::sqrt(del2));
                     }
                     self.nodes[ni].f += fd;
                     self.nodes[ni].f += f_lift;

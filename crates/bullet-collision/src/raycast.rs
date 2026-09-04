@@ -7,7 +7,7 @@
 //! [`ConvexHull`](crate::shapes::ConvexHull) (which stores no faces) uses a
 //! GJK distance search. Compounds recurse into their children.
 
-use bullet_math::{Quaternion, Real, Vector3};
+use bullet_math::{math, Quaternion, Real, Vector3};
 
 use crate::narrowphase::gjk::closest_origin;
 use crate::shapes::{CollisionShape, Compound};
@@ -65,7 +65,7 @@ pub fn raycast(
         orientation * local_normal
     } else {
         // Interior start: no surface was entered, report the ray direction.
-        dir / dir_len2.sqrt()
+        dir / math::sqrt(dir_len2)
     };
     Some(RayHit {
         fraction,
@@ -170,7 +170,7 @@ fn sphere_raycast(radius: Real, from: Vector3, to: Vector3) -> Option<LocalHit> 
     if disc < 0.0 {
         return None;
     }
-    let t = (-b - disc.sqrt()) / (2.0 * a);
+    let t = (-b - math::sqrt(disc)) / (2.0 * a);
     if t < 0.0 || t > 1.0 {
         return None;
     }
@@ -262,7 +262,7 @@ fn capsule_raycast(radius: Real, half_height: Real, from: Vector3, to: Vector3) 
         let c = o.length_squared() - radius * radius;
         let disc = b * b - 4.0 * a * c;
         if disc >= 0.0 {
-            let t = (-b - disc.sqrt()) / (2.0 * a);
+            let t = (-b - math::sqrt(disc)) / (2.0 * a);
             if t > 0.0 && t <= 1.0 {
                 let y = from.y + d.y * t;
                 if (-half_height..=half_height).contains(&y) {
@@ -305,7 +305,7 @@ fn ray_sphere_cap(
     if disc < 0.0 {
         return None;
     }
-    let t = (-b - disc.sqrt()) / (2.0 * a);
+    let t = (-b - math::sqrt(disc)) / (2.0 * a);
     if t < 0.0 || t > 1.0 {
         return None;
     }
@@ -334,7 +334,7 @@ fn cylinder_raycast(
         let c = o.length_squared() - radius * radius;
         let disc = b * b - 4.0 * a * c;
         if disc >= 0.0 {
-            let t = (-b - disc.sqrt()) / (2.0 * a);
+            let t = (-b - math::sqrt(disc)) / (2.0 * a);
             if t > 0.0 && t <= 1.0 {
                 let y = from.y + d.y * t;
                 if (-half_height..=half_height).contains(&y) {
@@ -423,7 +423,7 @@ fn cone_radial(radius: Real, half_height: Real, p: Vector3) -> Real {
         return Real::INFINITY;
     }
     let rho = radius * (half_height - p.y) / (2.0 * half_height);
-    (p.x * p.x + p.z * p.z).sqrt() - rho
+    math::sqrt(p.x * p.x + p.z * p.z) - rho
 }
 
 /// Smallest real root of `a t^2 + b t + c = 0` in `[0, 1]`, if any.
@@ -439,7 +439,7 @@ fn smallest_root(a: Real, b: Real, c: Real) -> Option<Real> {
         if disc < 0.0 {
             return None;
         }
-        let sq = disc.sqrt();
+        let sq = math::sqrt(disc);
         vec![(-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a)]
     };
     roots

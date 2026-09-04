@@ -9,6 +9,17 @@
 //! default `Vec3`/`Mat3` (SIMD-accelerated, matching Bullet's `btVector3`
 //! semantics); `Transform` maps to the aligned `Affine3A`, whose public API
 //! accepts and returns `Vec3`/`Mat3`-compatible types.
+//!
+//! Scalar transcendentals are dispatched through [`math`], which routes to the
+//! standard library (default `std` feature) or to the pure-Rust `libm` crate
+//! (`libm` feature, for no_std targets).
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(all(not(feature = "std"), not(feature = "libm")))]
+compile_error!(
+    "select a scalar math backend: the \"std\" feature (default) or \"libm\" for no_std builds"
+);
 
 /// Scalar precision, chosen at compile time via cargo features.
 #[cfg(not(feature = "f64"))]
@@ -41,24 +52,25 @@ pub use glam::Affine3A as Transform;
 pub use glam::DAffine3 as Transform;
 
 pub mod compat;
+pub mod math;
 
 /// `pi` at the active precision.
 #[cfg(not(feature = "f64"))]
-pub const PI: f32 = std::f32::consts::PI;
+pub const PI: f32 = core::f32::consts::PI;
 #[cfg(feature = "f64")]
-pub const PI: f64 = std::f64::consts::PI;
+pub const PI: f64 = core::f64::consts::PI;
 
 /// `pi / 2` at the active precision.
 #[cfg(not(feature = "f64"))]
-pub const FRAC_PI_2: f32 = std::f32::consts::FRAC_PI_2;
+pub const FRAC_PI_2: f32 = core::f32::consts::FRAC_PI_2;
 #[cfg(feature = "f64")]
-pub const FRAC_PI_2: f64 = std::f64::consts::FRAC_PI_2;
+pub const FRAC_PI_2: f64 = core::f64::consts::FRAC_PI_2;
 
 /// `1 / sqrt(2)` at the active precision.
 #[cfg(not(feature = "f64"))]
-pub const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
+pub const FRAC_1_SQRT_2: f32 = core::f32::consts::FRAC_1_SQRT_2;
 #[cfg(feature = "f64")]
-pub const FRAC_1_SQRT_2: f64 = std::f64::consts::FRAC_1_SQRT_2;
+pub const FRAC_1_SQRT_2: f64 = core::f64::consts::FRAC_1_SQRT_2;
 
 mod transform;
 pub mod spatial;

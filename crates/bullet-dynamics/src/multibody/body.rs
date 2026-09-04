@@ -22,7 +22,7 @@ use bullet_math::spatial::{
     symmetric_spatial_outer_product_force, SpatialForceVector, SpatialMotionVector,
     SpatialTransformationMatrix, SymmetricSpatialDyad,
 };
-use bullet_math::{Matrix3, Quaternion, Real, Transform, Vector3};
+use bullet_math::{math, Matrix3, Quaternion, Real, Transform, Vector3};
 use bullet_math::compat::{matrix3_from_diagonal, quat_from_axis_angle, quat_from_mat3, transform_from_rotation_translation};
 
 use super::link::{JointType, MultiBodyLink};
@@ -1446,9 +1446,9 @@ impl MultiBody {
                 // Taylor expansion of the sinc function (1/48 ≈ 0.0208333…).
                 angvel * (0.5 * dt - (dt * dt * dt) * (1.0 / 48.0) * f_angle * f_angle)
             } else {
-                angvel * ((0.5 * f_angle * dt).sin() / f_angle)
+                angvel * (math::sin(0.5 * f_angle * dt) / f_angle)
             };
-            let w = (f_angle * dt * 0.5).cos();
+            let w = math::cos(f_angle * dt * 0.5);
             if base_body {
                 *quat *= Quaternion::from_xyzw(-axis.x, -axis.y, -axis.z, w);
             } else {

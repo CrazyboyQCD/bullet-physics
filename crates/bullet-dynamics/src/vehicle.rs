@@ -33,7 +33,7 @@
 //! [`RaycastVehicle::reset_suspension`] refreshes the wheel directions from
 //! the current chassis pose instead of reusing stale state.
 
-use bullet_math::{Matrix3, Quaternion, Real, Transform, Vector3};
+use bullet_math::{math, Matrix3, Quaternion, Real, Transform, Vector3};
 use bullet_math::compat::{quat_from_axis_angle, transform_from_mat3_translation};
 
 use crate::body::RigidBody;
@@ -690,7 +690,7 @@ impl RaycastVehicle {
                 let impulse_squared = x * x + y * y;
                 if impulse_squared > max_imp_squared {
                     sliding = true;
-                    let factor = max_imp / impulse_squared.sqrt();
+                    let factor = max_imp / math::sqrt(impulse_squared);
                     self.wheels[i].skid_info *= factor;
                 }
             }

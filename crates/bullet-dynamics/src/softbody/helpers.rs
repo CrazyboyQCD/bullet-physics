@@ -1,7 +1,7 @@
 //! Soft-body builders — port of `btSoftBodyHelpers` (ropes, patches and the
 //! volumetric builders: ellipsoid / triangle mesh / convex hull).
 
-use bullet_math::{Real, Vector3};
+use bullet_math::{math, Real, Vector3};
 
 use super::body::SoftBody;
 use super::quickhull::quick_hull;
@@ -187,8 +187,8 @@ fn hammersley_generate(x: &mut [Vector3]) {
         }
         let w = 2.0 * t - 1.0;
         let a = (bullet_math::PI + 2.0 * i as Real * bullet_math::PI) / n as Real;
-        let s = (1.0 - w * w).sqrt();
-        *slot = Vector3::new(s * a.cos(), s * a.sin(), w);
+        let s = math::sqrt(1.0 - w * w);
+        *slot = Vector3::new(s * math::cos(a), s * math::sin(a), w);
     }
 }
 

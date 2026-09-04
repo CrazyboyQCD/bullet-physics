@@ -4,7 +4,7 @@
 //! to four points. When the origin is enclosed, the returned simplex seeds an
 //! EPA pass to compute penetration depth.
 
-use bullet_math::{Quaternion, Real, Vector3};
+use bullet_math::{math, Quaternion, Real, Vector3};
 use crate::shapes::CollisionShape;
 
 const MAX_ITERATIONS: u32 = 64;
@@ -248,7 +248,7 @@ pub fn gjk_contact(
                 // no-progress exit (the remaining guaranteed improvement fell
                 // below the relative tolerance).
                 if duplicate || delta >= v2 * (1.0 - REL_ERROR2) {
-                    let core_distance = v2.sqrt();
+                    let core_distance = math::sqrt(v2);
                     // The true full-shape separation: core distance minus the
                     // margins added back (Bullet's `distance = 1/rlen -
                     // margin`, sign-flipped for our separation-positive

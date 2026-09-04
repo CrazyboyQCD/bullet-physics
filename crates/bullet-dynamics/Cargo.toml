@@ -7,9 +7,11 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = ["f32"]
+default = ["std", "f32"]
 f32 = ["bullet-math/f32", "bullet-collision/f32"]
 f64 = ["bullet-math/f64", "bullet-collision/f64"]
+std = ["bullet-collision/std"]
+libm = ["bullet-collision/libm"]
 
 [dependencies]
 bullet-math = { path = "../bullet-math", default-features = false }

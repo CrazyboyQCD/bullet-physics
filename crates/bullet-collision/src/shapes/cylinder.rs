@@ -1,4 +1,4 @@
-use bullet_math::{Aabb, Quaternion, Real, Vector3};
+use bullet_math::{math, Aabb, Quaternion, Real, Vector3};
 
 /// A solid cylinder collision shape with its axis along Y.
 /// Equivalent to `btCylinderShape`.
@@ -34,7 +34,7 @@ impl Cylinder {
     pub fn support_local(&self, dir: Vector3) -> Vector3 {
         let xy_len = dir.x * dir.x + dir.z * dir.z;
         let side = if xy_len > 0.0 {
-            let s = self.radius / xy_len.sqrt();
+            let s = self.radius / math::sqrt(xy_len);
             Vector3::new(dir.x * s, 0.0, dir.z * s)
         } else {
             Vector3::new(self.radius, 0.0, 0.0)
@@ -55,7 +55,7 @@ impl Cylinder {
         let half_height = (self.half_height - self.margin()).max(0.0);
         let xy_len = dir.x * dir.x + dir.z * dir.z;
         let side = if xy_len > 0.0 {
-            let s = radius / xy_len.sqrt();
+            let s = radius / math::sqrt(xy_len);
             Vector3::new(dir.x * s, 0.0, dir.z * s)
         } else {
             Vector3::new(radius, 0.0, 0.0)

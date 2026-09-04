@@ -1,4 +1,4 @@
-use bullet_math::{Aabb, Quaternion, Real, Vector3};
+use bullet_math::{math, Aabb, Quaternion, Real, Vector3};
 
 /// A right circular cone collision shape with its axis along Y: the apex at
 /// `+half_height` and the base disc centered at `-half_height`.
@@ -41,7 +41,7 @@ impl Cone {
             let apex = Vector3::new(0.0, self.half_height, 0.0);
             let xy_len = d.x * d.x + d.z * d.z;
             if xy_len > 0.0 {
-                let s = self.radius / xy_len.sqrt();
+                let s = self.radius / math::sqrt(xy_len);
                 let rim = Vector3::new(d.x * s, -self.half_height, d.z * s);
                 if rim.dot(d) > apex.dot(d) {
                     rim
@@ -72,7 +72,7 @@ impl Cone {
             let apex = Vector3::new(0.0, half_height, 0.0);
             let xy_len = d.x * d.x + d.z * d.z;
             if xy_len > 0.0 {
-                let s = radius / xy_len.sqrt();
+                let s = radius / math::sqrt(xy_len);
                 let rim = Vector3::new(d.x * s, -half_height, d.z * s);
                 if rim.dot(d) > apex.dot(d) {
                     rim

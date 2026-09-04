@@ -13,7 +13,7 @@
 //! selection wrong for elongated Minkowski differences and the iteration
 //! stalls on wrong faces.
 
-use bullet_math::{Real, Vector3};
+use bullet_math::{math, Real, Vector3};
 
 const MAX_ITERATIONS: u32 = 255;
 /// Bullet's `EPA_ACCURACY` (precision-dependent, matching `btGjkEpa2`'s
@@ -223,9 +223,9 @@ fn edge_distance(pa: Vector3, pb: Vector3, normal: Vector3) -> Option<Real> {
             pb.length()
         } else {
             let a_dot_b = pa.dot(pb);
-            ((pa.length_squared() * pb.length_squared() - a_dot_b * a_dot_b) / ba_l2)
-                .max(0.0)
-                .sqrt()
+            math::sqrt(
+                ((pa.length_squared() * pb.length_squared() - a_dot_b * a_dot_b) / ba_l2).max(0.0),
+            )
         };
         Some(dist)
     } else {

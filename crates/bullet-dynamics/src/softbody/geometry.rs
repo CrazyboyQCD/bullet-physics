@@ -3,7 +3,7 @@
 //! (`ProjectOnAxis`, `ProjectOnPlane`, `ProjectOrigin`, `BaryCoord`,
 //! `BaryEval`, `AreaOf`, `ApplyClampedForce`, `rayFromToTriangle`).
 
-use bullet_math::{Real, Vector3};
+use bullet_math::{math, Real, Vector3};
 
 /// `SIMD_EPSILON` gates in these helpers are precision-dependent like every
 /// Bullet epsilon.
@@ -48,7 +48,7 @@ pub fn project_origin_triangle(a: Vector3, b: Vector3, c: Vector3, prj: &mut Vec
     let q = (b - a).cross(c - a);
     let m2 = q.length_squared();
     if m2 > EPS {
-        let n = q / m2.sqrt();
+        let n = q / math::sqrt(m2);
         let k = a.dot(n);
         let k2 = k * k;
         if k2 < *sqd {

@@ -1,5 +1,5 @@
 use crate::manifold::{ContactManifold, ContactPoint};
-use bullet_math::{Quaternion, Real, Vector3};
+use bullet_math::{math, Quaternion, Real, Vector3};
 use crate::shapes::{BoxShape, Sphere};
 
 /// Sphere-sphere contact. Like Bullet's `btSphereSphereCollisionAlgorithm`
@@ -17,7 +17,7 @@ pub fn sphere_sphere(
     if dist_sq >= radius_sum * radius_sum {
         return None;
     }
-    let dist = dist_sq.sqrt();
+    let dist = math::sqrt(dist_sq);
     // Degenerate case (coincident centers): pick an arbitrary normal.
     let normal = if dist > 1e-12 { delta / dist } else { Vector3::Y };
     let penetration = radius_sum - dist;
@@ -53,7 +53,7 @@ pub fn sphere_box(
         return None;
     }
 
-    let dist = dist_sq.sqrt();
+    let dist = math::sqrt(dist_sq);
     let (normal_local, penetration) = if dist > 1e-12 {
         // Sphere center outside the box.
         (delta / dist, s.radius - dist)

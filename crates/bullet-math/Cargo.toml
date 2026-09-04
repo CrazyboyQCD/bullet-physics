@@ -7,9 +7,15 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = ["f32"]
+default = ["std", "f32"]
 f32 = []
-f64 = []
+f64 = ["glam/f64"]
+# Scalar math backend selection: `std` routes transcendentals to the
+# standard-library methods (default), `libm` routes them to the pure-Rust
+# `libm` crate for no_std targets. Exactly one must be selected.
+std = ["glam/std"]
+libm = ["glam/nostd-libm", "dep:libm"]
 
 [dependencies]
-glam = { workspace = true }
+glam = { workspace = true, default-features = false, features = ["f64"] }
+libm = { version = "0.2", optional = true }

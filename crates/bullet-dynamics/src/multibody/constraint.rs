@@ -31,7 +31,7 @@
 //! ported, see `docs/bullet-compare.md` § "Multibody mb-vs-rb constraint
 //! probes".
 
-use bullet_math::{Matrix3, Quaternion, Real, Vector3};
+use bullet_math::{math, Matrix3, Quaternion, Real, Vector3};
 
 use super::body::{MultiBody, MultiBodyScratch};
 use super::link::JointType;
@@ -2028,10 +2028,10 @@ impl MultiBodyConstraint {
         // quaternion to take the short way around, then sign by the twist
         // axis against +Z.
         let mut q_min_twist = qab_twist;
-        let mut twist_angle = 2.0 * qab_twist.w.acos();
+        let mut twist_angle = 2.0 * math::acos(qab_twist.w);
         if twist_angle > bullet_math::PI {
             q_min_twist = -qab_twist;
-            twist_angle = 2.0 * q_min_twist.w.acos();
+            twist_angle = 2.0 * math::acos(q_min_twist.w);
         }
         let mut v_twist_axis = Vector3::new(q_min_twist.x, q_min_twist.y, q_min_twist.z);
         if twist_angle > Real::EPSILON {
@@ -2202,7 +2202,7 @@ fn shortest_arc_quat(v0: Vector3, v1: Vector3) -> Quaternion {
         let (n, _unused) = plane_space1(v0);
         return Quaternion::from_xyzw(n.x, n.y, n.z, 0.0);
     }
-    let s = ((1.0 + d) * 2.0).sqrt();
+    let s = math::sqrt((1.0 + d) * 2.0);
     let rs = 1.0 / s;
     Quaternion::from_xyzw(c.x * rs, c.y * rs, c.z * rs, s * 0.5)
 }
@@ -2213,14 +2213,14 @@ pub(crate) fn plane_space1(n: Vector3) -> (Vector3, Vector3) {
     if n.z.abs() > bullet_math::FRAC_1_SQRT_2 {
         // Choose p in the y-z plane.
         let a = n.y * n.y + n.z * n.z;
-        let k = 1.0 / a.sqrt();
+        let k = 1.0 / math::sqrt(a);
         let p = Vector3::new(0.0, -n.z * k, n.y * k);
         let q = Vector3::new(a * k, -n.x * p.z, n.x * p.y);
         (p, q)
     } else {
         // Choose p in the x-y plane.
         let a = n.x * n.x + n.y * n.y;
-        let k = 1.0 / a.sqrt();
+        let k = 1.0 / math::sqrt(a);
         let p = Vector3::new(-n.y * k, n.x * k, 0.0);
         let q = Vector3::new(-n.z * p.y, n.z * p.x, a * k);
         (p, q)
