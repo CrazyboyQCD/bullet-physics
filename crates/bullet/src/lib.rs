@@ -15,6 +15,7 @@
 //!
 //! zlib (same as upstream Bullet Physics).
 
+#![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
 
 pub use bullet_collision as collision;

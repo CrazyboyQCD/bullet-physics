@@ -1,4 +1,6 @@
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use crate::shapes::CollisionShape;
 
 /// A child shape of a compound, positioned relative to the compound origin.

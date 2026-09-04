@@ -19,6 +19,8 @@
 //! covered by their far-side triangles long before that.
 
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use crate::manifold::{ContactManifold, ContactPoint};
 use crate::narrowphase::convex_convex::convex_convex;

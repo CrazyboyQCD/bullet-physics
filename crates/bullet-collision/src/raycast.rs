@@ -8,6 +8,8 @@
 //! GJK distance search. Compounds recurse into their children.
 
 use bullet_math::{math, Quaternion, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use crate::narrowphase::gjk::closest_origin;
 use crate::shapes::{CollisionShape, Compound};
@@ -199,7 +201,7 @@ fn box_raycast(half: Vector3, from: Vector3, to: Vector3) -> Option<LocalHit> {
             let mut t1 = (-h - o) / v;
             let mut t2 = (h - o) / v;
             if t1 > t2 {
-                std::mem::swap(&mut t1, &mut t2);
+                core::mem::swap(&mut t1, &mut t2);
             }
             if t1 > tmin {
                 tmin = t1;

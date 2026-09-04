@@ -3,6 +3,8 @@
 //! functions (phase A: links only; contacts and anchors arrive with the
 //! collision phase — see `docs/softbody.md` §10).
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_math::{Aabb, Real, Vector3};
 
 use super::body::SoftBody;

@@ -5,6 +5,8 @@
 //! points from the plane to the convex shape.
 
 use crate::manifold::{ContactManifold, ContactPoint};
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use crate::shapes::{CollisionShape, Plane, TriangleMesh};
 use bullet_math::{Quaternion, Real, Vector3};
 

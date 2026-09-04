@@ -10,6 +10,8 @@
 //! contact point is the witness on B in all cases.
 
 use crate::manifold::{ContactManifold, ContactPoint};
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use crate::narrowphase::{epa, gjk};
 use crate::shapes::CollisionShape;
 use bullet_math::{Quaternion, Real, Vector3};

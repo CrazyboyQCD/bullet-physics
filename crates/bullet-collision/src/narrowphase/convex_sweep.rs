@@ -10,6 +10,8 @@
 //! closest approach and a binary search finds the entry point.
 
 use bullet_math::{math, Aabb, Quaternion, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use crate::narrowphase::gjk::closest_origin;
 use crate::shapes::{CollisionShape, Plane, TriangleMesh};

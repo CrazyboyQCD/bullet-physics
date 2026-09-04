@@ -33,6 +33,8 @@
 //! [`RaycastVehicle::reset_suspension`] refreshes the wheel directions from
 //! the current chassis pose instead of reusing stale state.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_math::{math, Matrix3, Quaternion, Real, Transform, Vector3};
 use bullet_math::compat::{quat_from_axis_angle, transform_from_mat3_translation};
 

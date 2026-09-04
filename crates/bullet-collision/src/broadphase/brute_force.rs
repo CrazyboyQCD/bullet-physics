@@ -1,4 +1,6 @@
 use bullet_math::{Aabb, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use super::{aabb_raycast_candidates, BroadPhase};
 

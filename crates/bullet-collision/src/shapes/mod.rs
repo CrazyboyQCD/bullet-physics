@@ -4,6 +4,8 @@
 //! (equivalent to Bullet sharing one `btCollisionShape` between objects).
 
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 mod box_shape;
 mod bvh;

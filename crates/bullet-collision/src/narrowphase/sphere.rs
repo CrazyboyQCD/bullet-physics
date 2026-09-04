@@ -1,4 +1,6 @@
 use crate::manifold::{ContactManifold, ContactPoint};
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use bullet_math::{math, Quaternion, Real, Vector3};
 use crate::shapes::{BoxShape, Sphere};
 

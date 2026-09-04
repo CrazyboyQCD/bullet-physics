@@ -108,3 +108,43 @@ solvers 2026-09-01, see §4).
 - Multibody spherical limit: `MultiBodyConstraint::spherical_joint_limit` mirrors `btMultiBodySphericalJointLimit` — the joint quaternion is split into its cone (swing) and twist parts (`shortestArcQuat` on the rotated Z axis), the swing/twist angles are clamped to the `swingx`/`swingy`/`twist` ranges, and up to three unilateral pure-angular rows along the link frame's world columns push the joint back inside (one-sided windows, `kp` position gain default 0.2, per-DOF gains/impulse limits via `m_use_multi_dof_params`). Rows are skipped while `|posError| ≤ SIMD_EPSILON` (precision-dependent, like Bullet). Validated against the real library (`spherical_limit` probe scene, print precision).
 - Multibody spherical motor: `MultiBodyConstraint::spherical_joint_motor` mirrors `btMultiBodySphericalJointMotor` — three bilateral pure-angular rows along the link frame's world columns drive the joint orientation toward `desired_position` (default identity) from the Euler angle difference (`matrixToEulerXYZ`), each damped by `m_damping[i]` (default 1) and clamped to `±maxMotorImpulse`. Validated against the real library (`spherical_motor` probe scene, print precision).
 - Multibody solver + world: `MultiBodyWorld` mirrors `btMultiBodyDynamicsWorld` for the multibody-only subset — gravity per base/link, forward kinematics, velocity integration through the ABA, row conversion, projected Gauss-Seidel over the non-contact pool (10 outer × 1 inner iterations, alternating direction by iteration parity like `solveSingleIteration`), writeback (`applyDeltaVeeMultiDof` with the `±maxCoordinateVelocity` clamp, applied impulses stored on the constraints), `processDeltaVeeMultiDof2` flush, position integration with `addSplitV`/`substractSplitV` (no-op without split impulses), `checkMotionAndSleepIfRequired` per body, and constraint-linked wake-up in place of the island merge. Stepping order matches Bullet: gravity → `solveExternalForces` (ABA) → `solveInternalConstraints` (rows + PGS + writeback) → `integrateTransforms` (positions; sleeping bodies have velocities cleared) → force clearing + sleep check.
+
+## no_std support (2026-09-04)
+
+The workspace carries `#![no_std]` builds behind `--no-default-features
+--features libm` (per crate: `std` is the default feature, `libm` the
+alternative scalar-math backend; `alloc` is required and pulled in via
+`extern crate alloc`). Semantic notes, none of which affect default/std
+builds:
+
+- **Scalar math routing**: every engine-side transcendental
+  (`sqrt/sin/cos/atan2/asin/acos/powf`, ~64 call sites) goes through
+  `bullet_math::math`. The `std` branch is an inlined pass-through to the
+  standard method — default builds stay bit-identical (parity
+  `composite_consumer` + `falling_box` re-recorded digit-for-digit
+  against the ledgers, perf stack_1000/rain_500 inside the noise band).
+  `libm` builds route to the pure-Rust libm crate, which is musl-derived:
+  expect last-ulp differences from the platform CRT on the transcendental
+  results (glam's internal math follows the same split via
+  `glam/std` vs `glam/nostd-libm`). The ledgers are recorded on std
+  builds and remain authoritative.
+- **EPA scratch pooling**: `epa::penetration` pools its buffers in a
+  `thread_local!` under `std`; `no_std` has no `thread_local!`, so the
+  fallback allocates a fresh scratch per call — same results, one extra
+  allocation per EPA pass.
+- **Step timings**: `StepTimings` defaults to the std monotonic `Instant`
+  (process-relative `OnceLock` start; `Instant` arithmetic is i64
+  nanoseconds, so the derived spans are identical to direct diffs).
+  Without `std` the default clock reads zero; hosts inject their
+  platform clock via `PhysicsWorld::set_step_clock(fn() -> Duration)`.
+  Injected clocks should be monotonic: a backwards read saturates the
+  span to zero (never panics, never negative), the clock is only read
+  while timing is enabled (~8 reads/step), and mid-step clock swaps
+  resynchronize on the next full step. A bevy_platform-style unsafe
+  rdtsc/asm fallback was evaluated and rejected (zero-unsafe policy,
+  TSC cross-core sync/frequency caveats).
+- **`vec!`/`Vec`/`Box`/`BTreeSet`**: lib code reaches them through
+  `#[macro_use] extern crate alloc` plus per-module `use alloc::...`
+  imports; `std` builds resolve the identical std types. Verified:
+  `cargo check -p bullet --no-default-features --features libm,f32|f64`
+  and a `wasm32-unknown-unknown` cross-check, zero errors/warnings.

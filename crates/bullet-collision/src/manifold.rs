@@ -1,4 +1,6 @@
 use bullet_math::{math, Quaternion, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 /// Distance below which two contact points are the same physical contact,
 /// and how far a cached contact may separate (or drift sideways) before it
@@ -75,7 +77,7 @@ impl ContactManifold {
         if self.points.len() <= max {
             return;
         }
-        let mut candidates = std::mem::take(&mut self.points);
+        let mut candidates = core::mem::take(&mut self.points);
         candidates.sort_by(|a, b| b.penetration.total_cmp(&a.penetration));
         let mut kept: Vec<ContactPoint> = Vec::with_capacity(max);
         kept.push(candidates[0]);

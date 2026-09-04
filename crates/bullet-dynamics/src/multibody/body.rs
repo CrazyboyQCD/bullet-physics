@@ -18,6 +18,8 @@
 //! Bullet's default path, and the base is fixed only through
 //! [`MultiBody::new`]'s `fixed_base` flag.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_math::spatial::{
     symmetric_spatial_outer_product_force, SpatialForceVector, SpatialMotionVector,
     SpatialTransformationMatrix, SymmetricSpatialDyad,

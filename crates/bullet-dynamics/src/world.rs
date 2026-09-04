@@ -1,4 +1,8 @@
 use core::time::Duration;
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use crate::timing::{default_step_clock, StepClock, StepStage, StepTimings};
 
@@ -497,7 +501,7 @@ impl PhysicsWorld {
     /// Take the collision events of the last step, leaving the buffer
     /// empty.
     pub fn take_contact_events(&mut self) -> Vec<CollisionEvent> {
-        std::mem::take(&mut self.contact_events)
+        core::mem::take(&mut self.contact_events)
     }
 
     /// Insert into the sorted, deduplicated suppression set. A free
@@ -1603,30 +1607,30 @@ impl PhysicsWorld {
         // both sets empty; a pair skipped because its island sleeps carries
         // its state over instead of churning.
         self.touching.sort_unstable();
-        let prev = std::mem::take(&mut self.prev_touching);
-        let cur = std::mem::take(&mut self.touching);
+        let prev = core::mem::take(&mut self.prev_touching);
+        let cur = core::mem::take(&mut self.touching);
         let (mut pi, mut ci) = (0usize, 0usize);
         while pi < prev.len() || ci < cur.len() {
             // Both sets are sorted: walk the smaller key forward each round
             // (an Equal key is the surviving pair, emitted by neither side).
             let order = match (prev.get(pi), cur.get(ci)) {
                 (Some(p), Some(c)) => p.cmp(c),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => core::cmp::Ordering::Less,
+                (None, Some(_)) => core::cmp::Ordering::Greater,
                 (None, None) => break,
             };
             let (pair, started) = match order {
-                std::cmp::Ordering::Less => {
+                core::cmp::Ordering::Less => {
                     let pair = prev[pi];
                     pi += 1;
                     (pair, false)
                 }
-                std::cmp::Ordering::Greater => {
+                core::cmp::Ordering::Greater => {
                     let pair = cur[ci];
                     ci += 1;
                     (pair, true)
                 }
-                std::cmp::Ordering::Equal => {
+                core::cmp::Ordering::Equal => {
                     pi += 1;
                     ci += 1;
                     continue;
@@ -1675,8 +1679,8 @@ impl PhysicsWorld {
         // (Bullet's `solveMultiBodyGroup` inside `solveSingleIteration`).
         // The row pools are taken out for the solve and restored after the
         // writeback (their allocations are reused across steps).
-        let mut contact_rows = std::mem::take(&mut self.contact_rows);
-        let mut joint_rows = std::mem::take(&mut self.joint_rows);
+        let mut contact_rows = core::mem::take(&mut self.contact_rows);
+        let mut joint_rows = core::mem::take(&mut self.joint_rows);
         if self.mb_pending_contacts.is_empty() {
             sequential_impulse::solve(
                 &mut self.bodies,

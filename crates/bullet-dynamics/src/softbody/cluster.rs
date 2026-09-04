@@ -4,6 +4,8 @@
 //! impulse accumulators the contact joints push through, and the global
 //! prepare/solve/cleanup pass the world runs before the PBD solve.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_math::{math, Aabb, Matrix3, Real, Vector3};
 
 use crate::body::RigidBody;
@@ -479,7 +481,7 @@ pub fn solve_clusters(softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
             // (the joint's sides may live anywhere), so each joint is swapped
             // out for a placeholder while it refreshes itself.
             let mut joint =
-                std::mem::replace(&mut softs[si].joints[ji], SoftJoint::Contact(CJoint::default()));
+                core::mem::replace(&mut softs[si].joints[ji], SoftJoint::Contact(CJoint::default()));
             joint.prepare(sdt, iterations, softs, bodies);
             softs[si].joints[ji] = joint;
         }
@@ -501,7 +503,7 @@ pub fn solve_clusters(softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
     for i in 0..softs.len() {
         // Terminate (the drift split) and drop the finished joints; the
         // joints are taken out so the per-side applies can borrow `softs`.
-        let joints = std::mem::take(&mut softs[i].joints);
+        let joints = core::mem::take(&mut softs[i].joints);
         for j in &joints {
             j.terminate(softs, bodies);
         }

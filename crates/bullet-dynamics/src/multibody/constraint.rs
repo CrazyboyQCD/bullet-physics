@@ -31,6 +31,8 @@
 //! ported, see `docs/bullet-compare.md` § "Multibody mb-vs-rb constraint
 //! probes".
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_math::{math, Matrix3, Quaternion, Real, Vector3};
 
 use super::body::{MultiBody, MultiBodyScratch};

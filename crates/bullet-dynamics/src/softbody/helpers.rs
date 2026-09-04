@@ -1,6 +1,12 @@
 //! Soft-body builders — port of `btSoftBodyHelpers` (ropes, patches and the
 //! volumetric builders: ellipsoid / triangle mesh / convex hull).
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeSet;
+#[cfg(feature = "std")]
+use std::collections::BTreeSet;
 use bullet_math::{math, Real, Vector3};
 
 use super::body::SoftBody;
@@ -243,9 +249,9 @@ pub fn create_from_convex_hull(vertices: &[Vector3]) -> SoftBody {
 pub fn create_from_tri_mesh(vertices: &[Vector3], triangles: &[u32]) -> SoftBody {
     let masses = vec![0.0 as Real; vertices.len()];
     let mut psb = SoftBody::new(vertices, &masses);
-    // BTreeSet (alloc, no hasher) instead of HashSet: one less std-type to
-    // shed for no_std, same dedup semantics at modeling-time sizes.
-    let mut seen = std::collections::BTreeSet::new();
+    // BTreeSet (no hasher) instead of HashSet: same dedup semantics at
+    // modeling-time sizes.
+    let mut seen = BTreeSet::new();
     let (triangles, _) = triangles.as_chunks::<3>();
     for t in triangles {
         let idx = [t[0] as usize, t[1] as usize, t[2] as usize];

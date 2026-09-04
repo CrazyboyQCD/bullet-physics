@@ -22,6 +22,8 @@
 //! true)`, a [`Constraint`] suppresses collision response between its two
 //! bodies by default ([`Constraint::set_disable_collisions`]).
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_math::{math, Matrix3, Quaternion, Real, Vector3};
 use bullet_math::compat::{quat_from_axis_angle, quat_from_mat3, quat_from_rotation_arc, quat_xyz};
 
@@ -1784,7 +1786,7 @@ impl SliderConstraint {
         let delta = pivot_b - pivot_a;
         let ax1_a = tr_a.col(0);
         // Per-axis offsets (m_depth) and limit tests.
-        let mut depth: [Real; 3] = std::array::from_fn(|i| delta.dot(tr_a.col(i)));
+        let mut depth: [Real; 3] = core::array::from_fn(|i| delta.dot(tr_a.col(i)));
         self.lin_pos = depth[0];
         self.solve_lin_limit = false;
         if self.lower_lin_limit <= self.upper_lin_limit {

@@ -14,6 +14,8 @@
 //! generalized velocities at writeback (Bullet compiles without
 //! `DIRECTLY_UPDATE_VELOCITY_DURING_SOLVER_ITERATIONS`).
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_collision::manifold::{ContactManifold, ContactPoint};
 use bullet_math::{Real, Vector3};
 

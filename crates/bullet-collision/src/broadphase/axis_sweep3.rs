@@ -1,4 +1,6 @@
 use bullet_math::{Aabb, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use super::{aabb_raycast_candidates, BroadPhase};
 
@@ -92,8 +94,8 @@ impl Default for AxisSweep3 {
     }
 }
 
-impl std::fmt::Debug for AxisSweep3 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for AxisSweep3 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AxisSweep3").finish_non_exhaustive()
     }
 }

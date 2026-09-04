@@ -14,6 +14,8 @@
 //! stalls on wrong faces.
 
 use bullet_math::{math, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 const MAX_ITERATIONS: u32 = 255;
 /// Bullet's `EPA_ACCURACY` (precision-dependent, matching `btGjkEpa2`'s
@@ -47,18 +49,28 @@ struct Face {
 /// origin and the Minkowski support function. `support` maps a direction to
 /// the farthest point of `A - B` along it.
 ///
-/// The vertex, face and boundary-edge buffers are pooled per thread (the
-/// allocations used to dominate the EPA profile — `Vec<Face>` churn from the
-/// per-iteration `retain`/push cycle and the per-`expand` boundary set).
+/// Under `std` the vertex, face and boundary-edge buffers are pooled per
+/// thread (the allocations used to dominate the EPA profile — `Vec<Face>`
+/// churn from the per-iteration `retain`/push cycle and the per-`expand`
+/// boundary set). `no_std` builds have no `thread_local!`; they fall back
+/// to a fresh scratch per call (same results, one extra allocation).
 pub fn penetration(
     simplex: &[Vector3; 4],
     support: impl Fn(Vector3) -> Vector3,
 ) -> (Vector3, Real) {
-    thread_local! {
-        static SCRATCH: std::cell::RefCell<EpaScratch> =
-            std::cell::RefCell::new(EpaScratch::default());
+    #[cfg(feature = "std")]
+    {
+        thread_local! {
+            static SCRATCH: core::cell::RefCell<EpaScratch> =
+                core::cell::RefCell::new(EpaScratch::default());
+        }
+        SCRATCH.with_borrow_mut(|s| penetration_inner(simplex, support, s))
     }
-    SCRATCH.with_borrow_mut(|s| penetration_inner(simplex, support, s))
+    #[cfg(not(feature = "std"))]
+    {
+        let mut scratch = EpaScratch::default();
+        penetration_inner(simplex, support, &mut scratch)
+    }
 }
 
 /// Pooled EPA buffers (capacity survives `clear()`, so steady-state calls
@@ -148,7 +160,7 @@ fn find_best(faces: &[Face]) -> (usize, Vector3, Real) {
             a.1.distance
                 .abs()
                 .partial_cmp(&b.1.distance.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(core::cmp::Ordering::Equal)
         })
         .unwrap();
     (best.0, best.1.normal, best.1.distance)
@@ -167,7 +179,7 @@ fn build_initial_faces(simplex: &[Vector3; 4], out: &mut Vec<Face>) {
         // tracking in expand() relies on.
         if normal.dot(simplex[opp] - simplex[a]) > 0.0 {
             normal = -normal;
-            std::mem::swap(&mut b, &mut c);
+            core::mem::swap(&mut b, &mut c);
         }
         let len = normal.length();
         if len < 1e-12 {

@@ -9,6 +9,8 @@
 //! which is more deterministic but still a recorded deviation — the face
 //! order shapes the PBD solve order and with it the settle scatter.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_math::{Real, Vector3};
 
 /// A face of the evolving hull with its outside set.

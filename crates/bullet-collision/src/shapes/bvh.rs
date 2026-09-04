@@ -7,6 +7,8 @@
 //! tests by the caller).
 
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 /// Leaves hold at most this many triangles.
 const LEAF_MAX_TRIANGLES: usize = 4;
@@ -284,7 +286,7 @@ fn ray_aabb_entry(aabb: &Aabb, from: Vector3, dir: Vector3) -> Real {
             let mut t1 = (lo - o) / d;
             let mut t2 = (hi - o) / d;
             if t1 > t2 {
-                std::mem::swap(&mut t1, &mut t2);
+                core::mem::swap(&mut t1, &mut t2);
             }
             tmin = tmin.max(t1);
             tmax = tmax.min(t2);

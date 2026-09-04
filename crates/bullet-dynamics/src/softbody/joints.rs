@@ -10,6 +10,8 @@
 //! [`AngularControl`] trait (Bullet's `AJoint::IControl`).
 
 use bullet_math::{math, Matrix3, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
 
 use crate::body::RigidBody;
 
@@ -419,8 +421,8 @@ impl Default for AngularJointSpecs {
     }
 }
 
-impl std::fmt::Debug for AngularJointSpecs {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for AngularJointSpecs {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AngularJointSpecs")
             .field("tuning", &self.tuning)
             .field("axis", &self.axis)
@@ -433,7 +435,7 @@ impl std::fmt::Debug for AngularJointSpecs {
 /// `prepare` may rewrite the joint's local axis (Bullet's demo
 /// `SteerControl` does); `speed` maps the projected relative angular
 /// velocity to the target speed.
-pub trait AngularControl: std::fmt::Debug + Send + Sync {
+pub trait AngularControl: core::fmt::Debug + Send + Sync {
     /// Hook before each solve step (Bullet's `IControl::Prepare`).
     fn prepare(&mut self, _joint: &mut AJoint) {}
     /// Target speed along the axis (Bullet's `IControl::Speed`).
@@ -507,7 +509,7 @@ impl AJoint {
         const MAXDRIFT: Real = bullet_math::FRAC_PI_2 / 8.0;
         // The control may rewrite `refs` — swap it out for the hook to keep
         // the borrows disjoint (Bullet hands the joint pointer over).
-        let mut control = std::mem::replace(&mut self.control, Box::new(DefaultAngularControl));
+        let mut control = core::mem::replace(&mut self.control, Box::new(DefaultAngularControl));
         control.prepare(self);
         self.control = control;
         side::activate(self.bodies[0], bodies);
@@ -671,7 +673,7 @@ impl SoftJoint {
 }
 
 /// Multiply an [`Impulse`] by a scalar (Bullet's `operator*`).
-impl std::ops::Mul<Real> for Impulse {
+impl core::ops::Mul<Real> for Impulse {
     type Output = Impulse;
     fn mul(self, x: Real) -> Impulse {
         Impulse {

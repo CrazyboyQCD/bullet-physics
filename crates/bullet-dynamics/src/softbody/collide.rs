@@ -11,6 +11,8 @@
 //! `distance - margin < 0`, with `offset` stored so the solver's
 //! `dot(x, n) + offset` recovers the detection-time distance.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_collision::narrowphase::epa;
 use bullet_collision::narrowphase::gjk::{core_support_minkowski, gjk_contact, GjkOutcome};
 use bullet_collision::narrowphase::point_triangle_distance;

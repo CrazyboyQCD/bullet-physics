@@ -5,6 +5,8 @@
 //! EPA pass to compute penetration depth.
 
 use bullet_math::{math, Quaternion, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use crate::shapes::CollisionShape;
 
 const MAX_ITERATIONS: u32 = 64;
@@ -867,7 +869,7 @@ fn closest_origin_tetrahedron(
                 p.0
                     .length_squared()
                     .partial_cmp(&q.0.length_squared())
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .unwrap_or(core::cmp::Ordering::Equal)
             })
             .unwrap();
         return (best, keep);

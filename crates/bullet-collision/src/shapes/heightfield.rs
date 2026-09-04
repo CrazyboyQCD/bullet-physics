@@ -1,4 +1,6 @@
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use super::triangle_mesh::TriangleMesh;
 

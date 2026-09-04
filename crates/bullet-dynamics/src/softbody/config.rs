@@ -4,6 +4,8 @@
 //! Defaults mirror `btSoftBody::initDefaults()` exactly (including the
 //! surprisingly low `piterations = 1`; demos usually raise it).
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_math::Real;
 
 /// Aerodynamic force model (Bullet's `eAeroModel`). The declaration order

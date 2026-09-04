@@ -5,6 +5,8 @@
 //! element stores node indices instead (Bullet's own serialization path
 //! `pointersToIndices` proves the index encoding is equivalent).
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bullet_collision::broadphase::DbvtTree;
 use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
 
@@ -230,7 +232,7 @@ pub struct Impulse {
     pub as_drift: bool,
 }
 
-impl std::ops::Neg for Impulse {
+impl core::ops::Neg for Impulse {
     type Output = Impulse;
     fn neg(self) -> Impulse {
         Impulse {

@@ -1,6 +1,8 @@
 //! Broad-phase collision: coarse AABB-based pair filtering.
 
 use bullet_math::{Aabb, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 mod axis_sweep3;
 mod brute_force;

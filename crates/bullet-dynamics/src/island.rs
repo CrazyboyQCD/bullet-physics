@@ -9,6 +9,9 @@
 //! sleep/wake decision lives in
 //! [`PhysicsWorld::step_islands`](super::world::PhysicsWorld).
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 /// Union-find with path compression and union by size (Bullet's `btUnionFind`
 /// built with `USE_PATH_COMPRESSION`).
 #[derive(Default)]

@@ -32,6 +32,26 @@ See [docs/architecture.md](docs/architecture.md) for the detailed design.
 bullet = { path = "crates/bullet", features = ["f64"] }
 ```
 
+## no_std
+
+The workspace compiles without the standard library: enable the `libm`
+feature (routes scalar transcendentals and glam's internal math to the
+pure-Rust `libm` crate) and drop the default features:
+
+```toml
+[dependencies]
+bullet = { path = "crates/bullet", default-features = false, features = ["libm"] }
+```
+
+- Default/std builds are bit-identical to always; only `libm` builds may
+  drift from the platform CRT at the last ulp of `sin`/`cos`/`powf`-style
+  calls (recorded in `docs/bullet-deviations.md`).
+- `StepTimings` reads zero unless a monotonic clock is injected via
+  `PhysicsWorld::set_step_clock` (under `std` the standard monotonic
+  `Instant` is used automatically).
+- SIMD is target-feature driven as usual (SSE2/NEON); on `wasm32` add
+  `-C target-feature=+simd128` for `Vec3A` SIMD lanes.
+
 ## Quick start
 
 ```bash

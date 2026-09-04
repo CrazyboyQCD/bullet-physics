@@ -17,7 +17,7 @@
 //! so a stale handle behaves like a stale index did: inert data for
 //! removed rigid bodies, a different body for renumbered soft bodies.
 
-use std::num::NonZeroU32;
+use core::num::NonZeroU32;
 
 macro_rules! world_handle {
     ($doc:expr, $name:ident) => {

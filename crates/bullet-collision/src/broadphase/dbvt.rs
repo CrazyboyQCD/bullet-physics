@@ -18,6 +18,8 @@
 //! the structure Bullet defaults to for arbitrary scenes.
 
 use bullet_math::{Aabb, Real, Vector3};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use super::{segment_hits_aabb, BroadPhase};
 
@@ -434,7 +436,7 @@ impl DbvtTree {
     /// into `(c0,c0), (c1,c1), (c0,c1)` — the mirrored `(c1,c0)` is
     /// skipped, so each unordered leaf pair reports exactly once.
     pub fn for_each_overlapping_pair(&self, other: &DbvtTree, out: &mut Vec<(usize, usize)>) {
-        let same_tree = std::ptr::eq(self, other);
+        let same_tree = core::ptr::eq(self, other);
         let mut stack: Vec<[u32; 2]> = Vec::new();
         if self.root != NONE && other.root != NONE {
             stack.push([self.root, other.root]);
@@ -557,8 +559,8 @@ impl Default for DbvtBroadPhase {
     }
 }
 
-impl std::fmt::Debug for DbvtBroadPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for DbvtBroadPhase {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DbvtBroadPhase")
             .field("dynamic_leaves", &self.dynamic.leaves)
             .field("fixed_leaves", &self.fixed.leaves)
@@ -623,7 +625,7 @@ impl DbvtBroadPhase {
         self.collide_scratch.clear();
         self.dynamic.for_each_overlapping(&volume, &mut self.collide_scratch);
         self.fixed.for_each_overlapping(&volume, &mut self.collide_scratch);
-        let hits = std::mem::take(&mut self.collide_scratch);
+        let hits = core::mem::take(&mut self.collide_scratch);
         for other in hits {
             if other != proxy {
                 self.pair_insert(pair_key(proxy, other));
