@@ -220,6 +220,12 @@ struct SceneRun {
   std::vector<std::unique_ptr<btTriangleMesh>> mesh_storage;
   std::vector<std::unique_ptr<btMotionState>> motions;
   std::vector<std::unique_ptr<btRigidBody>> bodies;
+  // Kinematic bodies (velocity-driven pose integration in `step`).
+  struct KinematicDriver {
+    btRigidBody* body;
+    btVector3 velocity;
+  };
+  std::vector<KinematicDriver> kinematics;
   std::vector<std::unique_ptr<btMultiBody>> multibodies;
   // Soft scenes run btSoftRigidDynamicsWorld (soft + rigid stages); every
   // other scene keeps btMultiBodyDynamicsWorld (its mb stages are no-ops
@@ -288,7 +294,23 @@ struct SceneRun {
       btRigidBody* body = bodies.back().get();
       body->setFriction(b.friction);
       body->setRestitution(b.restitution);
-      if (b.spawn_frame > 0 && !is_static) {
+      // Kinematic props (the perf scene spec's `"kinematic": true`):
+      // infinite mass, pose driven by the constant linear velocity, never
+      // sleeps - the same semantics as the Rust runner's new_kinematic.
+      if (b.kinematic) {
+        body->setCollisionFlags(body->getCollisionFlags() |
+                                btCollisionObject::CF_KINEMATIC_OBJECT);
+        // DISABLE_DEACTIVATION is Bullet's plain `#define 4`, not an enum
+        // member - no btCollisionObject:: qualification.
+        body->setActivationState(DISABLE_DEACTIVATION);
+        kinematics.push_back(
+            {body, btVector3(b.vel[0], b.vel[1], b.vel[2])});
+      }
+      if (b.vel[0] != btScalar(0) || b.vel[1] != btScalar(0) ||
+          b.vel[2] != btScalar(0)) {
+        body->setLinearVelocity(btVector3(b.vel[0], b.vel[1], b.vel[2]));
+      }
+      if (b.spawn_frame > 0 && !is_static && !b.kinematic) {
         pending.push_back({b.spawn_frame, bodies.size() - 1});
         spawned.push_back(0);
       } else {
@@ -386,6 +408,25 @@ struct SceneRun {
   // mirrors the Rust runner's arena_tick formula for formula so the two
   // sides stay workload-comparable; it runs before the solver sees the frame.
   void step(btScalar dt) {
+    // Velocity-driven kinematic pose integration (the crate's semantics,
+    // deviations §1): Bullet leaves kinematic poses to the user/motion
+    // state, so mirror the Rust runner here or the slab never moves.
+    for (KinematicDriver& kd : kinematics) {
+      // Bullet's solver maps every static/kinematic body onto one shared
+      // zero-velocity fixed solver body and writes that back at the end of
+      // the step, so the user is expected to set the velocity every frame -
+      // re-apply it here, then integrate the pose from it (the crate's
+      // velocity-driven semantics, deviations §1).
+      kd.body->setLinearVelocity(kd.velocity);
+      const btVector3& v = kd.body->getLinearVelocity();
+      btTransform t = kd.body->getWorldTransform();
+      t.getOrigin() += v * dt;
+      kd.body->setWorldTransform(t);
+      kd.body->setInterpolationWorldTransform(t);
+      // The motion state is the authority Bullet syncs static/kinematic
+      // bodies FROM every step - keep it in lockstep or the pose rolls back.
+      if (btMotionState* ms = kd.body->getMotionState()) ms->setWorldTransform(t);
+    }
     if (arena) {
       // Launcher: a small ball every 30 frames (21 total), aimed at a
       // deterministic spread across the box tower.

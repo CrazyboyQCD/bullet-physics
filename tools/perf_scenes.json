@@ -590,6 +590,19 @@
       "generators": [
         {"type": "sphere_rain", "nx": 20, "nz": 20, "layers": 20, "spacing": [0.5, 0.8, 0.5], "base": [-4.75, 5.0, -4.75], "radius": 0.2, "mass": 1, "friction": 0.2, "restitution": 0.6, "stagger": 22}
       ]
+    },
+    "kinematic_pusher": {
+      "comment": "Kinematic stress: a constant-velocity slab (vx = 1.5) pushing two rows of ten 0.5-m cubes across the ground. The slab keeps contact with the lead cubes for the whole run, so the kinematic-dynamic pair gate, the infinite-mass solver rows and the moving-kinematic island wake scan stay hot every frame with a deterministic, comparable workload.",
+      "dt": [1, 60],
+      "frames": 600,
+      "warmup": 30,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase": "sweep",
+      "broadphase_aabb": [[-8, -2, -8], [16, 6, 8]],
+      "generators": [
+        {"type": "kinematic_push", "rows": 10, "cols": 2, "spacing": [0.55, 0.8], "cube_half": 0.25, "base": [4.0, 0.25, -0.4], "mass": 1, "friction": 0.6, "restitution": 0.0, "slab_half": [0.5, 0.25, 1.0], "slab_start": [-5.0, 0.25, 0.0], "slab_velocity": [1.5, 0.0, 0.0]}
+      ]
     }
   }
 }

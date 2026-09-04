@@ -152,14 +152,25 @@ fn build_world(spec: &PerfSceneSpec) -> (PhysicsWorld, Vec<(u64, RigidBody)>) {
             b.position[1] as Real,
             b.position[2] as Real,
         );
-        let body = if b.mass == 0.0 {
+        let mut body = if b.kinematic {
+            RigidBody::new_kinematic(shape, position)
+                .friction(b.friction as Real)
+                .restitution(b.restitution as Real)
+        } else if b.mass == 0.0 {
             RigidBody::new_static(shape, position)
         } else {
             RigidBody::new_dynamic(shape, position, b.mass as Real)
                 .friction(b.friction as Real)
                 .restitution(b.restitution as Real)
         };
-        if b.spawn_frame > 0 && b.mass != 0.0 {
+        if b.velocity != [0.0, 0.0, 0.0] {
+            body.linear_velocity = Vector3::new(
+                b.velocity[0] as Real,
+                b.velocity[1] as Real,
+                b.velocity[2] as Real,
+            );
+        }
+        if b.spawn_frame > 0 && b.mass != 0.0 && !b.kinematic {
             pending.push((u64::from(b.spawn_frame), body));
         } else {
             world.add_body(body);

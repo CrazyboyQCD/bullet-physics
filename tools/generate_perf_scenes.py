@@ -31,7 +31,7 @@ C_HEADER = os.path.join(ROOT, "tools", "bullet_perf_scenes.h")
 # parity tables).
 RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "perf_scenes_table.rs")
 
-GENERATOR_TYPES = {"box_grid", "mixed_rain", "mesh_rain", "sphere_rain"}
+GENERATOR_TYPES = {"box_grid", "mixed_rain", "mesh_rain", "sphere_rain", "kinematic_push"}
 SHAPE_TYPES = {"box", "sphere", "capsule", "mesh", "plane"}
 SHAPE_ENUM = {"box": "PERF_SHAPE_BOX", "sphere": "PERF_SHAPE_SPHERE",
               "capsule": "PERF_SHAPE_CAPSULE", "mesh": "PERF_SHAPE_MESH",
@@ -143,6 +143,38 @@ def expand_generator(g):
                         "position": [bx + i * sx, by + layer * sy, bz + j * sz],
                         "mass": m, "friction": fr, "restitution": re,
                     })
+    elif kind == "kinematic_push":
+        # Kinematic stress: a constant-velocity slab pushing two rows of
+        # cubes across the ground. The slab keeps contact with the lead
+        # cubes for the whole run, so the kinematic-dynamic pair gate, the
+        # infinite-mass solver rows and the moving-kinematic island wake
+        # scan stay hot every frame with a deterministic, comparable
+        # workload (no chaotic squeeze-escape divergence).
+        rows, cols = g["rows"], g["cols"]
+        sx, sz = g["spacing"]
+        bx, by, bz = g["base"]
+        m, fr, re = g["mass"], g["friction"], g["restitution"]
+        out.append({
+            "name": "kinematic_push_ground",
+            "shape": {"type": "plane", "normal": [0, 1, 0], "constant": 0},
+            "position": [0.0, 0.0, 0.0],
+        })
+        for row in range(rows):
+            for col in range(cols):
+                out.append({
+                    "name": f"kinematic_push_cube_{row}_{col}",
+                    "shape": {"type": "box", "half_extents": [g["cube_half"]] * 3},
+                    "position": [bx + row * sx, by, bz + col * sz],
+                    "mass": m, "friction": fr, "restitution": re,
+                })
+        out.append({
+            "name": "kinematic_push_slab",
+            "shape": {"type": "box", "half_extents": g["slab_half"]},
+            "position": g["slab_start"],
+            "kinematic": True,
+            "velocity": g["slab_velocity"],
+            "friction": 0.5,
+        })
     else:
         raise ValueError(f"unknown generator type {kind!r}")
     return out
@@ -215,9 +247,11 @@ def gen_c(scenes):
         "  PerfShapeType shape;",
         "  btScalar params[6];   // box: 3 half extents; sphere: r; capsule: r, half_height; mesh: unused",
         "  btScalar pos[3];",
-        "  btScalar mass, friction, restitution;  // mass == 0 -> static",
+        "  btScalar mass, friction, restitution;  // mass == 0 -> static",      
         "  const PerfMeshSpec* mesh;              // non-null only for PERF_SHAPE_MESH",
         "  int spawn_frame;                       // 0: registered at build; >0: dropped by the step loop at that frame",
+        "  int kinematic;                         // 1: CF_KINEMATIC_OBJECT + DISABLE_DEACTIVATION (infinite mass)",
+        "  btScalar vel[3];                       // initial linear velocity (the kinematic driver)",
         "};",
         "",
         "struct PerfChainSpec {  // grid of fixed-base revolute pendulums (0 chains = rigid-only scene)",
@@ -277,13 +311,15 @@ def gen_c(scenes):
                 fr, re = fmt(b.get("friction", 0.5)), fmt(b.get("restitution", 0.0))
             mesh_ref = f"&k{name}_{b['name']}_mesh" if t == "mesh" else "nullptr"
             sf = int(b.get("spawn_frame", 0))
+            kin = 1 if b.get("kinematic", False) else 0
+            vel = ", ".join(f"btScalar({fmt(x)})" for x in b.get("velocity", [0.0, 0.0, 0.0]))
             lines.append(f"  {{{SHAPE_ENUM[t]}, {{{p}}}, {{{pos}}}, "
                          f"btScalar({mass}), btScalar({fr}), btScalar({re}), {mesh_ref}, "
-                         f"{sf}}},")
+                         f"{sf}, {kin}, {{{vel}}}}},")
         if not bodies:
-            # MSVC rejects zero-size arrays; chain scenes never read the table
+            # MSVC rejects zero-size arrays; chain scenes never read the table  
             # (num_bodies == 0), so park one unused placeholder entry.
-            lines.append("  {PERF_SHAPE_BOX, {0, 0, 0, 0, 0, 0}, {0, 0, 0}, 0, 0, 0, nullptr, 0},")
+            lines.append("  {PERF_SHAPE_BOX, {0, 0, 0, 0, 0, 0}, {0, 0, 0}, 0, 0, 0, nullptr, 0, 0, {0, 0, 0}},")
         lines.append("};")
         lines.append("")
         ch = sc.get("chains")
@@ -348,6 +384,8 @@ def gen_rs(scenes):
         "    pub friction: f32,",
         "    pub restitution: f32,",
         "    pub spawn_frame: u32,",
+        "    pub kinematic: bool,",
+        "    pub velocity: [f32; 3],",
         "}",
         "",
         "pub struct PerfChainSpec {",
@@ -423,9 +461,11 @@ def gen_rs(scenes):
             else:
                 fr, re = fmt(b.get("friction", 0.5)), fmt(b.get("restitution", 0.0))
             sf = int(b.get("spawn_frame", 0))
+            kin = "true" if b.get("kinematic", False) else "false"
+            vel = ", ".join(fmt(x) for x in b.get("velocity", [0.0, 0.0, 0.0]))
             lines.append(f"            PerfBodySpec {{ shape: {shape}, position: {pos}, "
-                         f"mass: {mass}, friction: {fr}, restitution: {re}, "
-                         f"spawn_frame: {sf} }},")
+                         f"mass: {mass}, friction: {fr}, restitution: {re}, "   
+                         f"spawn_frame: {sf}, kinematic: {kin}, velocity: [{vel}] }},")
         lines.append("        ],")
         ch = sc.get("chains")
         if ch:
