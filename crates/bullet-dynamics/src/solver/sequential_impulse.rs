@@ -51,6 +51,15 @@ pub struct ContactConstraint {
     tangent1_mass: Real,
     tangent2_mass: Real,
     penetration: Real,
+    /// `(penetration - SLOP).max(0.0)`, hoisted out of the iteration loop:
+    /// the solve multiplies it by the iteration-invariant `BAUMGARTE * inv_dt`
+    /// (same left-to-right association as the inline expression it replaces).
+    baumgarte_span: Real,
+    /// `min(penetration, 0.0)`: negative only for separated (margin-band)
+    /// points, where the solve softens the velocity error by
+    /// `separation * inv_dt` (Bullet's `velocityError -= penetration *
+    /// invTimeStep`); zero otherwise.
+    separation: Real,
     restitution: Real,
     friction: Real,
     pub(crate) normal_impulse: Real,
@@ -252,6 +261,8 @@ impl ContactConstraint {
             tangent1_mass,
             tangent2_mass,
             penetration: cp.penetration,
+            baumgarte_span: (cp.penetration - SLOP).max(0.0),
+            separation: cp.penetration.min(0.0),
             restitution,
             friction,
             // The impulses inherited from the persistent contact cache (if any)
@@ -442,16 +453,17 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
         bias = -c.restitution * vn;
     }
     if !c.split_active {
-        bias += BAUMGARTE * inv_dt * (c.penetration - SLOP).max(0.0);
+        bias += BAUMGARTE * inv_dt * c.baumgarte_span;
     }
     // Separated (margin-band) contacts: Bullet's solver subtracts the
     // separation rate from the velocity error (`velocityError -= penetration
     // * invTimeStep` where `penetration = distance + linearSlop`; Bullet's
     // default slop is 0, so only genuinely separated points soften). Our
     // engine-wide slop stays a dead zone between separation and the
-    // Baumgarte threshold.
-    if c.penetration < 0.0 {
-        bias += c.penetration * inv_dt;
+    // Baumgarte threshold. Both terms are iteration-invariant and
+    // precomputed in `prepare`.
+    if c.separation < 0.0 {
+        bias += c.separation * inv_dt;
     }
 
     // Normal impulse, clamped to be non-negative.
