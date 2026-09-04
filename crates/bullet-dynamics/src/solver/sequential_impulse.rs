@@ -85,6 +85,16 @@ pub struct ContactConstraint {
     /// kinematic velocities are real and must enter `J·v`.
     applies_a: bool,
     applies_b: bool,
+    /// Per-unit-impulse delta of the relative velocity `rel = vb - va`:
+    /// applying `dir · j` advances `rel` by `K_dir · j`, where
+    /// `K_dir = dir·(invMass_a + invMass_b) + (invI_b·(r_b×dir))×r_b +
+    /// (invI_a·(r_a×dir))×r_a` (both terms pre-folded in `prepare`).
+    /// `K_normal·normal == 1 / normal_mass` by construction. The solve
+    /// loop advances `rel` through these couplings instead of re-reading
+    /// both bodies' velocities per tangent block.
+    kn: Vector3,
+    kt1: Vector3,
+    kt2: Vector3,
 }
 
 /// Bounds on the accumulated impulse of a constraint row (Bullet's
@@ -243,6 +253,18 @@ impl ContactConstraint {
             tangent2,
         );
 
+        // Delta-velocity couplings of the relative velocity per unit
+        // impulse along each row direction (see the field docs).
+        let kn = normal * (inv_mass_a + inv_mass_b)
+            + ang_normal_b.cross(r_b)
+            + ang_normal_a.cross(r_a);
+        let kt1 = tangent1 * (inv_mass_a + inv_mass_b)
+            + ang_tangent1_b.cross(r_b)
+            + ang_tangent1_a.cross(r_a);
+        let kt2 = tangent2 * (inv_mass_a + inv_mass_b)
+            + ang_tangent2_b.cross(r_b)
+            + ang_tangent2_a.cross(r_a);
+
         // Combined material properties, matching Bullet's
         // `btManifoldResult::calculateCombinedFriction` /
         // `calculateCombinedRestitution`: plain products of the two bodies'
@@ -290,6 +312,9 @@ impl ContactConstraint {
             push_impulse: 0.0,
             applies_a: inv_mass_a > 0.0,
             applies_b: inv_mass_b > 0.0,
+            kn,
+            kt1,
+            kt2,
         }
     }
 }
@@ -455,7 +480,7 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
 
     let va = a.linear_velocity + a.angular_velocity.cross(c.r_a);
     let vb = b.linear_velocity + b.angular_velocity.cross(c.r_b);
-    let rel = vb - va;
+    let mut rel = vb - va;
     let vn = rel.dot(c.normal);
 
     // Target normal velocity: restitution plus Baumgarte penetration
@@ -489,32 +514,37 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
     let jn = c.normal_impulse - old;
 
     apply_impulse(a, b, c, Dir::Normal, jn);
+    rel += c.kn * jn;
 
-    // Friction: two tangent directions, clamped by Coulomb's law.
+    // Friction: two tangent directions, clamped by Coulomb's law. Each
+    // block projects the *incrementally advanced* `rel` (advanced by the
+    // previous block's impulse through the pre-folded couplings) instead
+    // of re-reading both bodies' velocities — same sequential-impulse
+    // semantics, one cross-pair saved per tangent block.
     let max_friction = c.friction * c.normal_impulse;
 
     // Tangent 1.
     {
-        let va = a.linear_velocity + a.angular_velocity.cross(c.r_a);
-        let vb = b.linear_velocity + b.angular_velocity.cross(c.r_b);
-        let vt = (vb - va).dot(c.tangent1);
+        let vt = rel.dot(c.tangent1);
         let lambda = -c.tangent1_mass * vt;
         let old = c.tangent1_impulse;
         let new = (old + lambda).clamp(-max_friction, max_friction);
         c.tangent1_impulse = new;
-        apply_impulse(a, b, c, Dir::Tangent1, new - old);
+        let j = new - old;
+        apply_impulse(a, b, c, Dir::Tangent1, j);
+        rel += c.kt1 * j;
     }
 
     // Tangent 2.
     {
-        let va = a.linear_velocity + a.angular_velocity.cross(c.r_a);
-        let vb = b.linear_velocity + b.angular_velocity.cross(c.r_b);
-        let vt = (vb - va).dot(c.tangent2);
+        let vt = rel.dot(c.tangent2);
         let lambda = -c.tangent2_mass * vt;
         let old = c.tangent2_impulse;
         let new = (old + lambda).clamp(-max_friction, max_friction);
         c.tangent2_impulse = new;
-        apply_impulse(a, b, c, Dir::Tangent2, new - old);
+        let j = new - old;
+        apply_impulse(a, b, c, Dir::Tangent2, j);
+        rel += c.kt2 * j;
     }
 }
 
