@@ -204,11 +204,26 @@ impl ContactConstraint {
         let ang_tangent2_a = inv_inertia_a * (r_a.cross(tangent2));
         let ang_tangent2_b = inv_inertia_b * (r_b.cross(tangent2));
 
-        let normal_mass = effective_mass(inv_mass_a, inv_mass_b, &inv_inertia_a, &inv_inertia_b, r_a, r_b, normal);
-        let tangent1_mass =
-            effective_mass(inv_mass_a, inv_mass_b, &inv_inertia_a, &inv_inertia_b, r_a, r_b, tangent1);
-        let tangent2_mass =
-            effective_mass(inv_mass_a, inv_mass_b, &inv_inertia_a, &inv_inertia_b, r_a, r_b, tangent2);
+        let normal_mass =
+            effective_mass(inv_mass_a, inv_mass_b, ang_normal_a, ang_normal_b, r_a, r_b, normal);
+        let tangent1_mass = effective_mass(
+            inv_mass_a,
+            inv_mass_b,
+            ang_tangent1_a,
+            ang_tangent1_b,
+            r_a,
+            r_b,
+            tangent1,
+        );
+        let tangent2_mass = effective_mass(
+            inv_mass_a,
+            inv_mass_b,
+            ang_tangent2_a,
+            ang_tangent2_b,
+            r_a,
+            r_b,
+            tangent2,
+        );
 
         // Combined material properties, matching Bullet's
         // `btManifoldResult::calculateCombinedFriction` /
@@ -269,21 +284,25 @@ fn tangent_basis(n: Vector3) -> (Vector3, Vector3) {
     (t1, t2)
 }
 
-/// Inverse effective mass along a direction for a pair of bodies.
+/// Inverse effective mass along a direction for a pair of bodies. The
+/// pre-folded angular components `ang_a = invI_a · (r_a × dir)` and
+/// `ang_b = invI_b · (r_b × dir)` come straight from `prepare`, which has
+/// already built them for the impulse-application path — the identical
+/// intermediates this function used to re-derive, so `k` is bit-identical.
 #[allow(clippy::too_many_arguments)]
 fn effective_mass(
     inv_mass_a: Real,
     inv_mass_b: Real,
-    inv_inertia_a: &Matrix3,
-    inv_inertia_b: &Matrix3,
+    ang_a: Vector3,
+    ang_b: Vector3,
     r_a: Vector3,
     r_b: Vector3,
     dir: Vector3,
 ) -> Real {
     let k = inv_mass_a
         + inv_mass_b
-        + dir.dot((*inv_inertia_a * (r_a.cross(dir))).cross(r_a))
-        + dir.dot((*inv_inertia_b * (r_b.cross(dir))).cross(r_b));
+        + dir.dot(ang_a.cross(r_a))
+        + dir.dot(ang_b.cross(r_b));
     if k > 0.0 {
         1.0 / k
     } else {
