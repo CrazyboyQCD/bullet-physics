@@ -425,6 +425,7 @@ pub(crate) fn split_impulse_pass(
 /// Accumulate a split-impulse positional push onto the bodies' push velocities
 /// (Bullet's `internalApplyPushImpulse`): the push runs along the row normal
 /// only, so it reuses the pre-folded normal angular components.
+#[inline]
 fn apply_push(a: &mut RigidBody, b: &mut RigidBody, c: &ContactConstraint, j: Real) {
     a.push_linear -= c.normal * (j * c.inv_mass_a);
     b.push_linear += c.normal * (j * c.inv_mass_b);
@@ -542,7 +543,10 @@ enum Dir {
 /// Apply an impulse `dir · j` to both bodies: the linear parts scale the
 /// direction by `j · inv_mass`, the angular parts use the row's pre-folded
 /// component (`ω -= comp · j`), matching Bullet's
-/// `resolveSingleConstraintRowGeneric` shape.
+/// `resolveSingleConstraintRowGeneric` shape. Inlined so the three
+/// per-constraint call sites fold the `Dir` match at compile time and keep
+/// body velocities in registers across the normal/tangent blocks.
+#[inline]
 fn apply_impulse(
     a: &mut RigidBody,
     b: &mut RigidBody,
