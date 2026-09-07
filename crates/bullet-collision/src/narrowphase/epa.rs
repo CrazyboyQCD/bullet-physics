@@ -12,6 +12,17 @@
 //! outside the triangle. Using the plain plane distance makes the closest-face
 //! selection wrong for elongated Minkowski differences and the iteration
 //! stalls on wrong faces.
+//!
+//! Failure semantics: hull expansions are *atomic*. A degenerate expansion is
+//! validated against the horizon before the hull is touched, so a rejected
+//! expansion leaves the polytope exactly as it was (never a hole), and the
+//! run ends with the intact hull's closest face — Bullet's `InvalidHull`
+//! early exit. A fully degenerate seed (no valid tetrahedron face) returns
+//! the zero normal and zero depth. Every path terminates at `MAX_ITERATIONS`
+//! / `MAX_VERTICES` and produces finite values; the internal [`EpaStatus`]
+//! distinguishes convergence from the bounded exits (the public
+//! [`penetration`] keeps its `(normal, depth)` shape — its only caller
+//! rejects non-positive depths).
 
 use bullet_math::{math, Real, Vector3};
 #[cfg(not(feature = "std"))]
@@ -45,6 +56,27 @@ struct Face {
     plane_distance: Real,
 }
 
+/// Internal outcome of an EPA run. Kept private: the public [`penetration`]
+/// returns the best `(normal, depth)` of the *intact* hull in every exit, and
+/// its sole caller (`convex_convex`) rejects non-positive depths, so a
+/// public result type is not warranted. Tests assert on this to pin the
+/// failure paths.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EpaStatus {
+    /// The closest face bounds the polytope (support point within
+    /// `EPSILON` of it): normal convergence.
+    Converged,
+    /// A degenerate expansion was rejected before the hull was mutated
+    /// (including the fully degenerate seed returning the zero result) —
+    /// Bullet's `InvalidHull` early exit.
+    DegenerateExpansion,
+    /// `MAX_ITERATIONS` expansions ran without converging.
+    IterationLimit,
+    /// `MAX_VERTICES` reached; the polytope stopped growing (Bullet's
+    /// `OutOfVertices`).
+    VertexLimit,
+}
+
 /// Compute penetration `(normal, depth)` from a GJK simplex enclosing the
 /// origin and the Minkowski support function. `support` maps a direction to
 /// the farthest point of `A - B` along it.
@@ -60,7 +92,8 @@ pub fn penetration(
     support: impl Fn(Vector3) -> Vector3,
     scratch: &mut EpaScratch,
 ) -> (Vector3, Real) {
-    penetration_inner(simplex, support, scratch)
+    let (_, normal, depth) = penetration_inner(simplex, support, scratch);
+    (normal, depth)
 }
 
 /// Pooled EPA buffers (capacity survives `clear()`, so steady-state calls
@@ -77,7 +110,7 @@ fn penetration_inner(
     simplex: &[Vector3; 4],
     support: impl Fn(Vector3) -> Vector3,
     scratch: &mut EpaScratch,
-) -> (Vector3, Real) {
+) -> (EpaStatus, Vector3, Real) {
     let EpaScratch { vertices, faces, boundary } = scratch;
     vertices.clear();
     faces.clear();
@@ -89,7 +122,12 @@ fn penetration_inner(
     // the origin. Bullet's `btGjkEpa2` combines both the same way.
     vertices.extend_from_slice(simplex);
     build_initial_faces(simplex, faces);
-    debug_assert!(!faces.is_empty(), "GJK tetrahedron is fully degenerate");
+    if faces.is_empty() {
+        // Fully degenerate tetrahedron (collinear/coplanar vertices): no
+        // polytope to expand. Non-panicking exit with the zero result —
+        // Bullet's `InvalidHull`.
+        return (EpaStatus::DegenerateExpansion, Vector3::ZERO, 0.0);
+    }
 
     for d in [
         Vector3::X,
@@ -100,8 +138,9 @@ fn penetration_inner(
         Vector3::NEG_Z,
     ] {
         // expand() is a no-op when the point already lies inside the polytope.
-        // Degenerate expansion would leave a hole in the hull (and negative
-        // face distances); abort seeding in that case (Bullet's `InvalidHull`).
+        // Degenerate expansion is rejected atomically (the hull is untouched);
+        // the run then continues from the intact, partially seeded polytope
+        // (Bullet's `InvalidHull` seeding exit).
         let idx = vertices.len();
         let point = support(d);
         vertices.push(point);
@@ -110,8 +149,9 @@ fn penetration_inner(
         }
     }
 
+    let mut status = EpaStatus::IterationLimit;
     for _ in 0..MAX_ITERATIONS {
-        let (best_idx, best_normal, best_dist) = find_best(faces);
+        let (_, best_normal, best_dist) = find_best(faces);
 
         let new_point = support(best_normal);
         // Bullet: `wdist = dot(best->n, w) - best->d`; only expand when the
@@ -119,30 +159,35 @@ fn penetration_inner(
         let wdist = best_normal.dot(new_point) - best_dist;
         if wdist <= EPSILON {
             // Converged: the closest face bounds the polytope.
-            return (best_normal, best_dist);
+            return (EpaStatus::Converged, best_normal, best_dist);
         }
 
         // Remove the face and rebuild the hull around the new point.
         if vertices.len() >= MAX_VERTICES {
             // Bullet's `OutOfVertices`: stop growing the polytope.
+            status = EpaStatus::VertexLimit;
             break;
         }
         let new_idx = vertices.len();
         vertices.push(new_point);
         if !expand(faces, vertices, boundary, new_point, new_idx) {
-            // Degenerate expansion: keep the current hull and return its
-            // closest face (matches Bullet's `InvalidHull` early exit).
+            // Degenerate expansion rejected atomically: the hull is intact,
+            // so its closest face is a valid answer (Bullet's `InvalidHull`
+            // early exit).
+            status = EpaStatus::DegenerateExpansion;
             break;
         }
-        let _ = best_idx;
     }
 
     let (_, best_normal, best_dist) = find_best(faces);
-    (best_normal, best_dist)
+    (status, best_normal, best_dist)
 }
 
 /// The closest face: smallest absolute distance to the origin (Bullet's
-/// `findbest`, which compares `d * d`).
+/// `findbest`, which compares `d * d`). Callers must pass a non-empty face
+/// set: `penetration_inner` guarantees this (the degenerate-seed exit returns
+/// before any `find_best`, and an atomic `expand` never empties the hull —
+/// a fully visible hull leaves its horizon ring as the new faces).
 fn find_best(faces: &[Face]) -> (usize, Vector3, Real) {
     let best = faces
         .iter()
@@ -237,8 +282,9 @@ fn edge_distance(pa: Vector3, pb: Vector3, normal: Vector3) -> Option<Real> {
 }
 
 /// Expand the hull toward `new_point`, removing visible faces and stitching
-/// new ones along the horizon. Returns `false` when an edge is degenerate
-/// (leaving the hull would be invalid); the caller should stop iterating.
+/// new ones along the horizon. Returns `false` when the expansion is
+/// degenerate; the hull is then **unchanged** (the expansion is validated in
+/// full before any mutation), and the caller should stop iterating.
 fn expand(
     faces: &mut Vec<Face>,
     vertices: &[Vector3],
@@ -246,43 +292,63 @@ fn expand(
     new_point: Vector3,
     new_idx: usize,
 ) -> bool {
-    // Remove faces visible from the new point, tracking the boundary loop:
-    // a directed edge whose reverse is already tracked is interior to the
-    // visible region (cancel both); otherwise it lies on the horizon. The
-    // horizon is small (tens of edges), so linear matching beats a hash set
-    // and its SipHash cost — which dominated the profile.
+    // Two-phase expansion. Phase 1 classifies the visible faces and collects
+    // the horizon loop *without touching `faces`*; a degenerate horizon edge
+    // aborts here and the hull stays intact (a mid-stitch abort would leave a
+    // hole). The visibility predicate is re-evaluated in phase 2 on the same
+    // inputs with the same float ops, so the classification is identical.
+    // Phase 2 commits: remove the visible faces, then stitch — every stitch
+    // edge was validated in phase 1, so the commit cannot fail halfway.
     boundary.clear();
 
-    faces.retain(|f| {
-        // Coplanar tolerance (Bullet's `-EPA_PLANE_EPS`): a support point on
-        // the face plane is treated as inside, keeping the horizon closed.
-        let visible = f.normal.dot(new_point) - f.plane_distance > PLANE_EPS;
-        if visible {
-            for (u, v) in [(f.a, f.b), (f.b, f.c), (f.c, f.a)] {
-                match boundary.iter().position(|&(x, y)| x == v && y == u) {
-                    Some(i) => {
-                        // Cancel the interior edge. `swap_remove` reorders the
-                        // rest, but the horizon order is already arbitrary
-                        // (face creation order never feeds back into results:
-                        // `find_best` ties aside, the closest face is unique).
-                        boundary.swap_remove(i);
-                    }
-                    None => boundary.push((u, v)),
+    // Phase 1: collect the boundary loop of the visible region. A directed
+    // edge whose reverse is already tracked is interior to the visible region
+    // (cancel both); otherwise it lies on the horizon. The horizon is small
+    // (tens of edges), so linear matching beats a hash set and its SipHash
+    // cost — which dominated the profile.
+    let mut any_visible = false;
+    for f in faces.iter() {
+        if !face_visible(f, new_point) {
+            continue;
+        }
+        any_visible = true;
+        for (u, v) in [(f.a, f.b), (f.b, f.c), (f.c, f.a)] {
+            match boundary.iter().position(|&(x, y)| x == v && y == u) {
+                Some(i) => {
+                    // Cancel the interior edge. `swap_remove` reorders the
+                    // rest, but the horizon order is already arbitrary
+                    // (face creation order never feeds back into results:
+                    // `find_best` ties aside, the closest face is unique).
+                    boundary.swap_remove(i);
                 }
+                None => boundary.push((u, v)),
             }
         }
-        !visible
-    });
+    }
+    if !any_visible {
+        // The point lies inside (or on) the polytope: nothing to do.
+        return true;
+    }
 
-    // Drain keeps the pooled vec's capacity for the next expansion.
+    // Validate the whole horizon before mutating anything.
+    for &(u, v) in boundary.iter() {
+        let cross = (vertices[v] - vertices[u]).cross(new_point - vertices[u]);
+        if cross.length() < 1e-12 {
+            // Degenerate edge (collinear with the new point): the horizon
+            // would not close, so reject the expansion atomically.
+            return false;
+        }
+    }
+
+    // Phase 2: commit. Remove the visible faces...
+    faces.retain(|f| !face_visible(f, new_point));
+
+    // ...then stitch the horizon. Drain keeps the pooled vec's capacity for
+    // the next expansion.
     for (u, v) in boundary.drain(..) {
         let cross = (vertices[v] - vertices[u]).cross(new_point - vertices[u]);
         let len = cross.length();
-        if len < 1e-12 {
-            // Degenerate edge (collinear with the new point): the horizon
-            // would not close, so abandon this expansion.
-            return false;
-        }
+        debug_assert!(len >= 1e-12, "horizon edge validated in phase 1");
         // The boundary edges run counter-clockwise when seen from outside, so
         // the cross product points outward; no sign flip is needed (matching
         // Bullet, which keeps face winding consistent).
@@ -298,6 +364,16 @@ fn expand(
         });
     }
     true
+}
+
+/// Face visibility from `new_point`: strictly outside the face plane by more
+/// than the coplanar tolerance (Bullet's `-EPA_PLANE_EPS`): a support point
+/// on the face plane is treated as inside, keeping the horizon closed.
+/// Called twice per face per expansion (collect + commit) with identical
+/// inputs, so both phases always agree.
+#[inline]
+fn face_visible(f: &Face, new_point: Vector3) -> bool {
+    f.normal.dot(new_point) - f.plane_distance > PLANE_EPS
 }
 
 #[cfg(test)]
@@ -380,5 +456,263 @@ mod tests {
         let (normal, depth) = penetration(&sp, support, &mut EpaScratch::default());
         assert_relative_eq!(depth, 0.5, epsilon = 1e-3);
         assert_relative_eq!(normal.x, 1.0, epsilon = 1e-4);
+    }
+
+    // ------------------------------------------------------------------
+    // Adversarial failure paths. Every failure-path test asserts: no panic,
+    // finite normal/depth, and no invalid (negative/huge) depth unless the
+    // run is explicitly reported as a failed status (zero result).
+    // ------------------------------------------------------------------
+
+    /// Convex-hull support over a finite point set (argmax of `d . p`).
+    fn point_support(points: &[Vector3]) -> impl Fn(Vector3) -> Vector3 + '_ {
+        move |dir| {
+            let mut best = points[0];
+            let mut best_d = best.dot(dir);
+            for &p in &points[1..] {
+                let d = p.dot(dir);
+                if d > best_d {
+                    best = p;
+                    best_d = d;
+                }
+            }
+            best
+        }
+    }
+
+    fn check_finite(normal: Vector3, depth: Real, scale: Real) {
+        assert!(normal.x.is_finite() && normal.y.is_finite() && normal.z.is_finite());
+        assert!(depth.is_finite(), "depth must not be NaN/Inf");
+        assert!(
+            depth >= -1e-3 * scale && depth <= 1e3 * scale,
+            "depth out of the plausible band: {depth}"
+        );
+    }
+
+    #[test]
+    fn epa_degenerate_seed_returns_zero_cleanly() {
+        // All four simplex vertices identical: every tetrahedron face is
+        // degenerate, the seed has no valid face, and the run must exit
+        // without panicking and without touching `find_best` on an empty
+        // hull.
+        let v = Vector3::new(0.3, -0.2, 0.5);
+        let simplex = [v; 4];
+        let points = [v];
+        let support = point_support(&points);
+        let (status, normal, depth) =
+            penetration_inner(&simplex, &support, &mut EpaScratch::default());
+        assert_eq!(status, EpaStatus::DegenerateExpansion);
+        assert_eq!(normal, Vector3::ZERO);
+        assert_eq!(depth, 0.0);
+
+        // The public wrapper reports the same zero result, still no panic.
+        let (normal, depth) = penetration(&simplex, &support, &mut EpaScratch::default());
+        assert_eq!(normal, Vector3::ZERO);
+        assert_eq!(depth, 0.0);
+    }
+
+    #[test]
+    fn epa_collinear_simplex_fail_clean() {
+        // Four distinct but collinear vertices: all faces are degenerate.
+        let simplex = [
+            Vector3::ONE,
+            Vector3::new(0.5, 0.5, 0.5),
+            Vector3::NEG_ONE,
+            Vector3::new(-2.0, -2.0, -2.0),
+        ];
+        let support = point_support(&simplex);
+        let (status, normal, depth) =
+            penetration_inner(&simplex, support, &mut EpaScratch::default());
+        assert_eq!(status, EpaStatus::DegenerateExpansion);
+        assert_eq!(normal, Vector3::ZERO);
+        assert_eq!(depth, 0.0);
+    }
+
+    #[test]
+    fn epa_near_degenerate_seed_stays_clean() {
+        // Two duplicate vertices, two distinct: half the initial faces are
+        // degenerate. Whatever exit the run takes, it must be finite and
+        // panic-free.
+        let a = Vector3::new(1.0, 0.0, 0.2);
+        let c = Vector3::new(-0.5, 1.0, -0.3);
+        let d = Vector3::new(-0.4, -0.9, 0.4);
+        let simplex = [a, a, c, d];
+        let points = [a, c, d, a * 1.5, c * -1.2];
+        let support = point_support(&points);
+        let (status, normal, depth) =
+            penetration_inner(&simplex, support, &mut EpaScratch::default());
+        let _ = status; // any exit is acceptable; the run must stay clean
+        check_finite(normal, depth, 2.0);
+    }
+
+    #[test]
+    fn epa_coplanar_simplex_stays_clean() {
+        // Four coplanar vertices (a flat quad): zero-volume "hull". The run
+        // must terminate with finite values and no panic.
+        let simplex = [
+            Vector3::new(1.0, 1.0, 0.0),
+            Vector3::new(-1.0, 1.0, 0.0),
+            Vector3::new(-1.0, -1.0, 0.0),
+            Vector3::new(1.0, -1.0, 0.0),
+        ];
+        let support = point_support(&simplex);
+        let (status, normal, depth) =
+            penetration_inner(&simplex, support, &mut EpaScratch::default());
+        let _ = status; // degenerate seed or a bounded run — both acceptable
+        check_finite(normal, depth, 2.0);
+    }
+
+    #[test]
+    fn epa_support_never_offers_new_point_converges() {
+        // The support function's point set *is* the simplex: after the seed
+        // no expansion can find a point outside the best face, so the run
+        // converges immediately (the exact-touching analogue for a polytope
+        // that cannot grow).
+        let simplex = [
+            Vector3::new(0.6, 0.6, 0.6),
+            Vector3::new(-0.6, -0.6, 0.6),
+            Vector3::new(-0.6, 0.6, -0.6),
+            Vector3::new(0.6, -0.6, -0.6),
+        ];
+        let support = point_support(&simplex);
+        let (status, normal, depth) =
+            penetration_inner(&simplex, support, &mut EpaScratch::default());
+        assert_eq!(status, EpaStatus::Converged);
+        check_finite(normal, depth, 2.0);
+        assert!(depth >= -1e-3, "non-enclosing seed must not report depth");
+    }
+
+    #[test]
+    fn epa_thin_plate_horizon_stays_clean() {
+        // Two thin plates overlapping by less than their thickness: the
+        // horizon edges are nearly collinear with the support points, the
+        // classic degenerate-horizon trigger. The expansion may be rejected,
+        // but never partially applied and never with a panic/NaN.
+        let a = CollisionShape::box_shape(Vector3::new(0.5, 0.0005, 0.5));
+        let b = CollisionShape::box_shape(Vector3::new(0.5, 0.0005, 0.5));
+        let pa = Vector3::ZERO;
+        let pb = Vector3::new(0.05, 0.0004, 0.03);
+        let simplex = match gjk::gjk_intersect(
+            &a, pa, Quaternion::IDENTITY, &b, pb, Quaternion::IDENTITY,
+        ) {
+            Some(s) => s,
+            None => return, // GJK reported separation; EPA is not reached
+        };
+        let mut sp = [Vector3::ZERO; 4];
+        for (i, v) in simplex.points().iter().take(4).enumerate() {
+            sp[i] = *v;
+        }
+        let support = |dir: Vector3| {
+            gjk::support_minkowski(
+                &a, pa, Quaternion::IDENTITY, &b, pb, Quaternion::IDENTITY, dir,
+            )
+        };
+        let (normal, depth) = penetration(&sp, support, &mut EpaScratch::default());
+        check_finite(normal, depth, 1.0);
+    }
+
+    #[test]
+    fn epa_tiny_penetration_is_finite_and_tiny() {
+        // Overlap of ~1e-4 — the same order as `EPA_ACCURACY` (f32): the
+        // run may converge early, but must stay finite and near-zero.
+        let r = 1.0;
+        let a = CollisionShape::sphere(r);
+        let b = CollisionShape::sphere(r);
+        let pa = Vector3::ZERO;
+        let pb = Vector3::new(2.0 - 1e-4, 0.0, 0.0);
+        let Some(simplex) = gjk::gjk_intersect(
+            &a, pa, Quaternion::IDENTITY, &b, pb, Quaternion::IDENTITY,
+        ) else {
+            return; // below the GJK overlap resolution — not an EPA failure
+        };
+        let mut sp = [Vector3::ZERO; 4];
+        for (i, v) in simplex.points().iter().take(4).enumerate() {
+            sp[i] = *v;
+        }
+        let support = |dir: Vector3| {
+            gjk::support_minkowski(
+                &a, pa, Quaternion::IDENTITY, &b, pb, Quaternion::IDENTITY, dir,
+            )
+        };
+        let (normal, depth) = penetration(&sp, support, &mut EpaScratch::default());
+        check_finite(normal, depth, 1.0);
+        assert!(depth >= -1e-3, "tiny overlap must not report a real depth");
+        assert!(depth < 0.1, "tiny overlap must not report a large depth");
+    }
+
+    #[test]
+    fn epa_elongated_convex_stays_clean() {
+        // A 200:1 sliver box against a small sphere crossing its thin axis:
+        // the edge-aware `face_distance` fallback is load-bearing here.
+        let a = CollisionShape::box_shape(Vector3::new(1.0, 0.005, 0.005));
+        let b = CollisionShape::sphere(0.02);
+        let pa = Vector3::ZERO;
+        let pb = Vector3::new(0.3, 0.01, 0.0);
+        let Some(simplex) = gjk::gjk_intersect(
+            &a, pa, Quaternion::IDENTITY, &b, pb, Quaternion::IDENTITY,
+        ) else {
+            return;
+        };
+        let mut sp = [Vector3::ZERO; 4];
+        for (i, v) in simplex.points().iter().take(4).enumerate() {
+            sp[i] = *v;
+        }
+        let support = |dir: Vector3| {
+            gjk::support_minkowski(
+                &a, pa, Quaternion::IDENTITY, &b, pb, Quaternion::IDENTITY, dir,
+            )
+        };
+        let (normal, depth) = penetration(&sp, support, &mut EpaScratch::default());
+        check_finite(normal, depth, 1.0);
+        let n2 = normal.length_squared();
+        assert!(
+            (n2 - 1.0).abs() < 1e-2 || n2 < 1e-8,
+            "normal must be unit or the zero result, got |n|² = {n2}"
+        );
+    }
+
+    #[test]
+    fn epa_scale_sweep_spheres() {
+        // Penetration of two equal spheres across five magnitudes. The
+        // depth scales with the scene; f32's `EPA_ACCURACY = 1e-4` floor
+        // dominates the smallest scales (Bullet has the same constant), so
+        // the assertions are finiteness + band + direction, not precision.
+        for &scale in &[1e-3_f64, 1e-2, 1.0, 1e2, 1e3] {
+            let r = scale as Real;
+            let a = CollisionShape::sphere(r);
+            let b = CollisionShape::sphere(r);
+            let pa = Vector3::ZERO;
+            // 20 % overlap along an oblique offset (avoids axis-aligned
+            // degenerate simplices).
+            let offset = (r * 1.6, r * 0.3, r * 0.2);
+            let pb = Vector3::new(offset.0, offset.1, offset.2);
+            let expected = 2.0 * r - pb.length();
+
+            let Some(simplex) = gjk::gjk_intersect(
+                &a, pa, Quaternion::IDENTITY, &b, pb, Quaternion::IDENTITY,
+            ) else {
+                // No enclosing simplex from GJK at this scale — nothing to
+                // assert about EPA (recorded in the report, not invented).
+                continue;
+            };
+            let mut sp = [Vector3::ZERO; 4];
+            for (i, v) in simplex.points().iter().take(4).enumerate() {
+                sp[i] = *v;
+            }
+            let support = |dir: Vector3| {
+                gjk::support_minkowski(
+                    &a, pa, Quaternion::IDENTITY, &b, pb, Quaternion::IDENTITY, dir,
+                )
+            };
+            let (normal, depth) = penetration(&sp, support, &mut EpaScratch::default());
+            check_finite(normal, depth, r.max(1.0));
+            assert!(
+                depth > -expected.abs() * 1e-2 && depth < expected * 4.0 + r * 1e-2,
+                "scale {scale}: depth {depth} outside the plausible band around {expected}"
+            );
+            if expected > 1e-3 * r {
+                assert!(normal.dot(pb.normalize()) > 0.0, "scale {scale}: normal must face the separation direction");
+            }
+        }
     }
 }
