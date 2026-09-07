@@ -132,3 +132,43 @@ impl PhysicsWorld {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body::filter_groups;
+
+    /// A soft body filtered by the rigid side's mask falls through.
+    #[test]
+    fn soft_body_respects_collision_mask() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(3.0, 0.5, 3.0)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::DEFAULT, 0),
+        );
+        let rope = crate::softbody::helpers::create_rope(
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+            8,
+            0,
+        );
+        world.add_soft_body(rope);
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+        }
+        let min_y = world
+            .soft_body(SoftBodyHandle::from_index(0))
+            .nodes
+            .iter()
+            .map(|n| n.x.y)
+            .fold(Real::INFINITY, Real::min);
+        assert!(
+            min_y < -0.5,
+            "rope did not fall through the filtered plate: min_y = {min_y}"
+        );
+    }
+}

@@ -927,4 +927,594 @@ mod softbody_pass;
 mod step;
 
 #[cfg(test)]
-mod world_tests;
+mod tests {
+    use super::*;
+    use crate::body::ActivationState;
+    use crate::body::filter_groups;
+    use approx::assert_relative_eq;
+
+    /// A composite "game moment" exercising the consumer-API tier together:
+    /// an anti-gravity balloon rises through a trigger volume (per-body
+    /// gravity + sensor events), a fast ball is CCD-clamped by a thin plate,
+    /// a filter-rejected pair overlaps without colliding, and the settled
+    /// state is probed with filtered all-hits rays.
+    #[test]
+    fn composite_consumer_scene() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+
+        let floor = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(20.0, 0.5, 20.0)),
+            Vector3::new(0.0, -0.5, 0.0),
+        ));
+        // The thin CCD target sits off the balloon's column (x >= 1) so the
+        // balloon rises unobstructed and the ray below sees only three
+        // bodies.
+        let _plate = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.5, 0.05, 1.5)),
+            Vector3::new(2.5, 1.0, 0.0),
+        ));
+        let sensor = world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 1.0, 1.0)),
+                Vector3::new(0.0, 2.0, 0.0),
+            )
+            .collision_filter(filter_groups::TRIGGER, filter_groups::ALL)
+            .no_contact_response(true)
+            .collision_events(true),
+        );
+        let pillar = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.4, 1.0, 0.4)),
+            Vector3::new(-2.0, 0.5, 0.0),
+        ));
+
+        // The balloon carries its own upward gravity, detached from the
+        // world propagation.
+        let mut balloon_body = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 0.6, 0.0),
+            1.0,
+        );
+        balloon_body.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+        balloon_body.set_gravity(Vector3::new(0.0, 3.0, 0.0));
+        let balloon = world.add_body(balloon_body);
+
+        // The fast ball drops at 30 m/s (a 0.5 m step) toward the
+        // 0.1-thick plate.
+        let mut fast_body = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.2),
+            Vector3::new(1.5, 8.0, 0.0),
+            1.0,
+        );
+        fast_body.linear_velocity = Vector3::new(0.0, -30.0, 0.0);
+        let fast = world.add_body(fast_body.ccd(0.05, 0.15));
+
+        // A ball starting inside the pillar: the pair filter lets it fall
+        // through and land on the floor instead of being pushed out.
+        let ghost = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(-2.0, 0.8, 0.0),
+            1.0,
+        ));
+        world.set_pair_filter(Some(Box::new(move |a, _: &RigidBody, b, _: &RigidBody| {
+            let (lo, hi) = (a.min(b), a.max(b));
+            !(lo == pillar.min(ghost) && hi == pillar.max(ghost))
+        })));
+
+        let mut saw_sensor_start = false;
+        for _ in 0..150 {
+            world.step_simulation(1.0 / 60.0);
+            for ev in world.contact_events() {
+                if matches!(ev, CollisionEvent::Started { sensor: true, .. }) {
+                    saw_sensor_start = true;
+                }
+            }
+        }
+
+        // The balloon rose through the sensor, which reported the touch.
+        assert!(world.body(balloon).position.y > 3.0);
+        assert!(saw_sensor_start);
+        // The fast ball was CCD-clamped onto the plate instead of reaching
+        // the floor below it.
+        let fast_y = world.body(fast).position.y;
+        assert!(fast_y > 0.9 && fast_y < 1.45, "fast ball at {fast_y}");
+        // The ghost ball fell through the pillar and rests on the floor,
+        // still overlapping the pillar's footprint.
+        let ghost_pos = world.body(ghost).position;
+        assert!((ghost_pos.x + 2.0).abs() < 1e-3);
+        assert!(
+            ghost_pos.y > 0.2 && ghost_pos.y < 0.45,
+            "ghost at {}",
+            ghost_pos.y
+        );
+
+        // The downward ray through the balloon's column reports every body
+        let hits = world.raycast_all(Vector3::new(0.0, 12.0, 0.0), Vector3::new(0.0, -5.0, 0.0));
+        let indices: Vec<BodyHandle> = hits.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, vec![balloon, sensor, floor]);
+        assert!(hits.windows(2).all(|w| w[0].1.fraction < w[1].1.fraction));
+        // A TRIGGER-group query sees only the sensor.
+        let trigger_only = RayFilter {
+            group: filter_groups::TRIGGER,
+            mask: filter_groups::TRIGGER,
+        };
+        let hits = world.raycast_all_filtered(
+            Vector3::new(0.0, 12.0, 0.0),
+            Vector3::new(0.0, -5.0, 0.0),
+            trigger_only,
+        );
+        assert_eq!(
+            hits.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![sensor]
+        );
+        assert_eq!(
+            world
+                .raycast_closest_filtered(
+                    Vector3::new(0.0, 12.0, 0.0),
+                    Vector3::new(0.0, -5.0, 0.0),
+                    trigger_only,
+                )
+                .map(|(i, _)| i),
+            Some(sensor)
+        );
+    }
+
+    // ---- body removal -------------------------------------------
+
+    /// A removed body stops colliding (its broad-phase proxy is gone, its
+    /// cached manifolds are dropped) and freezes in place; the bodies that
+    /// were resting on it fall.
+    #[test]
+    fn removed_body_stops_colliding_and_falls() {
+        let mut world = PhysicsWorld::new();
+        let ground = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.5, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        // Settle into contact (the manifold cache now holds the pair).
+        for _ in 0..10 {
+            world.step_simulation(dt);
+        }
+        assert!(world.body(ball).position.y > 0.4);
+        let ground_y = world.bodies()[ground.index()].position.y;
+        world.remove_body(ground);
+        // With the ground gone the ball falls freely through the old plane.
+        for _ in 0..30 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(ball).position.y < -0.5,
+            "ball must fall through the removed ground"
+        );
+        // The removed body itself is inert data.
+        assert_eq!(world.bodies()[ground.index()].position.y, ground_y);
+        assert!(world.bodies()[ground.index()].is_removed());
+        assert!(!world.bodies()[ground.index()].is_active());
+    }
+
+    /// Removed bodies disappear from every world query (ray casts, sweeps,
+    /// contact tests all run through the broad phase).
+    #[test]
+    fn removed_body_is_invisible_to_queries() {
+        let mut world = PhysicsWorld::new();
+        let sphere = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(1.0, 0.0, 0.0),
+        ));
+        assert!(
+            world
+                .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+                .is_some()
+        );
+        world.remove_body(sphere);
+        assert!(
+            world
+                .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+                .is_none()
+        );
+    }
+
+    /// Body slots are never reused (indices stay valid) while the freed
+    /// broad-phase slot is recycled for the next registration; the owner
+    /// table stays consistent.
+    #[test]
+    fn remove_then_add_recycles_the_proxy_slot() {
+        let mut world = PhysicsWorld::new();
+        let first = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(1.0, 0.0, 0.0),
+        ));
+        let second = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(3.0, 0.0, 0.0),
+        ));
+        let freed = world.body_proxies[first.index()];
+        world.remove_body(first);
+        // The new body reuses the freed proxy slot and gets a fresh body slot.
+        let third = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(1.0, 2.0, 0.0),
+        ));
+        assert_eq!(third, BodyHandle::from_index(2));
+        assert_eq!(world.body_proxies[third.index()], freed);
+        // Queries resolve to the right owners afterwards.
+        let (index, _) = world
+            .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+            .unwrap();
+        assert_eq!(index, second);
+        let (index, _) = world
+            .raycast_closest(Vector3::new(1.0, 5.0, 0.0), Vector3::new(1.0, -5.0, 0.0))
+            .unwrap();
+        assert_eq!(index, third);
+    }
+
+    /// Joints referencing a removed body go with it; the remaining joints
+    /// keep working (their collision suppression survives the rebuild).
+    #[test]
+    fn remove_body_cascades_joints() {
+        let mut world = PhysicsWorld::new();
+        let a = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(-1.0, 5.0, 0.0),
+            1.0,
+        ));
+        let b = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(1.0, 5.0, 0.0),
+            1.0,
+        ));
+        world.add_constraint(crate::constraint::Constraint::point2point(
+            a,
+            b,
+            Vector3::X,
+            -Vector3::X,
+        ));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        assert_eq!(world.constraints().len(), 1);
+        world.remove_body(a);
+        assert_eq!(world.constraints().len(), 0);
+        // Nothing holds B up anymore: it falls the whole way down to the
+        // ground (a surviving joint would keep it near its release height).
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(b).position.y < 1.0,
+            "released body must fall freely, got {:?}",
+            world.body(b).position
+        );
+    }
+
+    /// Multibody-vs-rigidbody constraints cascade with the rigid side too.
+    #[test]
+    fn remove_body_cascades_multibody_constraints() {
+        let mut world = PhysicsWorld::new();
+        let mut mb = MultiBody::new(0, 1.0, Vector3::ONE, false, false);
+        mb.finalize_multidof();
+        let ia = world.add_multibody(mb);
+        let rb = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 1.0, 0.0),
+            1.0,
+        ));
+        let snapshot = world.multibodies().to_vec();
+        let constraint = MultiBodyConstraint::point2point_to_rigid(
+            ia,
+            None,
+            rb,
+            Vector3::ZERO,
+            Vector3::new(0.0, 1.0, 0.0),
+            &snapshot,
+        );
+        world.add_multibody_constraint(constraint);
+        assert_eq!(world.num_multibody_constraints(), 1);
+        world.remove_body(rb);
+        assert_eq!(world.num_multibody_constraints(), 0);
+        // The multibody itself keeps simulating.
+        for _ in 0..10 {
+            world.step_simulation(1.0 / 60.0);
+        }
+    }
+
+    /// A removed body no longer blocks the CCD swept-sphere clamps (the
+    /// candidate sweep skips inert slots; its proxy is destroyed).
+    #[test]
+    fn removed_body_does_not_block_ccd() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        // Thin static wall spanning y in [0.4, 0.6] — same scene as
+        // `ccd_clamps_fast_bodies_at_the_impact`.
+        let wall = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        world.remove_body(wall);
+        world.step_simulation(1.0 / 60.0);
+        assert!(
+            world.body(ball).position.y < -0.5,
+            "CCD clamp must ignore the removed wall"
+        );
+    }
+
+    /// The remaining bodies keep their indices and simulate normally after
+    /// a removal (no renumbering, no swap).
+    #[test]
+    fn removed_body_keeps_remaining_indices_stable() {
+        let mut world = PhysicsWorld::new();
+        let ground = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let a = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 5.0, 0.0),
+            1.0,
+        ));
+        let b = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(2.0, 8.0, 0.0),
+            1.0,
+        ));
+        world.remove_body(a);
+        assert_eq!(world.bodies().len(), 3);
+        let dt = 1.0 / 60.0;
+        for _ in 0..240 {
+            world.step_simulation(dt);
+        }
+        // B landed on the still-present ground; the indices never moved.
+        assert_relative_eq!(world.body(b).position.y, 0.5, epsilon = 0.05);
+        assert_eq!(ground, BodyHandle::from_index(0));
+        assert!(world.bodies()[a.index()].is_removed());
+    }
+
+    #[test]
+    #[should_panic(expected = "already been removed")]
+    fn removing_a_body_twice_panics() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        ));
+        world.remove_body(body);
+        world.remove_body(body);
+    }
+
+    #[test]
+    #[should_panic(expected = "has been removed")]
+    fn accessing_a_removed_body_panics() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        ));
+        world.remove_body(body);
+        let _ = world.body(body);
+    }
+
+    /// Mutating a static compound's child between steps must refresh the
+    /// broad-phase proxy immediately: the per-step AABB pass only covers
+    /// active bodies, so a moved child would otherwise stay invisible to
+    /// pair detection at its new location (a ray walks the proxy first).
+    #[test]
+    fn static_compound_child_transform_refreshes_the_proxy() {
+        let mut world = PhysicsWorld::new();
+        let compound = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::compound(vec![
+                bullet_collision::shapes::CompoundChild::new(
+                    bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.5)),
+                    Vector3::new(0.0, 0.5, 0.0),
+                ),
+            ]),
+            Vector3::ZERO,
+        ));
+        assert!(world.set_child_transform(
+            compound,
+            0,
+            Vector3::new(6.0, 0.5, 0.0),
+            Quaternion::IDENTITY,
+        ));
+
+        // A downward ray at the new location hits the moved child; at the old
+        // location it finds nothing (of this compound).
+        let hit = world.raycast_closest(Vector3::new(6.0, 3.0, 0.0), Vector3::new(6.0, -1.0, 0.0));
+        assert!(hit.is_some(), "moved child invisible: proxy not refreshed");
+        let hit = world.raycast_closest(Vector3::new(0.0, 3.0, 0.0), Vector3::new(0.0, -1.0, 0.0));
+        assert!(hit.is_none(), "stale child bounds still visible");
+        world.step_simulation(1.0 / 60.0);
+        // The refresh survives a step (update_aabbs skips inactive bodies).
+        let hit = world.raycast_closest(Vector3::new(6.0, 3.0, 0.0), Vector3::new(6.0, -1.0, 0.0));
+        assert!(hit.is_some(), "moved child lost after a step");
+    }
+
+    /// A dynamic compound's inverse inertia follows the child layout (the
+    /// construction formula re-run); an unchanged axis stays untouched.
+    #[test]
+    fn dynamic_compound_child_transform_recomputes_inertia() {
+        let mut door = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::compound(vec![
+                bullet_collision::shapes::CompoundChild::new(
+                    bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 2.0, 0.25)),
+                    Vector3::new(-3.0, 0.0, 0.0),
+                ),
+                bullet_collision::shapes::CompoundChild::new(
+                    bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 2.0, 0.25)),
+                    Vector3::new(3.0, 0.0, 0.0),
+                ),
+            ]),
+            Vector3::ZERO,
+            12.0,
+        );
+        let wide = door.inv_inertia_local();
+        // Pull the second child in (the first stays at x = -3): the bounding
+        // box shrinks along x, so I_y and I_z shrink while I_x (which only
+        // sees the unchanged y/z extents) stays put.
+        assert!(door.set_child_transform(1, Vector3::new(1.0, 0.0, 0.0), Quaternion::IDENTITY));
+        let narrow = door.inv_inertia_local();
+        assert_relative_eq!(narrow.x, wide.x);
+        assert!(narrow.y > wide.y && narrow.z > wide.z);
+
+        // A non-compound body reports the miss.
+        let mut ball = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+            1.0,
+        );
+        assert!(!ball.set_child_transform(0, Vector3::ZERO, Quaternion::IDENTITY));
+        assert!(ball.remove_child_shape(0).is_none());
+    }
+
+    // ---- ghost/sensor persistent overlap lists (Bullet's `btGhostObject`)
+
+    /// A sensor's persistent overlap list tracks a ball flying through it,
+    /// with no events emitted (neither side opted into `collision_events`):
+    /// the list is the sensor's own query surface.
+    #[test]
+    fn sensor_overlap_list_tracks_passage() {
+        let mut world = PhysicsWorld::new();
+        let trigger = world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .no_contact_response(true),
+        );
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 3.0, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        let mut seen = false;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+            assert!(world.contact_events().is_empty());
+            if !world.overlapping(trigger).is_empty() {
+                assert_eq!(world.overlapping(trigger), vec![ball]);
+                seen = true;
+            }
+        }
+        assert!(seen, "the ball never appeared in the sensor's overlap list");
+        assert!(world.body(ball).position.y < -1.0, "ball passed through");
+        assert!(
+            world.overlapping(trigger).is_empty(),
+            "the list kept the ball after it left"
+        );
+    }
+
+    /// The list is persistent across steps: a ball resting (and falling
+    /// asleep) inside a sensor keeps its entry — no churn while the island
+    /// sleeps, like the touch state the events ride on.
+    #[test]
+    fn sensor_overlap_list_survives_sleep() {
+        let mut world = PhysicsWorld::new();
+        let trigger = world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .no_contact_response(true),
+        );
+        let mut ball = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 0.4, 0.0),
+            1.0,
+        );
+        // No gravity: the ball rests inside the trigger and sleeps there.
+        ball.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+        let ball = world.add_body(ball);
+        let dt = 1.0 / 60.0;
+        for _ in 0..300 {
+            world.step_simulation(dt);
+            assert!(world.contact_events().is_empty());
+        }
+        assert_eq!(
+            world.body(ball).activation_state(),
+            ActivationState::IslandSleeping,
+            "the ball should have fallen asleep inside the sensor"
+        );
+        assert_eq!(world.overlapping(trigger), vec![ball]);
+    }
+
+    /// Removing a tracked body clears the sensor's list immediately, and
+    /// still emits no event (the pair had no opted-in side).
+    #[test]
+    fn sensor_overlap_list_cleared_on_remove() {
+        let mut world = PhysicsWorld::new();
+        let trigger = world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .no_contact_response(true),
+        );
+        let mut ball = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 0.4, 0.0),
+            1.0,
+        );
+        ball.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+        let ball = world.add_body(ball);
+        let dt = 1.0 / 60.0;
+        for _ in 0..3 {
+            world.step_simulation(dt);
+        }
+        assert_eq!(world.overlapping(trigger), vec![ball]);
+        world.remove_body(ball);
+        assert!(world.overlapping(trigger).is_empty());
+        assert!(world.contact_events().is_empty());
+    }
+
+    /// One sensor overlapping several bodies reports them in ascending
+    /// handle order.
+    #[test]
+    fn sensor_overlap_list_is_sorted() {
+        let mut world = PhysicsWorld::new();
+        let trigger = world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .no_contact_response(true),
+        );
+        let mut left = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(-1.0, 0.4, 0.0),
+            1.0,
+        );
+        left.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+        let left = world.add_body(left);
+        let mut right = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(1.0, 0.4, 0.0),
+            1.0,
+        );
+        right.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+        let right = world.add_body(right);
+        for _ in 0..3 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert_eq!(world.overlapping(trigger), vec![left, right]);
+        // The reverse lookup works too (the balls are not sensors, but their
+        // pairs are tracked through the sensor side).
+        assert_eq!(world.overlapping(left), vec![trigger]);
+    }
+}

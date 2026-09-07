@@ -394,3 +394,560 @@ pub(crate) fn side_active_owner(side: ContactSide, bodies: &[RigidBody], multibo
         ContactSide::Link { mb, .. } => multibodies[mb].is_awake(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body::filter_groups;
+    use approx::assert_relative_eq;
+
+    /// A multibody base collider filtered by the plane's mask falls
+    /// through.
+    #[test]
+    fn mb_base_collider_respects_mask() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::DEFAULT, 0),
+        );
+        let mut mb = crate::multibody::MultiBody::new(0, 1.0, Vector3::ONE, false, false);
+        mb.set_linear_damping(0.0);
+        mb.finalize_multidof();
+        mb.set_base_collider(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            0.5,
+            0.0,
+        );
+        mb.base_pos = Vector3::new(0.0, 3.0, 0.0);
+        world.add_multibody(mb);
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.multibody(MultiBodyHandle::from_index(0)).base_pos.y < -1.0,
+            "filtered plane stopped the mb base: y = {}",
+            world.multibody(MultiBodyHandle::from_index(0)).base_pos.y
+        );
+    }
+
+    /// A fixed-base pendulum with a sphere collider on the link: the collider
+    /// registers as a broad-phase proxy with the FK pose AABB and refreshes
+    /// as the body moves (phase B of the multibody collision design).
+    #[test]
+    fn link_collider_registers_and_updates_aabb() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        world.add_multibody(mb);
+        world.step_simulation(1.0 / 60.0);
+        // The link COM hangs 1 m below the pivot; the sphere AABB spans
+        // y ∈ [−1.5, −0.5], padded by the 0.02 broad-phase contact margin.
+        let entry = world
+            .collider_entries
+            .iter()
+            .find(|e| e.mb == 0 && e.link == 0)
+            .expect("collider registered");
+        let proxy = entry.proxy.expect("proxy assigned");
+        let aabb = world.broadphase.proxy_aabb(proxy).unwrap();
+        assert_relative_eq!(aabb.min.y, -1.52, epsilon = 1e-4);
+        assert_relative_eq!(aabb.max.y, -0.48, epsilon = 1e-4);
+        // Moving the base moves the collider with the next FK pass.
+        world.multibody_mut(MultiBodyHandle::from_index(0)).base_pos = Vector3::new(0.0, 5.0, 0.0);
+        world.step_simulation(1.0 / 60.0);
+        let aabb = world.broadphase.proxy_aabb(proxy).unwrap();
+        assert_relative_eq!(aabb.min.y, 3.48, epsilon = 1e-4);
+    }
+
+    /// A sleeping multibody keeps its collider AABB (like sleeping rigid
+    /// bodies): the refresh is skipped until the body wakes.
+    #[test]
+    fn sleeping_multibody_keeps_collider_aabb() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, true);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        world.add_multibody(mb);
+        for _ in 0..150 {
+            // 2.5 s > the 2 s sleep timeout.
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(!world.multibody(MultiBodyHandle::from_index(0)).is_awake());
+        let proxy = world.collider_entries[0].proxy.unwrap();
+        let before = world.broadphase.proxy_aabb(proxy).unwrap();
+        // Teleport the base: the sleeping body skips the AABB refresh.
+        world.multibody_mut(MultiBodyHandle::from_index(0)).base_pos = Vector3::new(3.0, 0.0, 0.0);
+        world.step_simulation(1.0 / 60.0);
+        let after = world.broadphase.proxy_aabb(proxy).unwrap();
+        assert_eq!(before, after);
+    }
+
+    /// A link collider overlapping a static rigid body produces a translated
+    /// mixed broad-phase pair.
+    #[test]
+    fn link_collider_pairs_with_rigid_body() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        // Sink the link so its sphere (r = 0.5, centered 0.6 below the
+        // plane) overlaps the ground.
+        mb.base_pos = Vector3::new(0.0, 0.4, 0.0);
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        world.add_multibody(mb);
+        world.step_simulation(1.0 / 60.0);
+        let mixed = world
+            .broadphase
+            .compute_pairs()
+            .into_iter()
+            .filter(|(a, b)| {
+                matches!(world.proxy_owners[*a], ProxyOwner::Body(_))
+                    ^ matches!(world.proxy_owners[*b], ProxyOwner::Body(_))
+            })
+            .count();
+        assert_eq!(mixed, 1, "one rigid-collider pair expected");
+    }
+
+    /// Self-collision filtering between two overlapping link colliders of
+    /// one chain: the broad phase reports the AABB pair (both colliders are
+    /// registered); the `checkCollideWithOverride` port
+    /// ([`MultiBody::colliders_collide`]) decides whether the narrow phase
+    /// runs on it — adjacent links collide by default, `has_self_collision =
+    /// false` and the per-link parent-collision flags opt out.
+    #[test]
+    fn self_collision_filtering() {
+        // Two overlapping link colliders on one chain register and produce
+        // one collider-collider broad-phase pair.
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = crate::multibody::MultiBody::new(2, 1.0, Vector3::ONE, true, false);
+        // Both links sit at the base origin with overlapping spheres.
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::ZERO,
+        );
+        mb.setup_revolute(
+            1,
+            1.0,
+            Vector3::ONE,
+            Some(0),
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::ZERO,
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        mb.set_link_collider(
+            1,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        world.add_multibody(mb);
+        world.step_simulation(1.0 / 60.0);
+        let collider_pairs = world
+            .broadphase
+            .compute_pairs()
+            .into_iter()
+            .filter(|(a, b)| {
+                matches!(world.proxy_owners[*a], ProxyOwner::Collider(_))
+                    && matches!(world.proxy_owners[*b], ProxyOwner::Collider(_))
+            })
+            .count();
+        assert_eq!(collider_pairs, 1);
+
+        // The filter itself (`checkCollideWithOverride` port) on a 3-link
+        // chain: base - 0 - 1 - 2. `-1` is the base.
+        let mut mb = crate::multibody::MultiBody::new(3, 1.0, Vector3::ONE, true, false);
+        for i in 0..3 {
+            mb.setup_revolute(
+                i,
+                1.0,
+                Vector3::ONE,
+                if i == 0 { None } else { Some(i - 1) },
+                Quaternion::IDENTITY,
+                Vector3::Z,
+                Vector3::ZERO,
+                Vector3::ZERO,
+            );
+        }
+        mb.finalize_multidof();
+        // Default: everything collides (Bullet's default).
+        assert!(mb.colliders_collide(0, 1));
+        assert!(mb.colliders_collide(-1, 0));
+        assert!(mb.colliders_collide(0, 2)); // non-adjacent
+        // Whole-body opt-out.
+        mb.set_has_self_collision(false);
+        assert!(!mb.colliders_collide(0, 1));
+        assert!(!mb.colliders_collide(-1, 0));
+        mb.set_has_self_collision(true);
+        // Direct-parent opt-out on link 1: only (1, 0) is excluded.
+        mb.set_link_parent_collision_disabled(1, false);
+        assert!(!mb.colliders_collide(1, 0));
+        assert!(mb.colliders_collide(1, 2));
+        assert!(mb.colliders_collide(1, -1));
+        // All-ancestors opt-out on link 2: parent and grandparent excluded,
+        // others not (fresh body to keep the flags independent).
+        let mut mb = crate::multibody::MultiBody::new(3, 1.0, Vector3::ONE, true, false);
+        for i in 0..3 {
+            mb.setup_revolute(
+                i,
+                1.0,
+                Vector3::ONE,
+                if i == 0 { None } else { Some(i - 1) },
+                Quaternion::IDENTITY,
+                Vector3::Z,
+                Vector3::ZERO,
+                Vector3::ZERO,
+            );
+        }
+        mb.finalize_multidof();
+        mb.set_link_parent_collision_disabled(2, true);
+        assert!(!mb.colliders_collide(2, 1));
+        assert!(!mb.colliders_collide(2, 0));
+        // The base is part of the ancestor walk, like Bullet's loop reaching
+        // m_parent == -1.
+        assert!(!mb.colliders_collide(2, -1));
+        // The exclusion is symmetric (Bullet checks both sides), and pairs
+        // without a flagged member are unaffected.
+        assert!(!mb.colliders_collide(1, 2));
+        assert!(mb.colliders_collide(0, 1));
+    }
+
+    /// A fixed-base pendulum whose link sphere falls onto a static plane is
+    /// supported by the multibody contact rows: it settles hanging straight
+    /// down with the sphere resting on the plane (phase C contact response).
+    #[test]
+    fn link_sphere_rests_on_ground() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        // Pivot 1.51 m up: the link center's lowest arc point is y = 0.51,
+        // so the sphere (r = 0.5) starts 0.01 m inside the plane — the
+        // contact rows must support it hanging straight down.
+        mb.base_pos = Vector3::new(0.0, 1.51, 0.0);
+        world.add_multibody(mb);
+        let dt = 1.0 / 60.0;
+        for _ in 0..240 {
+            world.step_simulation(dt);
+        }
+        let body = world.multibody(MultiBodyHandle::from_index(0));
+        let q = body.joint_pos_multidof(0)[0];
+        let qd = body.joint_vel_multidof(0)[0];
+        assert!(
+            q.abs() < 0.05,
+            "pendulum did not settle hanging down: q = {q}"
+        );
+        assert!(qd.abs() < 0.1, "pendulum still swinging: qd = {qd}");
+        // The link center rests with the sphere on the plane: x ≈ 0,
+        // y ≈ 0.5 (within the slop/damping tolerance).
+        let p = body.link_world_position(0);
+        assert_relative_eq!(p.x, 0.0, epsilon = 0.02);
+        assert_relative_eq!(p.y, 0.5, epsilon = 0.05);
+    }
+
+    /// A swinging pendulum link kicks a dynamic rigid box lying in its path:
+    /// the multibody contact rows exchange impulse with the rigid solver
+    /// (box wakes and moves, the pendulum keeps swinging reduced).
+    #[test]
+    fn swinging_link_pushes_rigid_box() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        // Ball mass 3 vs box mass 1: probe-verified against stock Bullet —
+        // a mass-3 ball knocks the box ~1.1 m away, a mass-1 ball only
+        // ~0.05 m (the persistent four-corner manifold holds a resting box
+        // much steadier than the pre-merge single-point behavior).
+        let mut mb = crate::multibody::MultiBody::new(1, 3.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            3.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            0.3,
+            0.0,
+        );
+        // Pivot 1 m up; release from the horizontal (+X side).
+        mb.base_pos = Vector3::new(0.0, 1.0, 0.0);
+        mb.set_joint_pos_multidof(0, &[bullet_math::FRAC_PI_2]);
+        world.add_multibody(mb);
+        // A box resting on the plane where the ball's arc crosses its right
+        // face, deliberately clear of the ball's release pose: when the box
+        // sat under the release point, the ball just came to rest on the box
+        // top instead of kicking it (stock-Bullet probe verified).
+        let box_start = Vector3::new(0.85, 0.3, 0.0);
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.3)),
+                box_start,
+                1.0,
+            )
+            .friction(0.0),
+        );
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+        }
+        // The box was hit and knocked away from its start pose. At the
+        // impact point (≈45° along the arc) the ball's velocity points
+        // (−X, −Y), so the box is shoved toward −X / tipped over. The exact
+        // slide direction is chaotic though: the ball pins the box into the
+        // plane and the frictionless box drifts with the contact details
+        // (the persistent-manifold warm start shifts the trajectory within
+        // this noise), so the direction check carries a small tolerance.
+        let box_end = world.body(BodyHandle::from_index(1)).position;
+        assert!(
+            (box_end - box_start).length() > 0.1,
+            "box was not pushed: {box_end:?}"
+        );
+        assert!(
+            box_end.x < box_start.x + 0.05,
+            "box pushed the wrong way: {box_end:?}"
+        );
+    }
+
+    /// A multibody contact wakes a sleeping rigid body: the sleeping box is
+    /// struck by the swinging link and moves.
+    #[test]
+    fn link_contact_wakes_sleeping_rigid_body() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        // The victim: a box that settles on the plane and sleeps, clear of
+        // the ball's release pose (see the swinging test for the geometry
+        // and mass rationale — both stock-Bullet probe verified).
+        let box_idx = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.3)),
+            Vector3::new(0.85, 0.3, 0.0),
+            1.0,
+        ));
+        for _ in 0..180 {
+            // 3 s > the 2 s deactivation window.
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(!world.body(box_idx).is_active(), "box should be asleep");
+        // Swing a link sphere into it (mass 3: a mass-1 ball only nudges
+        // the four-corner-supported box ~0.01 m — probe-verified).
+        let mut mb = crate::multibody::MultiBody::new(1, 3.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            3.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_link_collider(
+            0,
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            0.3,
+            0.0,
+        );
+        mb.base_pos = Vector3::new(0.0, 1.0, 0.0);
+        mb.set_joint_pos_multidof(0, &[bullet_math::FRAC_PI_2]);
+        world.add_multibody(mb);
+        for _ in 0..90 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(
+            world.body(box_idx).is_active(),
+            "box should have been woken"
+        );
+        // The wake is the point of this test; the shove is a gentle nudge
+        // (~0.02 m here, ~0.09 m in stock Bullet — after the impact the
+        // ball comes to rest wedged on the box's top corner, and the exact
+        // resting pose is chaotic).
+        assert!(
+            (world.body(box_idx).position - Vector3::new(0.85, 0.3, 0.0)).length() > 0.015,
+            "sleeping box was not knocked away: {:?}",
+            world.body(box_idx).position
+        );
+    }
+
+    /// A free-base multibody with a box collider falls onto a static plane
+    /// and is supported by its base contact rows (rest height, zero
+    /// velocity).
+    #[test]
+    fn free_base_with_collider_lands_on_ground() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mut mb = crate::multibody::MultiBody::new(0, 1.0, Vector3::ONE, false, false);
+        mb.set_linear_damping(0.0);
+        mb.finalize_multidof();
+        mb.set_base_collider(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            0.5,
+            0.0,
+        );
+        mb.base_pos = Vector3::new(0.0, 3.0, 0.0);
+        world.add_multibody(mb);
+        let dt = 1.0 / 60.0;
+        for _ in 0..240 {
+            world.step_simulation(dt);
+        }
+        let body = world.multibody(MultiBodyHandle::from_index(0));
+        // The half-extent box rests on the plane: y ≈ 0.5 within the slop
+        // tolerance, with a small residual velocity (damped settling).
+        assert_relative_eq!(body.base_pos().y, 0.5, epsilon = 0.05);
+        assert!(
+            body.base_vel().length() < 0.2,
+            "base still moving: {:?}",
+            body.base_vel()
+        );
+    }
+
+    /// A fast rigid sphere hitting a free multibody (equal masses, head-on,
+    /// restitution 0, gravity off) converges to the shared inelastic
+    /// velocity: the mixed-row iteration must count the assembly-time
+    /// relative velocity only once — reading the rigid side's impulse delta,
+    /// not its full velocity. The double-count regression inflated the
+    /// impulse ~2.4x, leaving the ball nearly stopped and the multibody
+    /// overspeeding.
+    #[test]
+    fn rb_mb_contact_impulse_not_doubled() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut mb = crate::multibody::MultiBody::new(0, 1.0, Vector3::ONE, false, false);
+        mb.set_linear_damping(0.0);
+        mb.set_angular_damping(0.0);
+        mb.finalize_multidof();
+        mb.set_base_collider(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        world.add_multibody(mb);
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 3.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -6.0, 0.0))
+            .disable_deactivation(),
+        );
+        let dt = 1.0 / 60.0;
+        for _ in 0..25 {
+            world.step_simulation(dt);
+        }
+        let ball_vy = world.body(ball).linear_velocity.y;
+        let mb_vy = world.multibody(MultiBodyHandle::from_index(0)).base_vel().y;
+        assert!(mb_vy < -1.5, "multibody was not kicked: {mb_vy}");
+        // Equal-mass head-on, restitution 0: both sides leave at ~-3 m/s
+        // (plus a small Baumgarte bounce that separates them slightly).
+        assert!(
+            (ball_vy - mb_vy).abs() < 1.5,
+            "velocities did not converge: ball {ball_vy} vs multibody {mb_vy}"
+        );
+    }
+}

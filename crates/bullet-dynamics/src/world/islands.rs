@@ -151,3 +151,309 @@ impl PhysicsWorld {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body::ActivationState;
+    use approx::assert_relative_eq;
+
+    /// A body at rest for longer than `DEACTIVATION_TIME` goes to sleep and
+    /// stops being integrated.
+    #[test]
+    fn body_sleeps_after_resting() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        // 3 seconds > DEACTIVATION_TIME: the sphere settles and then sleeps.
+        let dt: Real = 1.0 / 60.0;
+        for _ in 0..(3.0 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        let sphere = world.body(BodyHandle::from_index(1));
+        assert_eq!(sphere.activation_state(), ActivationState::IslandSleeping);
+        assert_eq!(sphere.linear_velocity, Vector3::ZERO);
+        let y_at_sleep = sphere.position.y;
+        // Further steps must not move the sleeping body.
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert_relative_eq!(
+            world.body(BodyHandle::from_index(1)).position.y,
+            y_at_sleep,
+            epsilon = 1e-6
+        );
+    }
+
+    /// A sleeping body whose island gains an active member is woken up
+    /// (Bullet's island activation pass: `ISLAND_SLEEPING` members of a
+    /// non-sleeping island become `WANTS_DEACTIVATION` — simulating again,
+    /// but immediately re-qualifying for sleeping).
+    #[test]
+    fn contact_wakes_sleeping_body() {
+        let mut world = PhysicsWorld::new();
+        // A light sphere resting on the plane goes to sleep first...
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 1.0, 0.0),
+            1.0,
+        ));
+        let dt: Real = 1.0 / 60.0;
+        for _ in 0..(3.0 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        assert_eq!(
+            world.body(BodyHandle::from_index(1)).activation_state(),
+            ActivationState::IslandSleeping
+        );
+        // ...then a fast ball hits it: the sleeping sphere must wake up.
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.25),
+                Vector3::new(0.0, 3.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -5.0, 0.0)),
+        );
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(BodyHandle::from_index(1)).is_active(),
+            "sleeping body was not woken by the impact"
+        );
+        assert_ne!(
+            world.body(BodyHandle::from_index(1)).activation_state(),
+            ActivationState::IslandSleeping
+        );
+    }
+
+    /// Applying a force wakes a sleeping body up (Bullet's `applyCentralForce`).
+    #[test]
+    fn force_wakes_sleeping_body() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 1.0, 0.0),
+            1.0,
+        ));
+        let dt: Real = 1.0 / 60.0;
+        for _ in 0..(3.0 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        world
+            .body_mut(BodyHandle::from_index(1))
+            .apply_force(Vector3::new(0.0, 5.0, 0.0));
+        assert_eq!(
+            world.body(BodyHandle::from_index(1)).activation_state(),
+            ActivationState::Active
+        );
+    }
+
+    /// Static bodies start asleep, like Bullet's static `btRigidBody`.
+    #[test]
+    fn static_body_starts_sleeping() {
+        let body = RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        );
+        assert_eq!(body.activation_state(), ActivationState::IslandSleeping);
+        assert!(!body.is_active());
+    }
+
+    /// Phase D: a resting pair on the plane is one island and sleeps as a
+    /// unit, then wakes as a unit when a falling body joins the island
+    /// (Bullet's `buildIslands` activation pass).
+    #[test]
+    fn island_sleeps_and_wakes_as_unit() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        // Two boxes side by side, touching (one shared face at x = 0).
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            Vector3::new(-0.5, 0.5, 0.0),
+            1.0,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            Vector3::new(0.5, 0.5, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..(4.0 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        // The whole island sleeps together.
+        assert!(
+            !world.body(BodyHandle::from_index(1)).is_active(),
+            "left box should sleep"
+        );
+        assert!(
+            !world.body(BodyHandle::from_index(2)).is_active(),
+            "right box should sleep"
+        );
+        // Sleeping means frozen: further steps do not move either box.
+        let (pa, pb) = (
+            world.body(BodyHandle::from_index(1)).position,
+            world.body(BodyHandle::from_index(2)).position,
+        );
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert!((world.body(BodyHandle::from_index(1)).position - pa).length() < 1e-9);
+        assert!((world.body(BodyHandle::from_index(2)).position - pb).length() < 1e-9);
+        // A fast ball lands on the right box: the impact joins its island
+        // and both boxes wake.
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.25),
+                Vector3::new(-3.0, 0.5, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(8.0, 0.0, 0.0)),
+        );
+        for _ in 0..30 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(BodyHandle::from_index(1)).is_active(),
+            "left box should wake with its island"
+        );
+        assert!(
+            world.body(BodyHandle::from_index(2)).is_active(),
+            "right box should wake with its island"
+        );
+    }
+
+    /// Phase D: a `DisableDeactivation` member keeps its whole island awake
+    /// forever (Bullet counts `DISABLE_DEACTIVATION` as an awake contributor).
+    /// The boxes are stacked (not edge-to-edge): the persistent four-point
+    /// box-box contact keeps the broad-phase pair alive robustly, where
+    /// edge-glued boxes can drift apart under the single-point plane contact
+    /// (the plane fast path reports one contact, so a resting box pivots and
+    /// creeps — a trajectory-sensitive way to lose the island link).
+    #[test]
+    fn disable_deactivation_keeps_island_awake() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            )
+            .disable_deactivation(),
+        );
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            Vector3::new(0.0, 1.5, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..(10.0 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        assert!(world.body(BodyHandle::from_index(1)).is_active());
+        assert!(
+            world.body(BodyHandle::from_index(2)).is_active(),
+            "neighbor of a disable-deactivation body must never sleep"
+        );
+    }
+
+    /// Phase D: a joint merges two islands across a distance — a moving
+    /// body keeps its joint partner (far away, no contact) from sleeping
+    /// (Bullet merges enabled constraints between two dynamic bodies).
+    #[test]
+    fn joint_links_islands_across_a_distance() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        // Two bodies 2 m apart joined by a point-to-point joint whose pivots
+        // coincide at the midpoint, so the constraint starts satisfied (no
+        // initial kick).
+        let mid = Vector3::new(5.0, 0.0, 0.0);
+        let a = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            mid - Vector3::X,
+            1.0,
+        ));
+        let b = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            mid + Vector3::X,
+            1.0,
+        ));
+        let joint = crate::constraint::Constraint::point2point(a, b, Vector3::X, -Vector3::X);
+        world.add_constraint(joint);
+        // Body A is driven perpetually; B is far away and still — only the
+        // joint keeps its island awake.
+        let dt = 1.0 / 60.0;
+        for _ in 0..(6.0 / dt) as usize {
+            world.body_mut(a).apply_force(Vector3::new(2.0, 0.0, 0.0));
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(b).is_active(),
+            "joint-linked partner of a moving body must stay awake"
+        );
+    }
+
+    /// A moving kinematic body wakes the sleeping island it runs into; an idle
+    /// one lets its resting contacts sleep.
+    #[test]
+    fn moving_kinematic_wakes_sleeping_island() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let box_body = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.25, 0.25, 0.25)),
+            Vector3::new(0.0, 0.25, 0.0),
+            1.0,
+        ));
+        for _ in 0..600 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(!world.body(box_body).is_active(), "precondition: asleep");
+
+        // A slab flying in from the side.
+        let slab = world.add_body(RigidBody::new_kinematic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.5)),
+            Vector3::new(-4.0, 0.25, 0.0),
+        ));
+        world.body_mut(slab).linear_velocity = Vector3::new(6.0, 0.0, 0.0);
+
+        let mut woke = false;
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+            if world.body(box_body).is_active() {
+                woke = true;
+                break;
+            }
+        }
+        assert!(woke, "the moving kinematic must wake the sleeping island");
+    }
+}

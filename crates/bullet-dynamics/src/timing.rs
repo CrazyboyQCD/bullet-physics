@@ -177,3 +177,55 @@ impl PhysicsWorld {
         &self.step_timings
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The injected step-timing clock: monotonic reads accumulate exact
+    /// spans, a backwards read saturates to zero, and disabled timing
+    /// never reads the clock at all.
+    #[test]
+    fn step_clock_injection_contract() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static IDX: AtomicUsize = AtomicUsize::new(0);
+        // First read seeds the sampler's start; the next 7 are stage
+        // marks. The third mark goes backwards (115 -> 110).
+        const TICKS: [u64; 8] = [100, 110, 115, 110, 130, 140, 150, 160];
+        fn fake_clock() -> Duration {
+            Duration::from_nanos(TICKS[IDX.fetch_add(1, Ordering::SeqCst)])
+        }
+
+        let mut world = PhysicsWorld::new();
+        // Disabled timing: the clock is never read.
+        world.set_step_clock(fake_clock);
+        world.step_simulation(1.0 / 60.0);
+        assert_eq!(IDX.load(Ordering::SeqCst), 0);
+        assert_eq!(world.step_timings().total(), Duration::ZERO);
+
+        // Enabled: spans accumulate; the backwards span clamps to zero.
+        IDX.store(0, Ordering::SeqCst);
+        world.enable_step_timing();
+        world.step_simulation(1.0 / 60.0);
+        let t = world.step_timings();
+        assert_eq!(
+            t.stage(StepStage::IntegrateVelocities),
+            Duration::from_nanos(10)
+        );
+        assert_eq!(t.stage(StepStage::UpdateAabbs), Duration::from_nanos(5));
+        assert_eq!(t.stage(StepStage::Broadphase), Duration::ZERO);
+        assert_eq!(t.stage(StepStage::Islands), Duration::from_nanos(20));
+        assert_eq!(t.stage(StepStage::Narrowphase), Duration::from_nanos(10));
+        assert_eq!(t.stage(StepStage::Solve), Duration::from_nanos(10));
+        assert_eq!(
+            t.stage(StepStage::IntegratePositions),
+            Duration::from_nanos(10)
+        );
+        assert_eq!(t.total(), Duration::from_nanos(65));
+
+        // Swapping clocks mid-session is tolerated (fresh start point).
+        IDX.store(0, Ordering::SeqCst);
+        world.set_step_clock(fake_clock);
+        world.step_simulation(1.0 / 60.0);
+    }
+}

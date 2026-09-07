@@ -265,5 +265,203 @@ impl PhysicsWorld {
         self.broadphase.set_aabb(self.body_proxies[index], aabb);
     }
 
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body::filter_groups;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn raycast_closest_returns_the_nearest_body() {
+        let mut world = PhysicsWorld::new();
+        // Near sphere at x = 1, far sphere at x = 3.
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(3.0, 0.0, 0.0),
+        ));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(1.0, 0.0, 0.0),
+        ));
+        let (index, hit) = world
+            .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+            .unwrap();
+        assert_eq!(index, BodyHandle::from_index(1));
+        assert_relative_eq!(hit.fraction, 0.1, epsilon = 1e-4);
+        assert_relative_eq!(hit.normal.x, -1.0, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn raycast_closest_misses_empty_world() {
+        let world = PhysicsWorld::new();
+        assert!(
+            world
+                .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn raycast_all_reports_every_hit_nearest_first() {
+        let mut world = PhysicsWorld::new();
+        let far = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(3.0, 0.0, 0.0),
+        ));
+        let near = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(1.0, 0.0, 0.0),
+        ));
+        let hits = world.raycast_all(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0));
+        let indices: Vec<BodyHandle> = hits.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, vec![near, far]);
+        assert!(hits[0].1.fraction < hits[1].1.fraction);
+    }
+
+    #[test]
+    fn raycast_filters_consume_group_and_mask() {
+        let mut world = PhysicsWorld::new();
+        // The body's mask does not accept the default ray group...
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(1.0, 0.0, 0.0),
+            )
+            .collision_filter(filter_groups::STATIC, filter_groups::STATIC),
+        );
+        assert!(
+            world
+                .raycast_closest(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))
+                .is_none()
+        );
+        // ...but a query whose group includes STATIC sees it.
+        let filter = RayFilter {
+            group: filter_groups::DEFAULT | filter_groups::STATIC,
+            mask: filter_groups::ALL,
+        };
+        assert!(
+            world
+                .raycast_closest_filtered(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0), filter)
+                .is_some()
+        );
+    }
+
+    /// The broad-phase AABB test is conservative: a ray crossing a proxy's
+    /// AABB corner must not produce a hit when the exact shape test misses.
+    #[test]
+    fn raycast_closest_prunes_aabb_only_hits() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        ));
+        // Starts on the AABB corner (0.5, 0.5, 0.5), which is outside the
+        // radius-0.5 sphere: the AABB filter keeps it, the sphere test drops it.
+        let hit = world.raycast_closest(Vector3::new(0.5, 0.5, 0.5), Vector3::new(0.6, 0.6, 0.6));
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn convex_sweep_closest_hits_the_nearer_body() {
+        let mut world = PhysicsWorld::new();
+        // Two boxes on the path: a near one (face at x = 3) and a far one
+        // (face at x = 4). The probe starts at x = 8 and travels -X, so the
+        // far box (closer to the start) is the closest hit.
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 1.0, 1.0)),
+            Vector3::new(2.0, 0.0, 0.0),
+        ));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 1.0, 1.0)),
+            Vector3::new(5.0, 0.0, 0.0),
+        ));
+        // Sweep a small box from x = 8 to x = -2 (length 10). The far box
+        // spans x in [4, 6]; its +X face at x = 6 is hit by the probe's -X
+        // face at x - 0.5: entry when x = 6.5, fraction (8 - 6.5) / 10 = 0.15.
+        let probe = bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5));
+        let (index, hit) = world
+            .convex_sweep_closest(
+                &probe,
+                Vector3::new(8.0, 0.0, 0.0),
+                Quaternion::IDENTITY,
+                Vector3::new(-2.0, 0.0, 0.0),
+                None,
+            )
+            .unwrap();
+        assert_eq!(index, BodyHandle::from_index(1));
+        assert_relative_eq!(hit.fraction, (8.0 - 6.5) / 10.0, epsilon = 1e-4);
+        assert_relative_eq!(hit.normal.x, 1.0, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn convex_sweep_closest_can_ignore_a_body() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(1.0)),
+            Vector3::ZERO,
+        ));
+        let probe = bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5));
+        // Sweeping into the box: hit when not ignored...
+        assert!(
+            world
+                .convex_sweep_closest(
+                    &probe,
+                    Vector3::new(5.0, 0.0, 0.0),
+                    Quaternion::IDENTITY,
+                    Vector3::new(0.0, 0.0, 0.0),
+                    None,
+                )
+                .is_some()
+        );
+        // ...and a miss when the only body is ignored.
+        assert!(
+            world
+                .convex_sweep_closest(
+                    &probe,
+                    Vector3::new(5.0, 0.0, 0.0),
+                    Quaternion::IDENTITY,
+                    Vector3::new(0.0, 0.0, 0.0),
+                    Some(BodyHandle::from_index(0)),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn contact_test_reports_overlapping_bodies() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(1.0)),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(1.0)),
+            Vector3::new(5.0, 0.0, 0.0),
+        ));
+        let probe = bullet_collision::shapes::CollisionShape::sphere(0.5);
+        // The probe overlaps the first box (probe x-extent [0.4, 1.4] vs box
+        // x-extent [-1, 1]) but not the second.
+        let hits = world.contact_test(
+            &probe,
+            Vector3::new(0.9, 0.0, 0.0),
+            Quaternion::IDENTITY,
+            None,
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, BodyHandle::from_index(0));
+        assert!(hits[0].1.points.iter().any(|p| p.penetration > 0.0));
+        // The probe itself can be ignored.
+        assert!(
+            world
+                .contact_test(
+                    &probe,
+                    Vector3::new(0.9, 0.0, 0.0),
+                    Quaternion::IDENTITY,
+                    Some(BodyHandle::from_index(0)),
+                )
+                .is_empty()
+        );
+    }
 }

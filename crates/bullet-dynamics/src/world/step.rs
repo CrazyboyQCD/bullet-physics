@@ -911,3 +911,943 @@ impl PhysicsWorld {
         clk.mark(&mut self.step_timings, StepStage::IntegratePositions);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body::ActivationState;
+    use crate::body::filter_groups;
+    use approx::assert_relative_eq;
+
+    /// Damping is applied automatically by the step, before the force
+    /// integration (Bullet's `predictUnconstraintMotion`): with factor 0.5
+    /// and one second of 1/60 s steps the speed halves.
+    #[test]
+    fn damping_applied_during_step() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let b = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 10.0, 0.0),
+            1.0,
+        ));
+        world.body_mut(b).linear_velocity = Vector3::new(10.0, 0.0, 0.0);
+        world.body_mut(b).set_damping(0.5, 0.0);
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert_relative_eq!(world.body(b).linear_velocity.x, 5.0, epsilon = 1e-4);
+    }
+
+    // ------------------------------------------------------------------
+    // Collision groups/masks, trigger volumes, collision events.
+    // ------------------------------------------------------------------
+
+    /// A plate whose mask matches nothing is invisible to the ball: the
+    /// ball falls straight through (Bullet's `btBroadphaseProxy`
+    /// group/mask pair test).
+    #[test]
+    fn collision_mask_blocks_pair() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::DEFAULT, 0),
+        );
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 3.0, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+        }
+        // Through the plate (its top is y = 0.5) and far below it.
+        assert!(
+            world.body(ball).position.y < -1.0,
+            "ball did not fall through: y = {}",
+            world.body(ball).position.y
+        );
+    }
+
+    /// The pair test is symmetric: a plate in the STATIC group is ignored
+    /// by a ball whose mask only accepts DEFAULT, and collides again once
+    /// the mask widens to ALL.
+    #[test]
+    fn collision_group_mask_asymmetric() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::STATIC, filter_groups::ALL),
+        );
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 1.01, 0.0),
+                1.0,
+            )
+            .collision_filter(filter_groups::DEFAULT, filter_groups::DEFAULT),
+        );
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(ball).position.y < 0.0,
+            "ball should ignore the STATIC plate: y = {}",
+            world.body(ball).position.y
+        );
+        // Widen the mask, put the ball back above the plate: the pair
+        // collides and the ball settles on top.
+        world.body_mut(ball).collision_mask = filter_groups::ALL;
+        world.set_body_transform(ball, Vector3::new(0.0, 1.01, 0.0), Quaternion::IDENTITY);
+        for _ in 0..180 {
+            world.step_simulation(dt);
+        }
+        assert_relative_eq!(world.body(ball).position.y, 1.0, epsilon = 0.05);
+    }
+
+    /// A trigger volume (`NO_CONTACT_RESPONSE`) never blocks: the ball
+    /// falls straight through, and its touch still reports as a sensor
+    /// event.
+    #[test]
+    fn trigger_volume_passes_through_but_reports() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .no_contact_response(true)
+            .collision_events(true),
+        );
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 3.0, 0.0),
+                1.0,
+            )
+            .collision_events(true),
+        );
+        let dt = 1.0 / 60.0;
+        let mut started = None;
+        for _ in 0..120 {
+            world.step_simulation(dt);
+            for &ev in world.contact_events() {
+                if let CollisionEvent::Started { a, b, sensor } = ev {
+                    started = Some((a, b, sensor));
+                }
+            }
+        }
+        assert_eq!(started, Some((BodyHandle::from_index(0), ball, true)));
+        assert!(
+            world.body(ball).position.y < -1.0,
+            "trigger did not let the ball through: y = {}",
+            world.body(ball).position.y
+        );
+    }
+
+    /// Pairs emit events only when at least one body opts in.
+    #[test]
+    fn collision_events_require_opt_in() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 1.01, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            world.step_simulation(dt);
+        }
+        assert!(world.contact_events().is_empty());
+    }
+
+    /// A resting pair that falls asleep keeps its touch state: exactly one
+    /// Started, and no churn while the island sleeps.
+    #[test]
+    fn sleeping_pair_emits_no_events() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .collision_events(true),
+        );
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 1.01, 0.0),
+                1.0,
+            )
+            .collision_events(true),
+        );
+        let dt = 1.0 / 60.0;
+        // Events are a per-step drain, so tally them as they appear.
+        let (mut started, mut stopped) = (0, 0);
+        for _ in 0..300 {
+            world.step_simulation(dt);
+            for ev in world.contact_events() {
+                match ev {
+                    CollisionEvent::Started { .. } => started += 1,
+                    CollisionEvent::Stopped { .. } => stopped += 1,
+                }
+            }
+        }
+        assert_eq!((started, stopped), (1, 0), "exactly one Started, no churn");
+        for _ in 0..120 {
+            world.step_simulation(dt);
+        }
+        assert_eq!(
+            (started, stopped),
+            (1, 0),
+            "the sleeping island emitted nothing further"
+        );
+    }
+
+    /// Removing a body emits Stopped for its touching pairs.
+    #[test]
+    fn remove_body_emits_stopped() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+            .collision_events(true),
+        );
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 1.01, 0.0),
+                1.0,
+            )
+            .collision_events(true),
+        );
+        let dt = 1.0 / 60.0;
+        let mut saw_started = false;
+        for _ in 0..3 {
+            world.step_simulation(dt);
+            saw_started |= world
+                .contact_events()
+                .iter()
+                .any(|e| matches!(e, CollisionEvent::Started { .. }));
+        }
+        assert!(saw_started, "the contact never produced a Started");
+        world.remove_body(ball);
+        let Some(CollisionEvent::Stopped { a, b, sensor }) =
+            world.contact_events().iter().copied().last()
+        else {
+            panic!("removal did not emit Stopped");
+        };
+        assert_eq!((a, b), (BodyHandle::from_index(0), ball));
+        assert!(!sensor);
+    }
+
+    /// The CCD sweep respects the group/mask filter.
+    #[test]
+    fn ccd_respects_collision_filter() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 2.0, 0.25)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::DEFAULT, 0),
+        );
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 0.0, -5.0),
+                1.0,
+            )
+            .ccd(0.1, 0.3),
+        );
+        world.body_mut(ball).linear_velocity = Vector3::new(0.0, 0.0, 10.0);
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(ball).position.z > 4.0,
+            "filtered wall stopped the CCD ball: z = {}",
+            world.body(ball).position.z
+        );
+    }
+
+    #[test]
+    fn pair_filter_rejects_pairs() {
+        let ground_shape = || {
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            )
+        };
+        // Without the filter the ball lands on the plate.
+        let mut world = PhysicsWorld::new();
+        world.add_body(ground_shape());
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(world.body(ball).position.y > 0.2);
+        // Rejecting every pair lets it fall through.
+        let mut world = PhysicsWorld::new();
+        world.add_body(ground_shape());
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        world.set_pair_filter(Some(Box::new(|_, _, _, _| false)));
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(world.body(ball).position.y < -0.5);
+    }
+
+    #[test]
+    fn per_body_gravity_overrides_the_world() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        // A dynamic body inherits the world gravity at add time.
+        let free = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::ZERO,
+            1.0,
+        ));
+        assert_eq!(world.body(free).gravity(), Vector3::new(0.0, -10.0, 0.0));
+        // A detached body keeps its own gravity.
+        let mut detached = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::ZERO,
+            1.0,
+        );
+        detached.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+        detached.set_gravity(Vector3::new(0.0, 5.0, 0.0));
+        let detached = world.add_body(detached);
+        world.step_simulation(1.0 / 60.0);
+        assert!(world.body(free).position.y < 0.0);
+        assert!(world.body(detached).position.y > 0.0);
+        // Propagation skips the detached body.
+        world.set_gravity(Vector3::new(0.0, -3.0, 0.0));
+        assert_eq!(world.body(free).gravity(), Vector3::new(0.0, -3.0, 0.0));
+        assert_eq!(world.body(detached).gravity(), Vector3::new(0.0, 5.0, 0.0));
+    }
+
+    /// A resting body keeps a supporting contact impulse in the persistent
+    /// manifold cache across steps (the warm-start source for the next
+    /// step's rows).
+    #[test]
+    fn step_simulation_persists_contact_impulses() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        for _ in 0..90 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        let cached: Vec<&bullet_collision::manifold::PersistentPoint> = world
+            .manifold_cache
+            .iter()
+            .flatten()
+            .flat_map(|e| e.manifold.points())
+            .collect();
+        assert!(!cached.is_empty());
+        assert!(cached.iter().any(|c| c.normal_impulse > 0.0));
+        let sphere = world.body(BodyHandle::from_index(1));
+        assert_relative_eq!(sphere.position.y, 0.5, epsilon = 0.05);
+        assert!(sphere.linear_velocity.length() < 0.1);
+    }
+
+    /// A contact cached while barely touching survives a later small
+    /// separation inside the breaking-threshold band: the refreshed point is
+    /// emitted with negative penetration (Bullet's margin-band contact). The
+    /// scene is gravity-free so the pair stays below the redetect speed gate
+    /// and actually exercises the refresh path.
+    #[test]
+    fn band_contact_survives_brief_separation() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        // Sphere barely touching (0.0001 deep): one step caches the contact
+        // at the predicted pose.
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.4999, 0.0),
+            1.0,
+        ));
+        world.step_simulation(1.0 / 60.0);
+        assert!(!world.manifold_cache.is_empty());
+        // Nudge up by 0.004 (inside the 0.005 redetect window, so the pair
+        // refreshes instead of re-detecting): the refreshed point lands in
+        // the margin band with negative penetration.
+        world.body_mut(ball).position = Vector3::new(0.0, 0.5039, 0.0);
+        world.step_simulation(1.0 / 60.0);
+        // The manifold survived with a margin-band point (negative
+        // penetration) instead of being dropped by a re-detection that only
+        // reports actual penetration.
+        let points: Vec<bullet_collision::manifold::PersistentPoint> = world
+            .manifold_cache
+            .iter()
+            .flatten()
+            .flat_map(|e| e.manifold.points().to_vec())
+            .collect();
+        assert!(points.iter().any(|p| p.penetration < 0.0));
+    }
+
+    /// A sphere dropped from slightly above the plane is caught by the
+    /// margin-band contact *before* touching: the contact forms while the
+    /// surfaces are still separated (inside the breaking-threshold band) and
+    /// the band softening limits the approach to the separation rate, so the
+    /// sphere settles onto the surface without ever penetrating past the
+    /// slop — the behavior Bullet's positive-distance contacts give.
+    #[test]
+    fn band_contact_catches_a_falling_sphere_before_touching() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.508, 0.0),
+            1.0,
+        ));
+        let mut min_y = Real::INFINITY;
+        for _ in 0..60 {
+            world.step_simulation(1.0 / 60.0);
+            min_y = min_y.min(world.body(ball).position.y);
+        }
+        // Never penetrated past the slop zone on the way down.
+        assert!(min_y > 0.5 - 0.006, "min height {min_y}");
+        // And it settles on the surface.
+        assert_relative_eq!(world.body(ball).position.y, 0.5, epsilon = 0.006);
+    }
+
+    /// CCD: a fast body whose one-step displacement would cross a thin static
+    /// wall is clamped at the swept-sphere impact instead of tunneling; the
+    /// same body without CCD sails straight through.
+    #[test]
+    fn ccd_clamps_fast_bodies_at_the_impact() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        // Thin static wall: box centered at y = 0.5, spanning y in [0.4, 0.6].
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        // Fast ball with CCD, starting above the wall; per-step motion is
+        // 2.0 > threshold 0.1 and the predicted position (y = -1) is past the
+        // wall, so the discrete narrow phase sees no contact.
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        // Control ball without CCD, offset in X so it misses the wall.
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(2.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0)),
+        );
+        let dt: Real = 1.0 / 60.0;
+        world.step_simulation(dt);
+        // The CCD ball is clamped at the wall's top surface (0.6 + 0.3).
+        assert_relative_eq!(
+            world.body(BodyHandle::from_index(1)).position.y,
+            0.9,
+            epsilon = 0.05
+        );
+        // The control ball crossed the whole wall.
+        assert!(world.body(BodyHandle::from_index(2)).position.y < -0.5);
+    }
+
+    /// CCD only sweeps when the per-step motion exceeds the threshold; slower
+    /// bodies integrate normally.
+    #[test]
+    fn ccd_ignores_slow_motion() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -5.0, 0.0))
+            .ccd(1.0, 0.3),
+        );
+        // Per-step motion 5/60 < threshold 1.0: plain integration, no clamp.
+        world.step_simulation(1.0 / 60.0);
+        assert_relative_eq!(
+            world.body(BodyHandle::from_index(1)).position.y,
+            1.0 - 5.0 / 60.0,
+            epsilon = 1e-5
+        );
+    }
+
+    /// CCD skips pairs with suppressed collisions: Bullet's dispatcher
+    /// `needsCollision` (`checkCollideWithOverride`) gates the sweep too, so a
+    /// fast body is not clamped against its joint-linked partner. The joint's
+    /// impulse is clamped to a token value so the ball's motion stays intact
+    /// and the sweep filter is the only thing under test.
+    #[test]
+    fn ccd_skips_collision_suppressed_pairs() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        // Thin static wall in the fast ball's path, joint-linked to it.
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        let mut joint = Constraint::point2point(
+            BodyHandle::from_index(0),
+            BodyHandle::from_index(1),
+            Vector3::new(0.0, 0.5, 0.0),
+            Vector3::new(0.0, -0.5, 0.0),
+        );
+        joint.point2point_mut().set_impulse_clamp(0.001);
+        world.add_constraint(joint);
+        // The suppressed pair is not swept: the ball crosses the wall (the
+        // unsuppressed control is `ccd_clamps_fast_bodies_at_the_impact`).
+        world.step_simulation(1.0 / 60.0);
+        assert!(world.body(BodyHandle::from_index(1)).position.y < -0.5);
+    }
+
+    // ---- dynamic triangle-mesh bodies (the GImpact use case) ----------
+
+    /// A closed 2x2x0.4 box shell as a dynamic mesh body (top and bottom
+    /// plates; a single-sided zero-thickness plate would be the known
+    /// tunneling degenerate).
+    fn box_shell_mesh() -> bullet_collision::shapes::CollisionShape {
+        let (hx, hy, hz) = (1.0 as Real, 0.2 as Real, 1.0 as Real);
+        bullet_collision::shapes::CollisionShape::triangle_mesh(
+            vec![
+                // Top face.
+                Vector3::new(-hx, hy, -hz),
+                Vector3::new(hx, hy, -hz),
+                Vector3::new(hx, hy, hz),
+                Vector3::new(-hx, hy, hz),
+                // Bottom face.
+                Vector3::new(-hx, -hy, -hz),
+                Vector3::new(hx, -hy, -hz),
+                Vector3::new(hx, -hy, hz),
+                Vector3::new(-hx, -hy, hz),
+            ],
+            vec![[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6]],
+        )
+    }
+
+    /// A dynamic mesh body falls onto a static plane, rests on it, and goes
+    /// to sleep — the GImpact use case end to end.
+    #[test]
+    fn dynamic_mesh_rests_on_plane_and_sleeps() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mesh = world.add_body(RigidBody::new_dynamic(
+            box_shell_mesh(),
+            Vector3::new(0.0, 2.0, 0.0),
+            2.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            world.step_simulation(dt);
+        }
+        let b = world.body(mesh);
+        // Bottom face at y = -0.2 relative to the body origin: rest height.
+        assert!(
+            (0.175..0.23).contains(&b.position.y),
+            "mesh should rest with its bottom face on the plane, got {}",
+            b.position.y
+        );
+        assert!(b.linear_velocity.length() < 0.1);
+        assert!(matches!(
+            b.activation_state(),
+            ActivationState::IslandSleeping
+        ));
+    }
+
+    /// A dynamic mesh body rests on a static mesh (the mesh-vs-mesh tree
+    /// traversal driving real support). Dropped from just above the margin
+    /// shell — a single step deeper than the band would tunnel the
+    /// zero-thickness shell past the surface (known deviation of the GJK
+    /// route; Bullet's clip method resolves signed back-side distances).
+    #[test]
+    fn dynamic_mesh_rests_on_static_mesh() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        let ground = bullet_collision::shapes::CollisionShape::triangle_mesh(
+            (0..8)
+                .flat_map(|z| (0..8).map(move |x| (x, z)))
+                .flat_map(|(x, z)| {
+                    let (x, z) = (x as Real, z as Real);
+                    vec![
+                        Vector3::new(x, 0.0, z),
+                        Vector3::new(x + 1.0, 0.0, z),
+                        Vector3::new(x + 1.0, 0.0, z + 1.0),
+                        Vector3::new(x, 0.0, z + 1.0),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+            (0..64)
+                .flat_map(|i| {
+                    let b = (i * 4) as u32;
+                    [[b, b + 2, b + 1], [b, b + 3, b + 2]]
+                })
+                .collect::<Vec<_>>(),
+        );
+        world.add_body(RigidBody::new_static(ground, Vector3::new(-4.0, 0.0, -4.0)));
+        let mesh = world.add_body(RigidBody::new_dynamic(
+            box_shell_mesh(),
+            Vector3::new(0.0, 0.5, 0.0),
+            2.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            world.step_simulation(dt);
+        }
+        let b = world.body(mesh);
+        // The shell rests with its bottom face held `band - slop` above the
+        // ground by the margin shell (the GImpact hover, like Bullet).
+        assert!(
+            (0.24..0.36).contains(&b.position.y),
+            "mesh should rest on the static mesh ground, got {}",
+            b.position.y
+        );
+        assert!(b.linear_velocity.length() < 0.1);
+    }
+
+    /// A dynamic sphere resting on a dynamic mesh plate: the mesh-vs-convex
+    /// path with a *moving* mesh (both sides dynamic, island-merged).
+    #[test]
+    fn sphere_rests_on_dynamic_mesh() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let mesh = world.add_body(RigidBody::new_dynamic(
+            box_shell_mesh(),
+            Vector3::new(0.0, 0.2, 0.0),
+            5.0,
+        ));
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            world.step_simulation(dt);
+        }
+        // The heavy shell barely moves; the ball rests on its top face
+        // (y = 0.2 + 0.2 + 0.5 = 0.9 in the ideal, allow solver slop).
+        let top = world.body(mesh).position.y + 0.2;
+        let y = world.body(ball).position.y;
+        assert!(
+            ((top + 0.5 - 0.05)..=(top + 0.5 + 0.05)).contains(&y),
+            "ball should rest on the dynamic mesh top face, got {y}"
+        );
+        assert!(world.body(ball).linear_velocity.length() < 0.1);
+    }
+
+    // ---- kinematic rigid bodies (Bullet's `CF_KINEMATIC_OBJECT`) ------
+
+    /// A kinematic body driven by its velocity pushes a dynamic body out of the
+    /// way: the contact rows use the kinematic's velocity in the relative
+    /// velocity, so the dynamic side gains momentum (velocity propagation).
+    #[test]
+    fn kinematic_pushes_dynamic_body() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        // Sliding kinematic slab (its top face is at y = 0.5) and a dynamic box
+        // resting in its path.
+        let slab = world.add_body(RigidBody::new_kinematic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.5, 1.0)),
+            Vector3::new(-3.0, 0.5, 0.0),
+        ));
+        let target = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.25, 0.25, 0.25)),
+            Vector3::new(0.0, 0.75, 0.0),
+            1.0,
+        ));
+        world.body_mut(slab).linear_velocity = Vector3::new(2.0, 0.0, 0.0);
+
+        let start_x = world.body(target).position.x;
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        // The slab (2 m/s for 2 s) reached and shoved the box well past its
+        // starting point.
+        assert!(world.body(target).position.x > start_x + 0.5);
+        assert!(world.body(target).is_active());
+    }
+
+    /// Gravity, damping and accumulated forces never touch a kinematic body's
+    /// velocities; the pose integrates from the user-set velocity every step.
+    #[test]
+    fn kinematic_ignores_gravity_forces_and_damping() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        let body = world.add_body(RigidBody::new_kinematic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 5.0, 0.0),
+        ));
+        world.body_mut(body).set_damping(0.2, 0.2);
+        let v = Vector3::new(1.0, 0.0, 0.0);
+        world.body_mut(body).linear_velocity = v;
+        world.body_mut(body).angular_velocity = Vector3::new(0.0, 0.0, 1.0);
+
+        let dt = 1.0 / 60.0;
+        let frames = 60;
+        for i in 0..frames {
+            world.body_mut(body).apply_force(Vector3::new(0.0, 100.0, 0.0));
+            world.step_simulation(dt);
+            let b = world.body(body);
+            // Gravity must not move the kinematic body.
+            assert_relative_eq!(b.position.y, 5.0, epsilon = 1e-4);
+            assert_eq!(b.linear_velocity, v, "velocity must stay user-set (frame {i})");
+        }
+        // Pose integrated from the velocity: x ~= v * t (per-frame `+=` rounding
+        // aside), and it never fell.
+        assert_relative_eq!(world.body(body).position.x, 1.0, epsilon = 1e-3);
+        assert!(world.body(body).is_active());
+    }
+
+    /// A dynamic body resting on an *idle* kinematic platform settles and goes
+    /// to sleep; the kinematic-static pair produces no solver rows.
+    #[test]
+    fn dynamic_body_rests_and_sleeps_on_idle_kinematic_platform() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        let platform = world.add_body(RigidBody::new_kinematic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.25, 2.0)),
+            Vector3::new(0.0, 0.25, 0.0),
+        ));
+        let cargo = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.25, 0.25, 0.25)),
+            Vector3::new(0.0, 2.0, 0.0),
+            1.0,
+        ));
+        for _ in 0..480 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        let b = world.body(cargo);
+        assert_relative_eq!(b.position.y, 0.75, epsilon = 0.05);
+        assert!(!b.is_active(), "idle kinematic contacts must let it sleep");
+        // The platform itself never moved and keeps its velocity.
+        assert_eq!(world.body(platform).position, Vector3::new(0.0, 0.25, 0.0));
+    }
+
+    /// Kinematic-vs-kinematic and kinematic-vs-static overlaps are skipped
+    /// entirely and leave both bodies untouched (Bullet's broadphase
+    /// StaticFilter excludes them).
+    #[test]
+    fn kinematic_static_and_kinematic_kinematic_pairs_are_inert() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        let ground = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let a = world.add_body(RigidBody::new_kinematic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.5)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        let b = world.add_body(RigidBody::new_kinematic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.5)),
+            Vector3::new(0.3, 0.5, 0.0),
+        ));
+        let va = Vector3::new(0.5, 0.0, 0.0);
+        let vb = Vector3::new(-0.5, 0.0, 0.0);
+        world.body_mut(a).linear_velocity = va;
+        world.body_mut(b).linear_velocity = vb;
+
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        // They flew apart (or through each other) but no solver row ever touched
+        // their velocities, and the static ground still holds them where their
+        // velocities put them.
+        assert_eq!(world.body(a).linear_velocity, va);
+        assert_eq!(world.body(b).linear_velocity, vb);
+        assert!(world.body(a).position.y > 0.0);
+        let _ = ground;
+    }
+
+    /// A kinematic compound (a vehicle slab with a raised bumper child)
+    /// pushes a dynamic ball purely through its velocity: the end-to-end
+    /// kinematic x compound interaction (pair gate, infinite-mass solver
+    /// rows, per-step proxy refresh) with no solver row touching the
+    /// kinematic body's velocity.
+    #[test]
+    fn kinematic_compound_pushes_a_ball() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        let ground = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        // Vehicle: slab + bumper, driven at constant +x from x = -4.
+        let vehicle = world.add_body(RigidBody::new_kinematic(
+            bullet_collision::shapes::CollisionShape::compound(vec![
+                bullet_collision::shapes::CompoundChild::new(
+                    bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.25, 0.5)),
+                    Vector3::new(0.0, 0.25, 0.0),
+                ),
+                bullet_collision::shapes::CompoundChild::new(
+                    bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.1, 0.4, 0.5)),
+                    Vector3::new(0.6, 0.4, 0.0),
+                ),
+            ]),
+            Vector3::new(-4.0, 0.0, 0.0),
+        ));
+        world.body_mut(vehicle).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+        // Ball resting on the ground in the vehicle's path.
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.3),
+            Vector3::new(0.0, 0.3, 0.0),
+            1.0,
+        ));
+
+        for _ in 0..240 {
+            world.step_simulation(1.0 / 60.0);
+        }
+
+        // The vehicle drove through the ball's start and carried it along,
+        // its own velocity untouched (infinite mass).
+        assert!(
+            world.body(ball).position.x > 0.5,
+            "ball at {}",
+            world.body(ball).position.x
+        );
+        assert!(world.body(ball).position.y > 0.0);
+        assert_eq!(
+            world.body(vehicle).linear_velocity,
+            Vector3::new(1.0, 0.0, 0.0)
+        );
+        // Drove ~4 m from x = -4 (the 240-frame budget lands it near 0).
+        assert!(world.body(vehicle).position.x > -0.5);
+        let _ = ground;
+    }
+
+    // ---- rolling friction (Bullet's `m_rollingFriction` torsional rows)
+
+    /// A ball rolling on the ground with a positive rolling friction slows
+    /// down and stops (the angular rows drain the spin, then sliding friction
+    /// takes the linear speed); without the coefficient the matched roll
+    /// keeps going — no sliding, nothing to stop it.
+    #[test]
+    fn rolling_friction_stops_a_rolling_ball() {
+        let build = |rolling: Real| {
+            let mut world = PhysicsWorld::new();
+            let mut ground = RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(20.0, 0.5, 20.0)),
+                Vector3::new(0.0, -0.5, 0.0),
+            );
+            ground.rolling_friction = rolling;
+            world.add_body(ground);
+            let mut ball = RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            );
+            ball.rolling_friction = rolling;
+            // Matched roll: contact-point velocity v + ω×(−r) = 0 → ωz = −v/r.
+            ball.linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+            ball.angular_velocity = Vector3::new(0.0, 0.0, -2.0);
+            let ball = world.add_body(ball);
+            (world, ball)
+        };
+
+        // Without rolling friction the matched roll keeps rolling (frictionless
+        // contact: no sliding, nothing decelerates it beyond solver noise).
+        let (mut world, ball) = build(0.0);
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        // The residual decay is the solver's friction-row noise on the
+        // numerically-zero contact slip (PGS couplings between the normal and
+        // tangent blocks), not rolling friction: it drains a matched roll by
+        // about a third over two seconds, so keep the bar low.
+        assert!(
+            world.body(ball).linear_velocity.x > 0.5,
+            "unloaded roll should persist: vx = {}",
+            world.body(ball).linear_velocity.x
+        );
+
+        // With rolling friction the roll drains: both the spin and, through
+        // the sliding friction it unmasked, the linear speed collapse.
+        let (mut world, ball) = build(1.0);
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        let v = world.body(ball).linear_velocity;
+        let w = world.body(ball).angular_velocity;
+        assert!(
+            v.length() < 0.05,
+            "rolling friction should stop the ball: v = {}",
+            v.length()
+        );
+        assert!(
+            w.z.abs() < 0.1,
+            "the spin should be drained: wz = {}",
+            w.z
+        );
+    }
+}
