@@ -514,5 +514,5 @@ pub fn solve_clusters(softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
 /// L1 distance (Bullet's `ClusterMetric`).
 fn cluster_metric(x: Vector3, y: Vector3) -> Real {
     let d = x - y;
-    d.x.abs() + d.y.abs() + d.z.abs()
+    d.abs().element_sum()
 }
