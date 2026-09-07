@@ -112,9 +112,10 @@ def gen_c(scenes):
         "  ShapeType shape;",
         "  btScalar params[6];",
         "  btScalar pos[3];",
-        "  btScalar mass, friction, restitution;",
+        "  btScalar mass, friction, restitution, rolling_friction;",
         "  int is_static;",
         "  btScalar velocity[3];",
+        "  btScalar angular_velocity[3];",
         "  int ccd_on;",
         "  btScalar ccd_motion_threshold, ccd_swept_sphere_radius;",
         "  btScalar body_gravity[3];  // per-body gravity (implies disable_world_gravity)",
@@ -167,6 +168,7 @@ def gen_c(scenes):
             p = ", ".join(f"btScalar({fmt(x)})" for x in params)
             pos = ", ".join(f"btScalar({fmt(x)})" for x in b["position"])
             mass = fmt(b.get("mass", 0.0))
+            rf = fmt(b.get("rolling_friction", 0.0))
             if b.get("mass", 0.0) == 0:
                 fr, re = "0.5", "0.0"
             else:
@@ -175,6 +177,8 @@ def gen_c(scenes):
             st = 1 if b.get("mass", 0.0) == 0 else 0
             vel = b.get("velocity", [0.0, 0.0, 0.0])
             vel_s = ", ".join(f"btScalar({fmt(x)})" for x in vel)
+            ang = b.get("angular_velocity", [0.0, 0.0, 0.0])
+            ang_s = ", ".join(f"btScalar({fmt(x)})" for x in ang)
             ccd = b.get("ccd")
             ccd_on = 1 if ccd else 0
             ccd_mt = ccd.get("motion_threshold", 0.0) if ccd else 0.0
@@ -187,8 +191,8 @@ def gen_c(scenes):
             grp = b.get("group", 1)
             msk = b.get("mask", -1)
             lines.append(f"  {{\"{b['name']}\", {SHAPE_ENUM[t]}, {{{p}}}, {{{pos}}}, "
-                         f"btScalar({mass}), btScalar({fr}), btScalar({re}), {st}, "
-                         f"{{{vel_s}}}, {ccd_on}, btScalar({fmt(ccd_mt)}), "
+                         f"btScalar({mass}), btScalar({fr}), btScalar({re}), btScalar({rf}), {st}, "
+                         f"{{{vel_s}}}, {{{ang_s}}}, {ccd_on}, btScalar({fmt(ccd_mt)}), "
                          f"btScalar({fmt(ccd_sr)}), {{{bg_s}}}, {dwg}, {ncr}, {grp}, {msk}, "
                          f"{mesh_ref}}},")
         lines.append("};")
@@ -254,8 +258,10 @@ def gen_rs(scenes):
         "    pub mass: f32,",
         "    pub friction: f32,",
         "    pub restitution: f32,",
+        "    pub rolling_friction: f32,",
         "    pub is_static: bool,",
         "    pub velocity: [f32; 3],",
+        "    pub angular_velocity: [f32; 3],",
         "    pub ccd_on: bool,",
         "    pub ccd_motion_threshold: f32,",
         "    pub ccd_swept_sphere_radius: f32,",
@@ -316,8 +322,11 @@ def gen_rs(scenes):
             else:
                 fr, re = fmt(b.get("friction", 0.5)), fmt(b.get("restitution", 0.0))
                 st = "false"
+            rf = fmt(b.get("rolling_friction", 0.0))
             vel = b.get("velocity", [0.0, 0.0, 0.0])
             vel_s = ", ".join(fmt(x) for x in vel)
+            ang = b.get("angular_velocity", [0.0, 0.0, 0.0])
+            ang_s = ", ".join(fmt(x) for x in ang)
             ccd = b.get("ccd")
             ccd_on = "true" if ccd else "false"
             ccd_mt = ccd.get("motion_threshold", 0.0) if ccd else 0.0
@@ -330,7 +339,8 @@ def gen_rs(scenes):
             msk = b.get("mask", -1) & 0xFFFF
             lines.append(f"            BodySpec {{ name: \"{b['name']}\", shape: {shape}, "
                          f"position: {pos}, mass: {mass}, friction: {fr}, restitution: {re}, "
-                         f"is_static: {st}, velocity: [{vel_s}], ccd_on: {ccd_on}, "
+                         f"rolling_friction: {rf}, "
+                         f"is_static: {st}, velocity: [{vel_s}], angular_velocity: [{ang_s}], ccd_on: {ccd_on}, "
                          f"ccd_motion_threshold: {fmt(ccd_mt)}, "
                          f"ccd_swept_sphere_radius: {fmt(ccd_sr)}, "
                          f"body_gravity: [{bg_s}], disable_world_gravity: {dwg}, "

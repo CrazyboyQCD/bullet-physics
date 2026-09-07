@@ -74,10 +74,11 @@ gap. Behavior semantics are out of scope here — see
 - **P6 — the §3 feature surface** (partially done 2026-09-02): collision
   groups/masks (`body.collision_group` / `.collision_mask`, symmetric
   `group & mask` pair test on every pair + CCD sweep) and trigger
-  volumes are in. Still open: all-hits ray tests, ghost-object overlap
-  listings (the sensor flag + events + `contact_test` cover the main
-  use case), serialization, motion states... see `bullet-deviations.md`
-  §3 for the verified, categorized list.
+  volumes are in. Still open: serialization, motion states... see
+  `bullet-deviations.md` §3 for the verified, categorized list. The
+  ghost-object overlap listing landed as `world.overlapping(sensor)`
+  (2026-09-07): a persistent per-body list of everything currently
+  touching it, the level-query alternative to diffing events by hand.
 
 ## 3. Migration cheat-sheet (Bullet → this crate)
 
@@ -99,6 +100,8 @@ gap. Behavior semantics are out of scope here — see
 | `body->setDamping(l, a)` | `body.set_damping(l, a)` | factors clamped to `[0, 1]` |
 | collision groups / masks | `body.collision_group` / `.collision_mask` | symmetric `group & mask` pair test |
 | trigger volume / sensor | `body.no_contact_response(true)` + `.collision_events(true)` | `world.contact_events()` drain |
+| `btGhostObject` overlap list | `world.overlapping(sensor)` | persistent touch list; narrow-phase level (Bullet's is AABB level) |
+| `body->setRollingFriction(x)` | `body.rolling_friction = x` | torsional rows per contact; combined `rf_a·μ_b + rf_b·μ_a` (Bullet quirk) |
 | `rayTest` (closest) | `world.raycast_closest(...)` | |
 | `rayTest` (all hits) | `world.raycast_all(...)` / `raycast_all_filtered(...)` | filter = the ray's own group/mask |
 | `RayResultCallback` filter | `RayFilter { group, mask }` | symmetric pair test, default group 1 / mask all |

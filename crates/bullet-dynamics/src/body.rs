@@ -127,6 +127,13 @@ pub struct RigidBody {
     inv_inertia_local: Vector3,
     pub friction: Real,
     pub restitution: Real,
+    /// Torsional friction orthogonal to the contact normal (Bullet's
+    /// `m_rollingFriction`, default 0): a rolling body touching a surface
+    /// with a positive pair value is slowed by angular-friction rows until
+    /// it stops, instead of rolling forever. Only read in pairs where the
+    /// combined value (`rf_a · friction_b + rf_b · friction_a`, Bullet's
+    /// `calculateCombinedRollingFriction` quirk) exceeds zero.
+    pub rolling_friction: Real,
     /// Per-body gravity acceleration (Bullet's `m_gravity_acceleration`):
     /// synced from the world at `add_body` time and by
     /// `PhysicsWorld::set_gravity` propagation unless the
@@ -193,6 +200,7 @@ impl RigidBody {
             inv_inertia_local: inv_inertia,
             friction: 0.5,
             restitution: 0.0,
+            rolling_friction: 0.0,
             collision_group: filter_groups::DEFAULT,
             collision_mask: filter_groups::ALL,
             collision_flags: CollisionFlags::default(),
@@ -247,6 +255,7 @@ impl RigidBody {
             inv_inertia_local: Vector3::ZERO,
             friction: 0.5,
             restitution: 0.0,
+            rolling_friction: 0.0,
             collision_group: filter_groups::DEFAULT,
             collision_mask: filter_groups::ALL,
             collision_flags: CollisionFlags::default(),

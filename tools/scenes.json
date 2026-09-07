@@ -800,6 +800,99 @@
           "mask": 16
         }
       ]
+    },
+    "rolling": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 240,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -10,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              40,
+              0.5,
+              20
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "ball_rf",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            -6,
+            0.5,
+            0
+          ],
+          "mass": 1,
+          "velocity": [
+            2,
+            0,
+            0
+          ],
+          "rolling_friction": 0.4
+        },
+        {
+          "name": "ball_plain",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            -6,
+            0.5,
+            4
+          ],
+          "mass": 1,
+          "velocity": [
+            2,
+            0,
+            0
+          ]
+        },
+        {
+          "name": "ball_spin",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.3
+          },
+          "position": [
+            2,
+            0.3,
+            -3
+          ],
+          "mass": 1,
+          "angular_velocity": [
+            0,
+            0,
+            15
+          ],
+          "rolling_friction": 0.3
+        }
+      ],
+      "record": [
+        "ball_rf",
+        "ball_plain",
+        "ball_spin"
+      ]
     }
   }
 }

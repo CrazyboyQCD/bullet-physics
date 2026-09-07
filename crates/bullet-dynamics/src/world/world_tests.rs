@@ -2443,3 +2443,208 @@ fn kinematic_compound_pushes_a_ball() {
     assert!(world.body(vehicle).position.x > -0.5);
     let _ = ground;
 }
+
+// ------------------------------------------------------------------
+// Ghost/sensor persistent overlap lists (Bullet's `btGhostObject`).
+// ------------------------------------------------------------------
+
+/// A sensor's persistent overlap list tracks a ball flying through it,
+/// with no events emitted (neither side opted into `collision_events`):
+/// the list is the sensor's own query surface.
+#[test]
+fn sensor_overlap_list_tracks_passage() {
+    let mut world = PhysicsWorld::new();
+    let trigger = world.add_body(
+        RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        )
+        .no_contact_response(true),
+    );
+    let ball = world.add_body(RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::sphere(0.5),
+        Vector3::new(0.0, 3.0, 0.0),
+        1.0,
+    ));
+    let dt = 1.0 / 60.0;
+    let mut seen = false;
+    for _ in 0..60 {
+        world.step_simulation(dt);
+        assert!(world.contact_events().is_empty());
+        if !world.overlapping(trigger).is_empty() {
+            assert_eq!(world.overlapping(trigger), vec![ball]);
+            seen = true;
+        }
+    }
+    assert!(seen, "the ball never appeared in the sensor's overlap list");
+    assert!(world.body(ball).position.y < -1.0, "ball passed through");
+    assert!(
+        world.overlapping(trigger).is_empty(),
+        "the list kept the ball after it left"
+    );
+}
+
+/// The list is persistent across steps: a ball resting (and falling
+/// asleep) inside a sensor keeps its entry — no churn while the island
+/// sleeps, like the touch state the events ride on.
+#[test]
+fn sensor_overlap_list_survives_sleep() {
+    let mut world = PhysicsWorld::new();
+    let trigger = world.add_body(
+        RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        )
+        .no_contact_response(true),
+    );
+    let mut ball = RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::sphere(0.3),
+        Vector3::new(0.0, 0.4, 0.0),
+        1.0,
+    );
+    // No gravity: the ball rests inside the trigger and sleeps there.
+    ball.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+    let ball = world.add_body(ball);
+    let dt = 1.0 / 60.0;
+    for _ in 0..300 {
+        world.step_simulation(dt);
+        assert!(world.contact_events().is_empty());
+    }
+    assert_eq!(
+        world.body(ball).activation_state(),
+        ActivationState::IslandSleeping,
+        "the ball should have fallen asleep inside the sensor"
+    );
+    assert_eq!(world.overlapping(trigger), vec![ball]);
+}
+
+/// Removing a tracked body clears the sensor's list immediately, and
+/// still emits no event (the pair had no opted-in side).
+#[test]
+fn sensor_overlap_list_cleared_on_remove() {
+    let mut world = PhysicsWorld::new();
+    let trigger = world.add_body(
+        RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        )
+        .no_contact_response(true),
+    );
+    let mut ball = RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::sphere(0.3),
+        Vector3::new(0.0, 0.4, 0.0),
+        1.0,
+    );
+    ball.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+    let ball = world.add_body(ball);
+    let dt = 1.0 / 60.0;
+    for _ in 0..3 {
+        world.step_simulation(dt);
+    }
+    assert_eq!(world.overlapping(trigger), vec![ball]);
+    world.remove_body(ball);
+    assert!(world.overlapping(trigger).is_empty());
+    assert!(world.contact_events().is_empty());
+}
+
+/// One sensor overlapping several bodies reports them in ascending
+/// handle order.
+#[test]
+fn sensor_overlap_list_is_sorted() {
+    let mut world = PhysicsWorld::new();
+    let trigger = world.add_body(
+        RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        )
+        .no_contact_response(true),
+    );
+    let mut left = RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::sphere(0.3),
+        Vector3::new(-1.0, 0.4, 0.0),
+        1.0,
+    );
+    left.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+    let left = world.add_body(left);
+    let mut right = RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::sphere(0.3),
+        Vector3::new(1.0, 0.4, 0.0),
+        1.0,
+    );
+    right.collision_flags.0 |= CollisionFlags::DISABLE_WORLD_GRAVITY.0;
+    let right = world.add_body(right);
+    for _ in 0..3 {
+        world.step_simulation(1.0 / 60.0);
+    }
+    assert_eq!(world.overlapping(trigger), vec![left, right]);
+    // The reverse lookup works too (the balls are not sensors, but their
+    // pairs are tracked through the sensor side).
+    assert_eq!(world.overlapping(left), vec![trigger]);
+}
+
+// ------------------------------------------------------------------
+// Rolling friction (Bullet's `m_rollingFriction` torsional rows).
+// ------------------------------------------------------------------
+
+/// A ball rolling on the ground with a positive rolling friction slows
+/// down and stops (the angular rows drain the spin, then sliding friction
+/// takes the linear speed); without the coefficient the matched roll
+/// keeps going — no sliding, nothing to stop it.
+#[test]
+fn rolling_friction_stops_a_rolling_ball() {
+    let build = |rolling: Real| {
+        let mut world = PhysicsWorld::new();
+        let mut ground = RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(20.0, 0.5, 20.0)),
+            Vector3::new(0.0, -0.5, 0.0),
+        );
+        ground.rolling_friction = rolling;
+        world.add_body(ground);
+        let mut ball = RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.5, 0.0),
+            1.0,
+        );
+        ball.rolling_friction = rolling;
+        // Matched roll: contact-point velocity v + ω×(−r) = 0 → ωz = −v/r.
+        ball.linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+        ball.angular_velocity = Vector3::new(0.0, 0.0, -2.0);
+        let ball = world.add_body(ball);
+        (world, ball)
+    };
+
+    // Without rolling friction the matched roll keeps rolling (frictionless
+    // contact: no sliding, nothing decelerates it beyond solver noise).
+    let (mut world, ball) = build(0.0);
+    for _ in 0..120 {
+        world.step_simulation(1.0 / 60.0);
+    }
+    // The residual decay is the solver's friction-row noise on the
+    // numerically-zero contact slip (PGS couplings between the normal and
+    // tangent blocks), not rolling friction: it drains a matched roll by
+    // about a third over two seconds, so keep the bar low.
+    assert!(
+        world.body(ball).linear_velocity.x > 0.5,
+        "unloaded roll should persist: vx = {}",
+        world.body(ball).linear_velocity.x
+    );
+
+    // With rolling friction the roll drains: both the spin and, through
+    // the sliding friction it unmasked, the linear speed collapse.
+    let (mut world, ball) = build(1.0);
+    for _ in 0..120 {
+        world.step_simulation(1.0 / 60.0);
+    }
+    let v = world.body(ball).linear_velocity;
+    let w = world.body(ball).angular_velocity;
+    assert!(
+        v.length() < 0.05,
+        "rolling friction should stop the ball: v = {}",
+        v.length()
+    );
+    assert!(
+        w.z.abs() < 0.1,
+        "the spin should be drained: wz = {}",
+        w.z
+    );
+}

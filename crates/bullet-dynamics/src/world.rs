@@ -24,7 +24,7 @@ use crate::softbody::solver::MbSolveContext;
 use crate::softbody::config::SoftCollision;
 use crate::softbody::{AngularJointSpecs, LinearJointSpecs, Side, SoftBody};
 use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
-use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, SLOP, SPLIT_TURN_ERP};
+use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, RollingFriction, SLOP, SPLIT_TURN_ERP};
 
 /// One entry of the persistent-manifold cache: the owning broad-phase pair
 /// plus the manifold itself. The cache is an adjacency structure — one
@@ -140,6 +140,11 @@ pub struct PhysicsWorld {
     /// Solver contact rows of the current step, pooled across steps (the
     /// capacity survives `clear`, so the steady state allocates nothing).
     contact_rows: Vec<ContactConstraint>,
+    /// Rolling-friction rows of the current step (Bullet's
+    /// `m_tmpSolverContactRollingFrictionConstraintPool`), indexed by the
+    /// contact rows' `rolling` field; only populated when a scene actually
+    /// sets `RigidBody::rolling_friction`.
+    rolling_rows: Vec<RollingFriction>,
     /// Joint solver rows of the current step, pooled across steps.
     joint_rows: Vec<ConstraintRow>,
     /// Predicted positions of the current step (detection poses), pooled.
@@ -266,6 +271,7 @@ impl PhysicsWorld {
             iterations: 10,
             manifold_cache: Vec::new(),
             contact_rows: Vec::new(),
+            rolling_rows: Vec::new(),
             joint_rows: Vec::new(),
             predicted_poses: Vec::new(),
             settled_speeds: Vec::new(),
@@ -537,6 +543,12 @@ impl PhysicsWorld {
         self.touching.retain(|p| p[0] != idx && p[1] != idx);
         for pair in ended {
             let (a, b) = (pair[0] as usize, pair[1] as usize);
+            // Pairs tracked only for their overlap list emit no Stopped:
+            // the list query simply stops reporting them (see
+            // [`PhysicsWorld::overlapping`]).
+            if !(self.bodies[a].collision_events || self.bodies[b].collision_events) {
+                continue;
+            }
             let sensor = self.pair_sensor(a, b);
             self.contact_events
                 .push(CollisionEvent::Stopped {
@@ -568,6 +580,37 @@ impl PhysicsWorld {
     /// empty.
     pub fn take_contact_events(&mut self) -> Vec<CollisionEvent> {
         core::mem::take(&mut self.contact_events)
+    }
+
+    /// The persistent overlap list of a body (the query surface of Bullet's
+    /// `btGhostObject`: `getNumOverlappingObjects` / `getOverlappingObject`):
+    /// every body whose pair currently counts as touching `handle`, in
+    /// ascending handle order. The list is maintained by the pair pass for
+    /// sensor bodies (either side carrying
+    /// [`CollisionFlags::NO_CONTACT_RESPONSE`], the trigger-volume flag) and
+    /// for pairs with an opted-in body ([`RigidBody::collision_events`]);
+    /// it persists across steps, freezes while the pair's island sleeps and
+    /// is cleared when a participant is removed or the pair separates.
+    /// Unlike Bullet's listing — filled from broad-phase AABB overlaps —
+    /// entries reflect the narrow-phase touch state: an actual contact
+    /// inside the breaking threshold, not a mere bounds overlap. Reading it
+    /// for a body in no tracked pair (non-sensor, no events, untouched)
+    /// returns an empty list.
+    pub fn overlapping(&self, handle: BodyHandle) -> Vec<BodyHandle> {
+        let idx = handle.index() as u32;
+        let mut out = Vec::new();
+        for pair in &self.prev_touching {
+            if pair[0] == idx {
+                out.push(BodyHandle::from_index(pair[1] as usize));
+            } else if pair[1] == idx {
+                out.push(BodyHandle::from_index(pair[0] as usize));
+            }
+        }
+        // The tracked pairs are a set (one entry per pair), so the other
+        // sides of one body are already distinct; only their order needs
+        // normalizing.
+        out.sort_unstable();
+        out
     }
 
     /// Insert into the sorted, deduplicated suppression set. A free
@@ -1207,6 +1250,7 @@ impl PhysicsWorld {
         // rebuilds the buffer and the touching set from scratch.
         self.contact_events.clear();
         self.touching.clear();
+        self.rolling_rows.clear();
 
         // 1. Integrate velocities from gravity and accumulated forces.
         // Sample the end-of-last-step speeds first: they feed the refresh-
@@ -1561,8 +1605,11 @@ impl PhysicsWorld {
             if !self.bodies[i].is_active() && !self.bodies[j].is_active() {
                 // The sleeping pair's touch state is frozen: carry the
                 // previous step's entry over so no event churns while the
-                // island sleeps.
-                if (self.bodies[i].collision_events || self.bodies[j].collision_events)
+                // island sleeps. Sensor pairs ride the same carry-over for
+                // their persistent overlap list (see [`PhysicsWorld::overlapping`]).
+                if (self.bodies[i].collision_events
+                    || self.bodies[j].collision_events
+                    || self.pair_sensor(i, j))
                     && self
                         .prev_touching
                         .binary_search(&[i.min(j) as u32, i.max(j) as u32])
@@ -1621,12 +1668,13 @@ impl PhysicsWorld {
                     if !no_response {
                         for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
                             cp.normal_impulse *= WARM_STARTING_FACTOR;
-                            self.contact_rows
-                                .push(ContactConstraint::prepare(i, j, &cp, a, b, k as u32));
+                            let mut row = ContactConstraint::prepare(i, j, &cp, a, b, k as u32);
+                            row.attach_rolling(a, b, &mut self.rolling_rows);
+                            self.contact_rows.push(row);
                         }
                     }
                     if !self.refresh_out.is_empty()
-                        && (a.collision_events || b.collision_events)
+                        && (a.collision_events || b.collision_events || no_response)
                     {
                         self.touching.push([i.min(j) as u32, i.max(j) as u32]);
                     }
@@ -1670,11 +1718,12 @@ impl PhysicsWorld {
                 if !no_response {
                     for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
                         cp.normal_impulse *= WARM_STARTING_FACTOR;
-                        self.contact_rows
-                            .push(ContactConstraint::prepare(i, j, &cp, a, b, k as u32));
+                        let mut row = ContactConstraint::prepare(i, j, &cp, a, b, k as u32);
+                        row.attach_rolling(a, b, &mut self.rolling_rows);
+                        self.contact_rows.push(row);
                     }
                 }
-                if a.collision_events || b.collision_events {
+                if a.collision_events || b.collision_events || no_response {
                     self.touching.push([i.min(j) as u32, i.max(j) as u32]);
                 }
             } else {
@@ -1720,6 +1769,12 @@ impl PhysicsWorld {
                 }
             };
             let (a, b) = (pair[0] as usize, pair[1] as usize);
+            // Pairs tracked only for their overlap list (neither side
+            // opted into events) emit nothing: events stay per-body
+            // opt-in, the list is the sensor query surface.
+            if !(self.bodies[a].collision_events || self.bodies[b].collision_events) {
+                continue;
+            }
             let sensor = self.pair_sensor(a, b);
             let event = if started {
                 CollisionEvent::Started {
@@ -1769,6 +1824,7 @@ impl PhysicsWorld {
                 &mut self.bodies,
                 &mut contact_rows,
                 &mut joint_rows,
+                &mut self.rolling_rows,
                 self.iterations,
                 inv_dt,
             );
@@ -2453,6 +2509,7 @@ impl PhysicsWorld {
                 &mut self.bodies,
                 constraints,
                 joint_rows,
+                &mut self.rolling_rows,
                 inv_dt,
             );
             contact::solve_contact_rows(

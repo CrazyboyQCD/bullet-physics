@@ -3,7 +3,7 @@
 
 use bullet_collision::manifold::ContactPoint;
 use crate::body::RigidBody;
-use bullet_math::{Matrix3, Real, Vector3};
+use bullet_math::{math, FRAC_1_SQRT_2, Matrix3, Real, Vector3};
 
 /// Allowed penetration slop before the Baumgarte term kicks in.
 pub(crate) const SLOP: Real = 0.005;
@@ -95,6 +95,73 @@ pub struct ContactConstraint {
     kn: Vector3,
     kt1: Vector3,
     kt2: Vector3,
+    /// Index of this contact's rolling-friction rows in the world-owned
+    /// pool (`None` unless the combined rolling friction is positive; the
+    /// pool lives outside this struct to keep the hot-path footprint of
+    /// every row unchanged — most scenes run without rolling friction).
+    rolling: Option<u32>,
+}
+
+/// The two torsional-friction rows of one contact point (Bullet's
+/// `setupTorsionalFrictionConstraint` pair installed for a positive
+/// `m_combinedRollingFriction`): pure-angular constraints on the two
+/// tangent-plane axes that drive the contact's relative angular velocity
+/// toward zero. Each row's accumulated impulse is clamped per iteration to
+/// `±min(rolling_friction · normal_impulse, rolling_friction)`, so rolling
+/// bodies only decelerate while the contact actually carries load. The
+/// rows are rebuilt from zero every step (Bullet's rolling pool stores
+/// `m_originalContactPoint = 0`: no warm start) and never touch the
+/// linear velocity or the split-impulse pass.
+pub struct RollingFriction {
+    /// The tangent-plane axes (Bullet's `btPlaneSpace1(normal)` output,
+    /// re-normalized like the assembly site does).
+    axis: [Vector3; 2],
+    /// Pre-folded angular impulse components `invI · axis` per side. A
+    /// row impulse applies `ω_a -= comp_a · j` and `ω_b += comp_b · j`,
+    /// matching Bullet's `angularComponentA/B` signs for its
+    /// `relpos1CrossNormal = -axis` / `relpos2CrossNormal = +axis` rows.
+    comp_a: [Vector3; 2],
+    comp_b: [Vector3; 2],
+    /// Inverse effective mass per row: `1 / (axis·invI_a·axis +
+    /// axis·invI_b·axis)` — a pure-rotation row, no linear term.
+    mass: [Real; 2],
+    /// Accumulated impulses of the current step (reset by `prepare`).
+    impulse: [Real; 2],
+    /// The combined rolling-friction coefficient (the clamp scale).
+    friction: Real,
+}
+
+impl RollingFriction {
+    /// Build the two rows for a contact with the given normal.
+    pub(crate) fn prepare(
+        normal: Vector3,
+        inv_inertia_a: Matrix3,
+        inv_inertia_b: Matrix3,
+        friction: Real,
+    ) -> Self {
+        let (a0, a1) = plane_space(normal);
+        // The assembly site normalizes both axes (Bullet's `axis.normalize()`);
+        // the `length() > 0.001` gate after it only exists for the anisotropic
+        // filter this crate does not have, so both axes are always unit here.
+        let axis = [a0 / a0.length(), a1 / a1.length()];
+        let mut comp_a = [Vector3::ZERO; 2];
+        let mut comp_b = [Vector3::ZERO; 2];
+        let mut mass = [0.0; 2];
+        for (i, &axis) in axis.iter().enumerate() {
+            comp_a[i] = inv_inertia_a * axis;
+            comp_b[i] = inv_inertia_b * axis;
+            let k = axis.dot(comp_a[i]) + axis.dot(comp_b[i]);
+            mass[i] = if k > 0.0 { 1.0 / k } else { 0.0 };
+        }
+        Self {
+            axis,
+            comp_a,
+            comp_b,
+            mass,
+            impulse: [0.0; 2],
+            friction,
+        }
+    }
 }
 
 /// Bounds on the accumulated impulse of a constraint row (Bullet's
@@ -315,7 +382,65 @@ impl ContactConstraint {
             kn,
             kt1,
             kt2,
+            rolling: None,
         }
+    }
+
+    /// Install the contact's rolling-friction rows into the world-owned
+    /// pool (Bullet's `addTorsionalFrictionConstraint` pair, gated on the
+    /// combined coefficient being positive). A no-op for rows without a
+    /// rolling-friction pair value, which is every scene that never sets
+    /// the field.
+    pub(crate) fn attach_rolling(
+        &mut self,
+        a: &RigidBody,
+        b: &RigidBody,
+        pool: &mut Vec<RollingFriction>,
+    ) {
+        // Bullet's `calculateCombinedRollingFriction`, verbatim quirk and
+        // all: each side's rolling friction weighted by the *other* side's
+        // linear friction, clamped to ±10 — not the product the linear
+        // friction combines with.
+        let combined = (a.rolling_friction * b.friction + b.rolling_friction * a.friction)
+            .clamp(-10.0, 10.0);
+        if combined <= 0.0 {
+            return;
+        }
+        let rows = RollingFriction::prepare(
+            self.normal,
+            a.inv_inertia_world(),
+            b.inv_inertia_world(),
+            combined,
+        );
+        self.rolling = Some(pool.len() as u32);
+        pool.push(rows);
+    }
+}
+
+/// Bullet's `btPlaneSpace1` (btVector3.h): two unit vectors spanning the
+/// plane perpendicular to `n`, branched on `|n.z| > SIMDSQRT12` (transcribed
+/// component-for-component, including the `q = n × p` composition through
+/// `p`'s components, so both engines build the same rolling basis).
+fn plane_space(n: Vector3) -> (Vector3, Vector3) {
+    // Bullet's `SIMDSQRT12` (btScalar.h): the f32/f64 roundings of the
+    // constant match the C++ literal's casts.
+    let simdsqrt12: Real = FRAC_1_SQRT_2;
+    if n.z.abs() > simdsqrt12 {
+        // Choose p in the y-z plane.
+        let a = n.y * n.y + n.z * n.z;
+        let k = 1.0 / math::sqrt(a);
+        let p = Vector3::new(0.0, -n.z * k, n.y * k);
+        // q = n × p
+        let q = Vector3::new(a * k, -n.x * p.z, n.x * p.y);
+        (p, q)
+    } else {
+        // Choose p in the x-y plane.
+        let a = n.x * n.x + n.y * n.y;
+        let k = 1.0 / math::sqrt(a);
+        let p = Vector3::new(-n.y * k, n.x * k, 0.0);
+        // q = n × p
+        let q = Vector3::new(-n.z * p.y, n.z * p.x, a * k);
+        (p, q)
     }
 }
 
@@ -376,12 +501,13 @@ pub fn solve(
     bodies: &mut [RigidBody],
     constraints: &mut [ContactConstraint],
     joints: &mut [ConstraintRow],
+    rolling: &mut [RollingFriction],
     iterations: u32,
     inv_dt: Real,
 ) {
     warm_start(bodies, constraints);
     for _ in 0..iterations {
-        velocity_iteration(bodies, constraints, joints, inv_dt);
+        velocity_iteration(bodies, constraints, joints, rolling, inv_dt);
     }
     split_impulse_pass(bodies, constraints, iterations, inv_dt);
 }
@@ -403,10 +529,11 @@ pub(crate) fn velocity_iteration(
     bodies: &mut [RigidBody],
     constraints: &mut [ContactConstraint],
     joints: &mut [ConstraintRow],
+    rolling: &mut [RollingFriction],
     inv_dt: Real,
 ) {
     for c in constraints.iter_mut() {
-        solve_contact(bodies, c, inv_dt);
+        solve_contact(bodies, c, rolling, inv_dt);
     }
     for j in joints.iter_mut() {
         solve_joint_row(bodies, j);
@@ -473,7 +600,12 @@ fn apply_push(a: &mut RigidBody, b: &mut RigidBody, c: &ContactConstraint, j: Re
     }
 }
 
-fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Real) {
+fn solve_contact(
+    bodies: &mut [RigidBody],
+    c: &mut ContactConstraint,
+    rolling: &mut [RollingFriction],
+    inv_dt: Real,
+) {
     // One split serves the whole solve (the ten-iteration hot path used to
     // re-split for every tangent block — pure control-flow overhead).
     let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
@@ -545,6 +677,34 @@ fn solve_contact(bodies: &mut [RigidBody], c: &mut ContactConstraint, inv_dt: Re
         let j = new - old;
         apply_impulse(a, b, c, Dir::Tangent2, j);
         rel += c.kt2 * j;
+    }
+
+    // Rolling friction (Bullet's rolling-pool pass, solved after the
+    // friction rows): two pure-angular rows driven toward zero relative
+    // angular velocity, clamped by `min(friction · normal_impulse,
+    // friction)` and skipped entirely while the contact carries no normal
+    // impulse. The rows read the absolute angular velocities directly
+    // (this solver has no delta-velocity buffers) and the linear part of
+    // the jacobian is zero, so the incremental-`rel` machinery above does
+    // not apply.
+    if c.normal_impulse > 0.0
+        && let Some(index) = c.rolling
+    {
+        let rf = &mut rolling[index as usize];
+        let magnitude = (rf.friction * c.normal_impulse).min(rf.friction);
+        for i in 0..2 {
+            let ang_rel =
+                rf.axis[i].dot(b.angular_velocity) - rf.axis[i].dot(a.angular_velocity);
+            let lambda = rf.mass[i] * (0.0 - ang_rel);
+            let old = rf.impulse[i];
+            let new = (old + lambda).clamp(-magnitude, magnitude);
+            rf.impulse[i] = new;
+            let j = new - old;
+            if j != 0.0 {
+                a.angular_velocity -= rf.comp_a[i] * j;
+                b.angular_velocity += rf.comp_b[i] * j;
+            }
+        }
     }
 }
 
@@ -647,7 +807,7 @@ mod tests {
     #[test]
     fn split_impulse_pushes_deep_penetration_without_touching_velocity() {
         let (mut bodies, mut constraints) = deep_contact(0.1);
-        solve(&mut bodies, &mut constraints, &mut [], 10, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], &mut [], 10, 60.0);
         // Split pass accumulated an upward positional push on the box.
         assert!(bodies[1].push_linear.y > 0.0);
         // The real velocity is untouched: zero approach speed means the
@@ -662,7 +822,7 @@ mod tests {
     #[test]
     fn split_impulse_ignores_shallow_penetration() {
         let (mut bodies, mut constraints) = deep_contact(0.01);
-        solve(&mut bodies, &mut constraints, &mut [], 10, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], &mut [], 10, 60.0);
         assert!(!constraints[0].split_active);
         assert_eq!(bodies[1].push_linear, Vector3::ZERO);
     }
@@ -673,14 +833,102 @@ mod tests {
     fn split_impulse_converges_and_clamps() {
         let (mut bodies, mut constraints) = deep_contact(0.1);
         // Half the iterations of the default solve.
-        solve(&mut bodies, &mut constraints, &mut [], 5, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], &mut [], 5, 60.0);
         let push_full = bodies[1].push_linear.y;
         let (mut bodies2, mut constraints2) = deep_contact(0.1);
-        solve(&mut bodies2, &mut constraints2, &mut [], 20, 60.0);
-        // More iterations converge further toward removing the penetration;
+        solve(&mut bodies2, &mut constraints2, &mut [], &mut [], 20, 60.0);
+        // More iterations converge further toward removing the penetration;    
         // both stay positive (no pull-in).
         assert!(push_full > 0.0);
         assert!(bodies2[1].push_linear.y >= push_full);
+    }
+
+    /// A rolling sphere on a plane with a positive combined rolling
+    /// friction: the torsional rows drive the relative angular velocity
+    /// along the tangent-plane axes toward zero, so the spin decays; with
+    /// the coefficient at zero the spin is untouched (the default path).
+    #[test]
+    fn rolling_friction_rows_decay_spin() {
+        // Ground plane (body A, static) + sphere r = 0.5 (body B), contact
+        // at the bottom, normal A -> B = +Y. The sphere spins at
+        // `ω = (0, 0, 2)` around the tangent-plane axis `btPlaneSpace1(Y)`
+        // picks as its second axis.
+        let build = |rolling: Real| {
+            let mut ground = RigidBody::new_static(
+                CollisionShape::plane(Vector3::Y, 0.0),
+                Vector3::ZERO,
+            );
+            ground.rolling_friction = rolling;
+            let mut sphere = RigidBody::new_dynamic(
+                CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            );
+            sphere.rolling_friction = rolling;
+            sphere.angular_velocity = Vector3::new(0.0, 0.0, 2.0);
+            let cp = bullet_collision::manifold::ContactPoint::new(
+                Vector3::new(0.0, 0.5, 0.0),
+                Vector3::Y,
+                0.01,
+            );
+            let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX);
+            let mut pool: Vec<RollingFriction> = Vec::new();
+            c.attach_rolling(&ground, &sphere, &mut pool);
+            (vec![ground, sphere], vec![c], pool)
+        };
+
+        // Without rolling friction the rows are never installed and the
+        // spin stays exactly as it started.
+        let (mut bodies, mut constraints, mut pool) = build(0.0);
+        solve(&mut bodies, &mut constraints, &mut [], &mut pool, 10, 60.0);
+        assert!(pool.is_empty());
+        assert_relative_eq!(bodies[1].angular_velocity.z, 2.0, epsilon = 1e-6);
+
+        // With a positive coefficient the spin decays. The rows only
+        // receive load while the contact carries a normal impulse; one
+        // solve's Baumgarte correction charges it once, so the spin drops
+        // by exactly `min(friction · normal_impulse, friction) · invI` —
+        // 0.03 · 10 = 0.3 here (the rows saturate their clamp). The
+        // full deceleration under sustained contact load is covered by
+        // the scene test in `world_tests`.
+        let (mut bodies, mut constraints, mut pool) = build(0.5);
+        solve(&mut bodies, &mut constraints, &mut [], &mut pool, 10, 60.0);
+        assert_eq!(pool.len(), 1);
+        let w = bodies[1].angular_velocity.z;
+        assert_relative_eq!(w, 1.7, epsilon = 1e-5);
+        assert!(pool[0].impulse[1].abs() <= 0.03 + 1e-6);
+    }
+
+    /// The per-row impulse clamp: a tiny combined coefficient caps the
+    /// accumulated angular impulse at the coefficient itself, so a fast
+    /// spin only slows slightly per solve.
+    #[test]
+    fn rolling_friction_clamps_impulse() {
+        let ground = RigidBody::new_static(
+            CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        );
+        let mut sphere = RigidBody::new_dynamic(
+            CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.5, 0.0),
+            1.0,
+        );
+        // Combined = rf_a·μ_b + rf_b·μ_a = 0.01·0.5 + 0 = 0.005.
+        sphere.rolling_friction = 0.01;
+        sphere.angular_velocity = Vector3::new(0.0, 0.0, 100.0);
+        let cp = bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.0, 0.5, 0.0),
+            Vector3::Y,
+            0.01,
+        );
+        let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX);
+        let mut pool: Vec<RollingFriction> = Vec::new();
+        c.attach_rolling(&ground, &sphere, &mut pool);
+        let mut bodies = vec![ground, sphere];
+        solve(&mut bodies, std::slice::from_mut(&mut c), &mut [], &mut pool, 10, 60.0);
+        // |ΔL| per row ≤ combined (0.005); I = 0.1 → |Δω| ≤ 0.05.
+        let dw = (100.0 - bodies[1].angular_velocity.z).abs();
+        assert!(dw <= 0.06, "clamp should cap the change: Δω = {}", dw);
     }
 }
 

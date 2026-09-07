@@ -117,6 +117,14 @@ fn main() {
                     b.velocity[0] as Real, b.velocity[1] as Real, b.velocity[2] as Real,
                 ))
         };
+        body.rolling_friction = b.rolling_friction as Real;
+        if !b.is_static {
+            body.angular_velocity = Vector3::new(
+                b.angular_velocity[0] as Real,
+                b.angular_velocity[1] as Real,
+                b.angular_velocity[2] as Real,
+            );
+        }
         if !b.is_static && b.ccd_on {
             body = body.ccd(
                 b.ccd_motion_threshold as Real,

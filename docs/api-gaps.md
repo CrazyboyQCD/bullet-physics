@@ -105,17 +105,22 @@ S/M/L · **See** = existing notes.
   - Risk: keep the existing `ignore: Option<usize>` parameter working
     (parameter-position churn on a small API is fine).
   - Size: S.
-- **ghost persistent overlap list**: sensor flag + events +
+- **ghost persistent overlap list** ✅ (2026-09-07): sensor flag + events +
   `contact_test` cover the main use case; Bullet's `btGhostObject`
   listing is the full version.
-  - Impl: the sensor touch state already exists in the pair pass (it
-    feeds `sensor = true` events); expose a per-body query
-    `world.overlapping(sensor) -> Vec<usize>` reading that state, or
-    mark sensor bodies and collect their pairs during the pair pass.
-  - Files: `world.rs` pair pass + a small query API.
-  - Risk: must respect sleeping-pair carry-over (events already solve
-    this — reuse their state, don't re-derive).
-  - Size: S–M.
+  - Shipped: `PhysicsWorld::overlapping(handle) -> Vec<BodyHandle>` (the
+    `getNumOverlappingObjects` / `getOverlappingObject` surface) reads the
+    pair pass's persistent touch state — no second bookkeeping structure.
+    The `touching` buffers now track sensor pairs (either side
+    `NO_CONTACT_RESPONSE`) in addition to the opted-in pairs; the event
+    diff and the `remove_body` cascade filter on the opt-in flags, so
+    events stay per-body opt-in and pure-sensor pairs only feed the list.
+    Entries are narrow-phase touches (Bullet's listing is broad-phase
+    AABB overlaps — deviation recorded in deviations §1), survive island
+    sleep via the same carry-over the events use, and clear on removal
+    or separation. 4 scene tests (pass-through + empty after exit,
+    sleep survival, removal cascade, multi-body ascending order).
+  - Size: S.
 - **serialization**: deliberately deferred (standing decision).
   - Impl: versioned binary format hand-written over the public fields
     (shape enum + parameters, transform, velocities, material, flags,
@@ -225,15 +230,42 @@ S/M/L · **See** = existing notes.
 
 ## Farther (on demand — see deviations §3 for details)
 
-- **Rigid-body property surface**: anisotropic friction, rolling
-  friction, per-object contact stiffness/damping
+- **rolling friction** ✅ (2026-09-07): the ball/cylinder
+  rolling-forever gap (Bullet's `m_rollingFriction`).
+  - Shipped: `RigidBody.rolling_friction` (default 0) + two
+    pure-angular torsional rows per contact point (Bullet's
+    `setupTorsionalFrictionConstraint` pair on the `btPlaneSpace1`
+    basis), driven toward zero relative angular velocity and clamped
+    per iteration to `min(rf · normal_impulse, rf)` — rolling bodies
+    only decelerate under contact load. Combined coefficient is
+    Bullet's quirk verbatim: `rf_a·μ_b + rf_b·μ_a` clamped ±10 (not a
+    product). Rows live in a world-owned pool (`rolling_rows`) indexed
+    from the contact row, so the hot-path row size is unchanged and
+    scenes that never set the field keep bit-identical behavior
+    (baseline parity re-checked digit-for-digit).
+  - Files: `body.rs`, `solver/sequential_impulse.rs` (`RollingFriction`,
+    `plane_space`, `attach_rolling`), `world.rs` (pool + attach at both
+    row-assembly sites + solve plumbing), recorder tables
+    (`generate_scenes.py` + both recorders gained `rolling_friction`
+    and `angular_velocity` body fields).
+  - Risk resolved: parity scene `rolling` added (see
+    `bullet-compare.md`) — `ball_rf` is exceed-0 exact in f32 and f64;
+    the never-resting no-rf balls expose the pre-existing friction-row
+    noise class (classified, not a regression). Spinning friction
+    (`m_spinningFriction`, the one row around the contact normal that
+    Bullet installs in the same block) is not ported — same shape, on
+    demand.
+  - Size: S–M (the parity scene was the M half).
+- **Rigid-body property surface (remaining)**: anisotropic friction,
+  per-object contact stiffness/damping
   (`CF_HAS_CONTACT_STIFFNESS_DAMPING`), the opt-in additional-damping
-  block.
+  block, spinning friction.
   - Impl: plain fields on `RigidBody` consumed in
     `ContactConstraint::prepare` (anisotropic scaling inside the
-    effective-mass/friction setup; rolling friction adds an angular
-    row, Bullet's `rollingFriction` path); contact stiffness/damping
-    replaces the default erp/cfm route in row assembly.
+    effective-mass/friction setup; spinning friction adds one row
+    around the contact normal — the same torsional-row machinery the
+    rolling friction shipped); contact stiffness/damping replaces the
+    default erp/cfm route in row assembly.
   - Files: `body.rs`, `solver/sequential_impulse.rs`.
   - Risk: each property is a solver-semantic change → parity re-record
     for scenes using it (default-off keeps the rest bit-identical).

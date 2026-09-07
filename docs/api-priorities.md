@@ -12,8 +12,8 @@
 |---|---|---|---|---|
 | **Kinematic rigid bodies** | ★★★★★ | M | **Done** | Daily necessity for moving platforms / elevators / doors / vehicles; no correct workaround (hacks propagate no velocity). Shipped 2026-09-04. |
 | **Compound child dynamic transforms** | ★★★★ | S–M | **Done** | Kinematic compounds are the standard moving-vehicle setup; implemented together with kinematics. Shipped 2026-09-07. |
-| **Ghost persistent overlap list** | ★★★☆ | S | **Do** | Level-query alternative to hand-rolled event bookkeeping; the pair pass already tracks touch state — pure exposure. |
-| **Rolling friction** | ★★★☆ | S–M | **Do** | Physical-correctness gap for resting balls/cylinders (pool / wheel scenes); damping hacks are unphysical. |
+| **Ghost persistent overlap list** | ★★★☆ | S | **Done** | Level-query alternative to hand-rolled event bookkeeping; the pair pass already tracks touch state — pure exposure. Shipped 2026-09-07 (`world.overlapping`). |
+| **Rolling friction** | ★★★☆ | S–M | **Done** | Physical-correctness gap for resting balls/cylinders (pool / wheel scenes); damping hacks are unphysical. Shipped 2026-09-07 (`body.rolling_friction`, parity scene `rolling` — rf rows exceed-0 exact). |
 | **Motion states** | ★★★ | S–M | Batch 2 | Render interpolation is an advanced need; revisit depending on whether the kinematic driving API wants them early. |
 | **mb/soft event sources** | ★★☆ | S–M | Batch 2 | Robot-arm perception and similar composite scenes exist; extend the event-source dispatch. |
 | **Persistent-manifold extras** | ★★☆ | S | Merge | Do together with the P3 debug draw (contact-point iteration is a debug-draw prerequisite). |

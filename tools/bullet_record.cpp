@@ -163,6 +163,7 @@ int main(int argc, char** argv) {
     btRigidBody* body = bodies.back().get();
     body->setFriction(b.friction);
     body->setRestitution(b.restitution);
+    body->setRollingFriction(b.rolling_friction);
     if (b.no_contact_response) {
       body->setCollisionFlags(body->getCollisionFlags() |
                               btCollisionObject::CF_NO_CONTACT_RESPONSE);
@@ -178,6 +179,8 @@ int main(int argc, char** argv) {
     }
     if (!b.is_static) {
       body->setLinearVelocity(btVector3(b.velocity[0], b.velocity[1], b.velocity[2]));
+      body->setAngularVelocity(
+          btVector3(b.angular_velocity[0], b.angular_velocity[1], b.angular_velocity[2]));
       if (b.ccd_on) {
         body->setCcdMotionThreshold(b.ccd_motion_threshold);
         body->setCcdSweptSphereRadius(b.ccd_swept_sphere_radius);
