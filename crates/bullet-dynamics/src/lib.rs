@@ -19,7 +19,7 @@ pub mod timing;
 pub mod vehicle;
 pub mod world;
 
-pub use body::{CollisionFlags, RigidBody};
+pub use body::{CollisionFlags, MotionState, RigidBody};
 pub use character::KinematicCharacterController;
 pub use constraint::{
     AngularLimit, ConeTwistConstraint, ConeTwistMotor, Constraint, ConstraintKind,
@@ -37,4 +37,4 @@ pub use softbody::{
 };
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
 pub use timing::{StepStage, StepTimings, STEP_STAGES};
-pub use world::{CollisionEvent, PhysicsWorld};
+pub use world::{CollisionEvent, CollisionObject, PhysicsWorld};

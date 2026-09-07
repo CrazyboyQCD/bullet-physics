@@ -132,18 +132,36 @@ S/M/L · **See** = existing notes.
   - Risk: format versioning as the shape enum grows; f32/f64
     cross-compat (reject or widen on load).
   - Size: L. See: `api-usability.md` §2 (P6).
-- **motion states**: Bullet's interpolation / callback pose sync
+- **motion states** ✅ (2026-09-07): Bullet's pose-callback sync
   (`btMotionState`).
-  - Impl: a `MotionState` trait (`synchronize(&Transform)`, optional
-    `initial_pose()`), stored as `Option<Box<dyn MotionState>>` on
-    `RigidBody`, driven from the step tail where transforms are final
-    (Bullet's `synchronizeMotionStates` point).
-  - Files: `body.rs` (trait + field), `world.rs` (step tail).
-  - Risk: the project API rule keeps hot paths `dyn`-free — a
-    per-step consumer callback is exactly the sanctioned exception, but
-    it must stay off the solver path (call once per step, not per
-    contact). Ownership: `Box` per body only when opted in.
-  - Size: S–M (the design debate is the cost, not the code).
+  - Shipped: a `MotionState` trait (`initial_pose()` =
+    `getWorldTransform`, `synchronize(&Transform)` = `setWorldTransform`)
+    stored as `Option<Box<dyn MotionState>>` on `RigidBody`
+    (builder `motion_state(..)` + `set_motion_state(..)`), re-exported
+    through the facade prelude. `add_body` places the body at the state's
+    reported pose (Bullet's constructor read); the step hands the final
+    pose back after position integration (Bullet's `synchronizeMotionStates`
+    point), gated exactly like `synchronizeSingleMotionState`: *active,
+    non-static/kinematic* bodies only.
+  - Reference decisions covered: construction-time pose read ✅ (Bullet
+    `setupRigidBody`); active-only traversal ✅ (default
+    `synchronizeMotionStates`, `m_synchronizeAllMotionStates` not ported);
+    static/kinematic exclusion ✅; every-step call even for sleeping
+    bodies inside the active window ✅ (a woken island resyncs on wake).
+    NOT ported: the interpolation blend (`synchronizeSingleMotionState`
+    feeds the *interpolated* transform — single-step worlds have no
+    remainder fraction; recorded in deviations) and the kinematic drive
+    (`saveKinematicState` reads the pose from the motion state and derives
+    velocities — our kinematics are user-velocity-driven, deviations §3).
+  - Files: `body.rs` (trait + field + `pose_transform`/`split_pose`
+    f32-`Vec3A`↔`Vec3` shims), `world.rs` (`add_body` read),
+    `world/step.rs` (7m sync pass).
+  - Risk resolved: the per-step consumer callback stays off the solver
+    path (once per step, gated on a world-level "any motion state" check —
+    zero cost without opt-in). Ownership: `Box` per body only when opted in.
+  - Tests: 2 (place + one-sync-per-step with semi-implicit pose check,
+    static/kinematic exclusion).
+  - Size: S–M (the design debate was the cost, not the code).
 - **kinematic rigid body** ✅ (2026-09-04): the full kinematic type surface
   (`CF_KINEMATIC_OBJECT` + velocity propagation).
   - Shipped: `CollisionFlags::KINEMATIC` (bit 0x0004; `DISABLE_WORLD_GRAVITY`
@@ -321,15 +339,43 @@ S/M/L · **See** = existing notes.
   - Files: `softbody/solver.rs`.
   - Risk: none for default behavior (presets unchanged).
   - Size: S. See: deviations §3.
-- **Collision-event sources**: multibody-collider and soft-body pairs
-  are not event sources yet (events are rigid-rigid only).
-  - Impl: the mixed passes grow the same touch-state tracking the rigid
-    pass has (pair id = collider/link/node index), emitting the existing
-    `CollisionEvent` variants; per-body opt-in extends to
-    `LinkCollider`/`SoftBody`.
-  - Files: `world.rs` mb/soft pair passes, `body.rs` flags.
-  - Risk: pair identity for soft nodes churns (nodes have no stable ids
-    beyond slot) — pair-level events, not node-level.
+- **Collision-event sources** ✅ (2026-09-07): multibody-collider and
+  soft-body pairs joined the rigid pairs as event sources.
+  - Shipped: `CollisionEvent::Started/Stopped` sides widened from
+    `BodyHandle` to a `CollisionObject` enum (`Body` / `Link { body,
+    link }` with `link < 0` = base / `Soft`) — Bullet's collision-object
+    kinds; pair-level events, not node-level (soft nodes have no stable
+    identity). Per-side opt-in extended: `LinkCollider.collision_events`
+    and `SoftBody.collision_events` join `RigidBody.collision_events`
+    (plain pub fields, like the group/mask pair). Internally the tracked
+    pairs moved from `[u32; 2]` body slots to canonically ordered
+    `ContactKey` pairs (kind-first: bodies < links < soft), so the sorted
+    two-pointer Started/Stopped diff, the sleeping carry-over and
+    `overlapping()` (still rigid-only) keep their shape.
+  - Touch sources: the mixed collider pass tracks at the sleeping-pair,
+    detection-none and detection-hit paths (freeze/none/touched); the
+    soft dispatches (`soft_vs_rigid`/`soft_vs_mb`/`soft_vs_soft`) now
+    carry a touched signal from `collide_rigid`/`collide_multibody`/
+    `collide_cluster_rigid`/`collide_cluster_soft`/`collide_vf_ss` (all
+    return bool; contact-count deltas, zero behavior change).
+    `remove_soft_body` cascades Stopped like `remove_body`, renumbering
+    the surviving soft slots inside the tracked keys.
+  - Reference decisions covered: pair-level granularity (soft nodes
+    churn); the unsupported `CL_RS`-against-multibody and non-matching
+    soft dispatch modes report a stopped touch instead of silently
+    keeping stale state; group/mask-filtered pairs stay untracked
+    (Stopped falls out of the diff), matching the rigid semantics.
+  - Files: `world.rs` (`CollisionObject`, `ContactKey`, diff, removal
+    cascades, `pair_opted_in`/`track_pair`), `world/step.rs`
+    (mixed-pass collection), `world/softbody_pass.rs` (dispatch
+    tracking), `softbody/collide.rs` (bool returns),
+    `multibody/body.rs` + `softbody/body.rs` (opt-in fields), facade
+    prelude re-export.
+  - Risk resolved: opt-in-gated collection keeps quiet scenes at zero
+    cost (empty touching sets); rigid-rigid event order and payload
+    semantics are unchanged (same diff, new key encoding).
+  - Tests: 3 (link-collider Started/Link payload + removal Stopped, soft
+    rope pair events, soft-removal Stopped with slot renumbering).
   - Size: M.
 - **Persistent-manifold extras**: point lifetime counters, friction
   anchors, contact-processed callbacks.

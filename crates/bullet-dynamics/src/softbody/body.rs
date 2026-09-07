@@ -398,6 +398,10 @@ pub struct SoftBody {
     /// Collision filter mask (default
     /// [`filter_groups::ALL`](crate::body::filter_groups::ALL)).
     pub collision_mask: u16,
+    /// Whether pairs this body touches emit collision events (the per-side
+    /// opt-in, like [`RigidBody::collision_events`]; pair-level — nodes
+    /// carry no stable identity).
+    pub collision_events: bool,
 }
 
 impl Default for SoftBody {
@@ -442,6 +446,7 @@ impl SoftBody {
             rest_positions: positions.to_vec(),
             collision_group: crate::body::filter_groups::DEFAULT,
             collision_mask: crate::body::filter_groups::ALL,
+            collision_events: false,
         };
         for (i, (&x, &m)) in positions.iter().zip(masses).enumerate() {
             body.nodes.push(Node::new(x, m));

@@ -1,9 +1,61 @@
-use bullet_math::{math, Matrix3, Quaternion, Real, Vector3};
+use bullet_math::{math, Matrix3, Quaternion, Real, Transform, Vector3};
 use bullet_collision::shapes::{CollisionShape, CompoundChild};
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
 
 /// Seconds a body must stay below the sleeping thresholds before it sleeps
 /// (Bullet's hard-coded `m_deactivationTime > btScalar(2.)` check).
 pub const DEACTIVATION_TIME: Real = 2.0;
+
+/// A user callback bridging the simulation pose and the render side
+/// (Bullet's `btMotionState`): the world reads the start pose from it once
+/// when the body is added (`getWorldTransform`) and pushes the final pose
+/// back after every step (`setWorldTransform`). Store one on a body with
+/// [`RigidBody::motion_state`]; a body without one pays nothing.
+///
+/// Mirroring Bullet's default `synchronizeMotionStates` traversal,
+/// `synchronize` runs for *active* bodies only — a sleeping body's pose did
+/// not change — and never for static or kinematic bodies. Unlike Bullet's
+/// substep pipeline the pose handed over is the step's final value, not an
+/// interpolation-time blend (single fixed step per call; recorded in
+/// `docs/bullet-deviations.md`).
+pub trait MotionState {
+    /// The pose the body starts from (Bullet's `getWorldTransform`), read
+    /// once by [`PhysicsWorld::add_body`](crate::world::PhysicsWorld::add_body)
+    /// to place the body.
+    fn initial_pose(&self) -> Transform;
+    /// The body's final pose this step (Bullet's `setWorldTransform`).
+    fn synchronize(&mut self, pose: &Transform);
+}
+
+/// The rigid pose as a rigid [`Transform`] (the f32 affine type stores the
+/// translation as a `Vec3A`, so the `Vec3` position widens there).
+#[inline]
+pub(crate) fn pose_transform(position: Vector3, orientation: Quaternion) -> Transform {
+    #[cfg(not(feature = "f64"))]
+    {
+        Transform::from_rotation_translation(orientation, position.into())
+    }
+    #[cfg(feature = "f64")]
+    {
+        Transform::from_rotation_translation(orientation, position)
+    }
+}
+
+/// Split a pose [`Transform`] back into the rigid position/orientation pair
+/// (the f32 affine type narrows its translation to the `Vec3A` position).
+#[inline]
+pub(crate) fn split_pose(pose: Transform) -> (Vector3, Quaternion) {
+    let (_, rotation, translation) = pose.to_scale_rotation_translation();
+    #[cfg(not(feature = "f64"))]
+    {
+        (translation.into(), rotation)
+    }
+    #[cfg(feature = "f64")]
+    {
+        (translation, rotation)
+    }
+}
 
 /// Rigid-body activation state (Bullet's `btCollisionObject::ActivationState`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +234,9 @@ pub struct RigidBody {
     /// then cleared.
     pub(crate) push_linear: Vector3,
     pub(crate) push_angular: Vector3,
+    /// Optional render-side pose callback (Bullet's `m_optionalMotionState`);
+    /// see [`MotionState`].
+    pub(crate) motion_state: Option<Box<dyn MotionState>>,
 }
 
 impl RigidBody {
@@ -218,6 +273,7 @@ impl RigidBody {
             ccd_swept_sphere_radius: 0.0,
             push_linear: Vector3::ZERO,
             push_angular: Vector3::ZERO,
+            motion_state: None,
         }
     }
 
@@ -273,6 +329,7 @@ impl RigidBody {
             ccd_swept_sphere_radius: 0.0,
             push_linear: Vector3::ZERO,
             push_angular: Vector3::ZERO,
+            motion_state: None,
         }
     }
 
@@ -526,11 +583,29 @@ impl RigidBody {
         self
     }
     
-    /// Builder: opt this body's pairs in for collision events (Rapier's        
+    /// Builder: opt this body's pairs in for collision events (Rapier's
     /// `ActiveEvents::COLLISION_EVENTS`).
     pub fn collision_events(mut self, on: bool) -> Self {
         self.collision_events = on;
         self
+    }
+
+    /// Builder: attach a motion state (Bullet's
+    /// `btRigidBodyConstructionInfo::m_motionState`).
+    /// [`PhysicsWorld::add_body`](crate::world::PhysicsWorld::add_body)
+    /// places the body at [`MotionState::initial_pose`] and the step hands
+    /// the final pose back via [`MotionState::synchronize`].
+    pub fn motion_state(mut self, state: Box<dyn MotionState>) -> Self {
+        self.motion_state = Some(state);
+        self
+    }
+
+    /// Replace or clear the motion state (Bullet's `setMotionState`).
+    /// Setting one does not re-place the body; the pose it reports feeds
+    /// the next [`MotionState::synchronize`] round trip only for bodies
+    /// added afterwards.
+    pub fn set_motion_state(&mut self, state: Option<Box<dyn MotionState>>) {
+        self.motion_state = state;
     }
 
     /// Builder: set orientation.

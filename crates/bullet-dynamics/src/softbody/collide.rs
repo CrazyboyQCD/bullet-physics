@@ -266,9 +266,11 @@ impl SoftBody {
     /// `CollideSDF_RS::DoNode` fed by `m_ndbvt.collideTV`): every node whose
     /// dbvt leaf overlaps the body's margin-padded AABB is distance-tested
     /// and, on contact, appended to `rcontacts` with its impulse row.
+    /// Returns whether any node touched the body (the collision-event
+    /// signal).
     ///
     /// `scratch` is a caller-recycled buffer for the overlapping leaves.
-    pub fn collide_rigid(&mut self, body_idx: usize, body: &RigidBody, scratch: &mut Vec<usize>) {
+    pub fn collide_rigid(&mut self, body_idx: usize, body: &RigidBody, scratch: &mut Vec<usize>) -> bool {
         self.collide_body(
             ContactOwner::Rigid(body_idx),
             &body.shape,
@@ -280,7 +282,7 @@ impl SoftBody {
             body.friction,
             body.is_static_or_kinematic(),
             scratch,
-        );
+        )
     }
 
     /// SDF_RS collision against one multibody link collider (phase F).        
@@ -290,7 +292,8 @@ impl SoftBody {
     /// inertia, zero contact-point velocity — the node solves against an      
     /// infinitely heavy partner) and the multibody only receives its
     /// reaction through the solve-side jacobian writeback. The anchor
-    /// `ra = x - collider_origin` feeds the tangent directions.
+    /// `ra = x - collider_origin` feeds the tangent directions. Returns
+    /// whether any node touched the collider.
     #[allow(clippy::too_many_arguments)]
     pub fn collide_multibody(
         &mut self,
@@ -301,7 +304,7 @@ impl SoftBody {
         orientation: Quaternion,
         friction: Real,
         scratch: &mut Vec<usize>,
-    ) {
+    ) -> bool {
         self.collide_body(
             ContactOwner::Link { mb, link },
             shape,
@@ -313,10 +316,11 @@ impl SoftBody {
             friction,
             false,
             scratch,
-        );
+        )
     }
 
-    /// The shared `CollideSDF_RS::DoNode` kernel.
+    /// The shared `CollideSDF_RS::DoNode` kernel. Returns whether any node
+    /// produced a contact this call.
     #[allow(clippy::too_many_arguments)]
     fn collide_body(
         &mut self,
@@ -330,9 +334,9 @@ impl SoftBody {
         friction: Real,
         is_static: bool,
         scratch: &mut Vec<usize>,
-    ) {
+    ) -> bool {
         if !self.cfg.collisions.contains(SoftCollision::SDF_RS) {
-            return;
+            return false;
         }
         let basemargin = self.margin;
         // Bullet's `timemargin` (interpolation delta) is dead code upstream
@@ -342,6 +346,7 @@ impl SoftBody {
         self.ndbvt.for_each_overlapping(&volume, scratch);
 
         let sdt = self.sst.sdt;
+        let before = self.rcontacts.len();
         for &ni in &*scratch {
             let (x, q, ima) = {
                 let n = &self.nodes[ni];
@@ -394,6 +399,7 @@ impl SoftBody {
                 c4,
             });
         }
+        self.rcontacts.len() > before
     }
 }
 
@@ -407,14 +413,16 @@ impl SoftBody {
 /// then B's nodes vs A's faces) — the world does the same. The upstream
 /// "skip faces containing the node" loop is a no-op (it `continue`s the
 /// wrong scope) and is ported as such: the face check is intentionally
-/// absent, matching Bullet's effective behavior.
-pub fn collide_vf_ss(node_side: &mut SoftBody, face_side: &mut SoftBody, face_body: usize, pairs: &mut Vec<(usize, usize)>) {
+/// absent, matching Bullet's effective behavior. Returns whether any
+/// (node, face) pair produced a contact.
+pub fn collide_vf_ss(node_side: &mut SoftBody, face_side: &mut SoftBody, face_body: usize, pairs: &mut Vec<(usize, usize)>) -> bool {
     let mrg = node_side.margin + face_side.margin;
     let k_df_node = node_side.cfg.k_df;
     let k_shr_node = node_side.cfg.k_shr;
     let k_shr_face = face_side.cfg.k_shr;
     let k_df_face = face_side.cfg.k_df;
 
+    let before = node_side.scontacts.len();
     pairs.clear();
     node_side.ndbvt.for_each_overlapping_pair(&face_side.fdbvt, pairs);
     for &(ni, fi) in &*pairs {
@@ -469,6 +477,7 @@ pub fn collide_vf_ss(node_side: &mut SoftBody, face_side: &mut SoftBody, face_bo
             cfm: [ma / ms * k_shr_node, mb / ms * k_shr_face],
         });
     }
+    node_side.scontacts.len() > before
 }
 
 impl SoftBody {
@@ -784,7 +793,7 @@ impl SoftBody {
     /// the combined margins spawns a contact joint in `self.joints` (solved
     /// by the world's cluster pass). Anchored clusters skip static bodies;
     /// the friction is the `min` of both sides (Bullet's choice on this
-    /// path, unlike SDF_RS's product).
+    /// path, unlike SDF_RS's product). Returns whether any joint spawned.
     pub fn collide_cluster_rigid(
         &mut self,
         self_idx: usize,
@@ -792,9 +801,9 @@ impl SoftBody {
         body: &RigidBody,
         scratch: &mut Vec<usize>,
         epa: &mut EpaScratch,
-    ) {
+    ) -> bool {
         if !self.cfg.collisions.contains(SoftCollision::CL_RS) {
-            return;
+            return false;
         }
         let margin = body.shape.margin() + self.margin;
         let friction = self.cfg.k_df.min(body.friction);
@@ -847,12 +856,14 @@ impl SoftBody {
             }
         }
         self.joints.append(&mut new_joints);
+        !new_joints.is_empty()
     }
 
     /// CL_SS collision between two soft bodies' clusters (Bullet's
     /// `CollideCL_SS::ProcessSoftSoft`): one tree-tree pass over both
     /// cluster trees; every unconnected overlapping cluster pair closer
     /// than the combined margins spawns a joint on body A (`bodies[0]`).
+    /// Returns whether any joint spawned.
     pub fn collide_cluster_soft(
         &mut self,
         a_idx: usize,
@@ -860,7 +871,7 @@ impl SoftBody {
         b_idx: usize,
         pairs: &mut Vec<(usize, usize)>,
         epa: &mut EpaScratch,
-    ) {
+    ) -> bool {
         let margin = self.margin + other.margin;
         let friction = self.cfg.k_df.min(other.cfg.k_df);
         pairs.clear();
@@ -904,6 +915,7 @@ impl SoftBody {
             }
         }
         self.joints.append(&mut new_joints);
+        !new_joints.is_empty()
     }
 
     /// CL_SELF collision of one soft body with itself (Bullet's

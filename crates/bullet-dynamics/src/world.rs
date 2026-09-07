@@ -86,8 +86,23 @@ enum ProxyOwner {
     Free,
 }
 
+/// One side of a tracked contact pair (Bullet's collision-object kinds):
+/// a rigid body, a multibody link collider, or a whole soft body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionObject {
+    /// A rigid body.
+    Body(BodyHandle),
+    /// A multibody link collider (Bullet's `btMultiBodyLinkCollider`);
+    /// `link < 0` is the base collider (the internal sign convention).
+    Link { body: MultiBodyHandle, link: i32 },
+    /// A whole soft body (pair-level: individual nodes carry no stable
+    /// identity).
+    Soft(SoftBodyHandle),
+}
+
 /// A contact-pair lifecycle event, emitted after each step for every pair
-/// with at least one body opted in via [`RigidBody::collision_events`]
+/// with at least one side opted in via [`RigidBody::collision_events`],
+/// [`LinkCollider::collision_events`] or [`SoftBody::collision_events`]
 /// (Rapier's `CollisionEvent` model; Bullet has no equivalent — its
 /// `gContactAddedCallback` is a process-global function pointer fired per
 /// contact point). `a < b` always.
@@ -96,11 +111,60 @@ pub enum CollisionEvent {
     /// The pair began touching this step. `sensor` is set when either side
     /// has [`CollisionFlags::NO_CONTACT_RESPONSE`] — a trigger volume: no
     /// contact response is ever solved for it, only events and queries.
-    Started { a: BodyHandle, b: BodyHandle, sensor: bool },
+    Started {
+        a: CollisionObject,
+        b: CollisionObject,
+        sensor: bool,
+    },
     /// The pair stopped touching this step (separated past the breaking
     /// threshold, left the broad phase, got filtered by group/mask, or a
     /// body was removed).
-    Stopped { a: BodyHandle, b: BodyHandle, sensor: bool },
+    Stopped {
+        a: CollisionObject,
+        b: CollisionObject,
+        sensor: bool,
+    },
+}
+
+/// One side of the tracked-pair id: a kind tag over the object's slot
+/// payload, ordered kind-first (bodies, then links, then soft bodies) so a
+/// pair canonically sorts as `(min, max)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ContactKey(u8, u32, i32);
+
+impl ContactKey {
+    #[inline]
+    fn body(i: usize) -> Self {
+        Self(0, i as u32, 0)
+    }
+    #[inline]
+    fn link(mb: usize, link: i32) -> Self {
+        Self(1, mb as u32, link)
+    }
+    #[inline]
+    fn soft(i: usize) -> Self {
+        Self(2, i as u32, 0)
+    }
+    /// The key of a narrow-phase contact side (the mixed collider pass).
+    #[inline]
+    pub(crate) fn side(side: ContactSide) -> Self {
+        match side {
+            ContactSide::Rigid(i) => Self::body(i),
+            ContactSide::Link { mb, link } => Self::link(mb, link),
+        }
+    }
+    /// The public handle view of this side.
+    fn object(self) -> CollisionObject {
+        match self {
+            Self(0, i, _) => CollisionObject::Body(BodyHandle::from_index(i as usize)),
+            Self(1, mb, link) => CollisionObject::Link {
+                body: MultiBodyHandle::from_index(mb as usize),
+                link,
+            },
+            Self(2, i, _) => CollisionObject::Soft(SoftBodyHandle::from_index(i as usize)),
+            _ => unreachable!("contact keys carry kinds 0-2"),
+        }
+    }
 }
 
 /// Bullet's broad-phase pair filter (`btBroadphaseProxy::NeedsCollision`):
@@ -172,11 +236,11 @@ pub struct PhysicsWorld {
     /// (`disableCollisionsBetweenLinkedBodies`, Bullet's
     /// `checkCollideWithOverride`), sorted `(min, max)`, deduplicated.
     no_collision_pairs: Vec<(usize, usize)>,
-    /// Opt-in pairs that touched last step, sorted (`[min, max]` body
-    /// indices): the baseline of the Started/Stopped diff.
-    prev_touching: Vec<[u32; 2]>,
+    /// Opt-in pairs that touched last step, sorted (canonically ordered
+    /// [`ContactKey`] pairs): the baseline of the Started/Stopped diff.
+    prev_touching: Vec<(ContactKey, ContactKey)>,
     /// Opt-in pairs that touched this step, sorted after the pair pass.
-    touching: Vec<[u32; 2]>,
+    touching: Vec<(ContactKey, ContactKey)>,
     /// Collision events of the last step, cleared at the start of each
     /// step (Rapier's post-step drain buffer).
     contact_events: Vec<CollisionEvent>,
@@ -361,6 +425,14 @@ impl PhysicsWorld {
         {
             body.set_gravity(self.gravity);
         }
+        // A body with a motion state is placed at the pose the state
+        // reports (Bullet reads `getWorldTransform` in the `btRigidBody`
+        // constructor when a motion state is given).
+        if let Some(state) = &body.motion_state {
+            let (position, orientation) = crate::body::split_pose(state.initial_pose());
+            body.position = position;
+            body.orientation = orientation;
+        }
         let aabb = body
             .shape
             .world_aabb(body.position, body.orientation)
@@ -531,29 +603,28 @@ impl PhysicsWorld {
         // is emitted for pairs that were touching (Rapier reports removed
         // colliders the same way); the buffer survives until the next step
         // clears it, so callers see the removal right away.
-        let idx = index as u32;
+        let removed = ContactKey::body(index);
         let mut ended = Vec::new();
         self.prev_touching.retain(|p| {
-            let hit = p[0] == idx || p[1] == idx;
+            let hit = p.0 == removed || p.1 == removed;
             if hit {
                 ended.push(*p);
             }
             !hit
         });
-        self.touching.retain(|p| p[0] != idx && p[1] != idx);
-        for pair in ended {
-            let (a, b) = (pair[0] as usize, pair[1] as usize);
+        self.touching.retain(|p| p.0 != removed && p.1 != removed);
+        for (a, b) in ended {
             // Pairs tracked only for their overlap list emit no Stopped:
             // the list query simply stops reporting them (see
             // [`PhysicsWorld::overlapping`]).
-            if !(self.bodies[a].collision_events || self.bodies[b].collision_events) {
+            if !self.pair_opted_in(a, b) {
                 continue;
             }
             let sensor = self.pair_sensor(a, b);
             self.contact_events
                 .push(CollisionEvent::Stopped {
-                    a: BodyHandle::from_index(a),
-                    b: BodyHandle::from_index(b),
+                    a: a.object(),
+                    b: b.object(),
                     sensor,
                 });
         }
@@ -597,13 +668,20 @@ impl PhysicsWorld {
     /// for a body in no tracked pair (non-sensor, no events, untouched)
     /// returns an empty list.
     pub fn overlapping(&self, handle: BodyHandle) -> Vec<BodyHandle> {
-        let idx = handle.index() as u32;
+        let key = ContactKey::body(handle.index());
         let mut out = Vec::new();
         for pair in &self.prev_touching {
-            if pair[0] == idx {
-                out.push(BodyHandle::from_index(pair[1] as usize));
-            } else if pair[1] == idx {
-                out.push(BodyHandle::from_index(pair[0] as usize));
+            // The tracked pairs span all collision-object kinds; this query
+            // lists rigid bodies only.
+            let other = if pair.0 == key {
+                pair.1
+            } else if pair.1 == key {
+                pair.0
+            } else {
+                continue;
+            };
+            if other.0 == 0 {
+                out.push(BodyHandle::from_index(other.1 as usize));
             }
         }
         // The tracked pairs are a set (one entry per pair), so the other
@@ -623,15 +701,63 @@ impl PhysicsWorld {
         }
     }
 
-    /// Whether either body of the pair is a trigger volume
-    /// (`CF_NO_CONTACT_RESPONSE`).
-    fn pair_sensor(&self, a: usize, b: usize) -> bool {
-        self.bodies[a]
-            .collision_flags
-            .contains(CollisionFlags::NO_CONTACT_RESPONSE)
-            || self.bodies[b]
-                .collision_flags
-                .contains(CollisionFlags::NO_CONTACT_RESPONSE)
+    /// Whether either side of the pair is a trigger volume
+    /// (`CF_NO_CONTACT_RESPONSE`). Only rigid bodies carry the flag today.
+    fn pair_sensor(&self, a: ContactKey, b: ContactKey) -> bool {
+        let flag = |k: ContactKey| {
+            k.0 == 0
+                && self.bodies[k.1 as usize]
+                    .collision_flags
+                    .contains(CollisionFlags::NO_CONTACT_RESPONSE)
+        };
+        flag(a) || flag(b)
+    }
+
+    /// Whether either side of the pair is opted into collision events.
+    fn pair_opted_in(&self, a: ContactKey, b: ContactKey) -> bool {
+        self.side_opted_in(a) || self.side_opted_in(b)
+    }
+
+    /// The per-side event opt-in (rigid [`RigidBody::collision_events`],
+    /// [`LinkCollider::collision_events`], [`SoftBody::collision_events`]).
+    fn side_opted_in(&self, key: ContactKey) -> bool {
+        match key.0 {
+            0 => self.bodies[key.1 as usize].collision_events,
+            1 => {
+                let mb = &self.multibodies[key.1 as usize];
+                let col = if key.2 < 0 {
+                    mb.base_collider()
+                } else {
+                    mb.link_collider(key.2 as usize)
+                };
+                col.is_some_and(|c| c.collision_events)
+            }
+            2 => self.soft_bodies[key.1 as usize].collision_events,
+            _ => false,
+        }
+    }
+
+    /// Record or carry over a mixed pair's touch state (the counterpart of
+    /// the rigid pair pass's inline bookkeeping): `touched = None` marks a
+    /// skipped pair (a sleeping island, a margin artifact) whose prior
+    /// touch state freezes, `Some(bool)` is this step's detection result.
+    /// `pair` is the canonically ordered key pair.
+    fn track_pair(
+        &mut self,
+        pair: (ContactKey, ContactKey),
+        opted_in: bool,
+        touched: Option<bool>,
+    ) {
+        if !opted_in {
+            return;
+        }
+        let carry = match touched {
+            Some(t) => t,
+            None => self.prev_touching.binary_search(&pair).is_ok(),
+        };
+        if carry {
+            self.touching.push(pair);
+        }
     }
 
     /// Inner iterations for the multibody non-contact (joint) rows per outer
@@ -710,6 +836,45 @@ impl PhysicsWorld {
             {
                 *i -= 1;
             }
+        }
+        // Collision events: the soft body's touches end with a Stopped,
+        // like `remove_body` (its pairs' other sides stay alive). The
+        // surviving soft slots renumber, so their tracked keys shift down
+        // with them.
+        let removed = ContactKey::soft(index);
+        let mut ended = Vec::new();
+        self.prev_touching.retain(|p| {
+            let hit = p.0 == removed || p.1 == removed;
+            if hit {
+                ended.push(*p);
+            }
+            !hit
+        });
+        self.touching.retain(|p| p.0 != removed && p.1 != removed);
+        let renumber = |k: &mut ContactKey| {
+            if k.0 == 2 && k.1 > index as u32 {
+                k.1 -= 1;
+            }
+        };
+        for p in &mut self.prev_touching {
+            renumber(&mut p.0);
+            renumber(&mut p.1);
+        }
+        for p in &mut self.touching {
+            renumber(&mut p.0);
+            renumber(&mut p.1);
+        }
+        for (a, b) in ended {
+            if !self.pair_opted_in(a, b) {
+                continue;
+            }
+            let sensor = self.pair_sensor(a, b);
+            self.contact_events
+                .push(CollisionEvent::Stopped {
+                    a: a.object(),
+                    b: b.object(),
+                    sensor,
+                });
         }
     }
 

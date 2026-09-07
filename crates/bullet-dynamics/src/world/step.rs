@@ -383,14 +383,26 @@ impl PhysicsWorld {
                     &mut self.epa_scratch,
                 )
                 else {
+                    // Detection found nothing: the mixed pair reports a
+                    // stopped touch (event-tracked sides only).
+                    let (ka, kb) = (ContactKey::side(side_a), ContactKey::side(side_b));
+                    let pair = if ka <= kb { (ka, kb) } else { (kb, ka) };
+                    let opted_in = self.pair_opted_in(pair.0, pair.1);
+                    self.track_pair(pair, opted_in, Some(false));
                     continue;
                 };
+                let (ka, kb) = (ContactKey::side(side_a), ContactKey::side(side_b));
+                let pair = if ka <= kb { (ka, kb) } else { (kb, ka) };
+                let opted_in = self.pair_opted_in(pair.0, pair.1);
                 // Skip pairs where nothing can move (a sleeping multibody on
                 // static geometry); anything touching an active side is woken
                 // in stage 5b before the rows are assembled.
                 let a_awake = side_active_owner(side_a, &self.bodies, &self.multibodies);
                 let b_awake = side_active_owner(side_b, &self.bodies, &self.multibodies);
                 if !a_awake && !b_awake {
+                    // A sleeping collider pair freezes its touch state like
+                    // the sleeping rigid pairs do.
+                    self.track_pair(pair, opted_in, None);
                     continue;
                 }
                 self.mb_pending_contacts.push(PendingContact {
@@ -400,6 +412,7 @@ impl PhysicsWorld {
                     restitution: ra * rb,
                     manifold,
                 });
+                self.track_pair(pair, opted_in, Some(true));
                 continue;
             };
             let pair = (i.min(j), i.max(j));
@@ -439,15 +452,13 @@ impl PhysicsWorld {
                 // previous step's entry over so no event churns while the
                 // island sleeps. Sensor pairs ride the same carry-over for
                 // their persistent overlap list (see [`PhysicsWorld::overlapping`]).
+                let pair = (ContactKey::body(i.min(j)), ContactKey::body(i.max(j)));
                 if (self.bodies[i].collision_events
                     || self.bodies[j].collision_events
-                    || self.pair_sensor(i, j))
-                    && self
-                        .prev_touching
-                        .binary_search(&[i.min(j) as u32, i.max(j) as u32])
-                        .is_ok()
+                    || self.pair_sensor(pair.0, pair.1))
+                    && self.prev_touching.binary_search(&pair).is_ok()
                 {
-                    self.touching.push([i.min(j) as u32, i.max(j) as u32]);
+                    self.touching.push(pair);
                 }
                 continue;
             }
@@ -508,7 +519,8 @@ impl PhysicsWorld {
                     if !self.refresh_out.is_empty()
                         && (a.collision_events || b.collision_events || no_response)
                     {
-                        self.touching.push([i.min(j) as u32, i.max(j) as u32]);
+                        self.touching
+                            .push((ContactKey::body(i.min(j)), ContactKey::body(i.max(j))));
                     }
                     served_from_cache = true;
                 }
@@ -556,7 +568,8 @@ impl PhysicsWorld {
                     }
                 }
                 if a.collision_events || b.collision_events || no_response {
-                    self.touching.push([i.min(j) as u32, i.max(j) as u32]);
+                    self.touching
+                        .push((ContactKey::body(i.min(j)), ContactKey::body(i.max(j))));
                 }
             } else {
                 // Detection found nothing: the pair separated past the
@@ -567,7 +580,7 @@ impl PhysicsWorld {
 
         // 5e. Collision events: diff this step's touching pairs against the
         // previous step's (Rapier's post-step event drain). Only pairs with
-        // an opted-in body are tracked, so scenes without listeners keep
+        // an opted-in side are tracked, so scenes without listeners keep
         // both sets empty; a pair skipped because its island sleeps carries
         // its state over instead of churning.
         self.touching.sort_unstable();
@@ -600,24 +613,24 @@ impl PhysicsWorld {
                     continue;
                 }
             };
-            let (a, b) = (pair[0] as usize, pair[1] as usize);
+            let (a, b) = pair;
             // Pairs tracked only for their overlap list (neither side
-            // opted into events) emit nothing: events stay per-body
+            // opted into events) emit nothing: events stay per-side
             // opt-in, the list is the sensor query surface.
-            if !(self.bodies[a].collision_events || self.bodies[b].collision_events) {
+            if !self.pair_opted_in(a, b) {
                 continue;
             }
             let sensor = self.pair_sensor(a, b);
             let event = if started {
                 CollisionEvent::Started {
-                    a: BodyHandle::from_index(a),
-                    b: BodyHandle::from_index(b),
+                    a: a.object(),
+                    b: b.object(),
                     sensor,
                 }
             } else {
                 CollisionEvent::Stopped {
-                    a: BodyHandle::from_index(a),
-                    b: BodyHandle::from_index(b),
+                    a: a.object(),
+                    b: b.object(),
                     sensor,
                 }
             };
@@ -846,6 +859,25 @@ impl PhysicsWorld {
             }
         }
 
+        // 7m. Motion states: hand the final pose to the render side
+        // (Bullet's `synchronizeMotionStates` after `integrateTransforms`).
+        // Active non-static/kinematic bodies only — a sleeping body's pose
+        // did not change, static bodies have no motion to report (Bullet's
+        // `synchronizeSingleMotionState` gate).
+        if self.bodies.iter().any(|b| b.motion_state.is_some()) {
+            for body in &mut self.bodies {
+                if !body.is_active() || body.is_static_or_kinematic() || body.motion_state.is_none()
+                {
+                    continue;
+                }
+                let pose = crate::body::pose_transform(body.position, body.orientation);
+                body.motion_state
+                    .as_mut()
+                    .expect("motion state checked above")
+                    .synchronize(&pose);
+            }
+        }
+
         // 7s. Soft bodies: solve the position-based constraint set. Bullet
         // runs `solveSoftBodiesConstraints` after the rigid bodies are fully
         // stepped (solved *and* integrated), so contacts read the solved
@@ -915,7 +947,8 @@ impl PhysicsWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body::ActivationState;
+    use bullet_math::Transform;
+    use crate::body::{ActivationState, MotionState};
     use crate::body::filter_groups;
     use approx::assert_relative_eq;
 
@@ -1046,7 +1079,14 @@ mod tests {
                 }
             }
         }
-        assert_eq!(started, Some((BodyHandle::from_index(0), ball, true)));
+        assert_eq!(
+            started,
+            Some((
+                CollisionObject::Body(BodyHandle::from_index(0)),
+                CollisionObject::Body(ball),
+                true
+            ))
+        );
         assert!(
             world.body(ball).position.y < -1.0,
             "trigger did not let the ball through: y = {}",
@@ -1152,8 +1192,158 @@ mod tests {
         else {
             panic!("removal did not emit Stopped");
         };
-        assert_eq!((a, b), (BodyHandle::from_index(0), ball));
+        assert_eq!(
+            (a, b),
+            (
+                CollisionObject::Body(BodyHandle::from_index(0)),
+                CollisionObject::Body(ball)
+            )
+        );
         assert!(!sensor);
+    }
+
+    /// A multibody base collider is a first-class event source: a rigid
+    /// ball dropped onto it emits `Started` with the collider side reported
+    /// as a [`CollisionObject::Link`], and removing the ball ends the touch
+    /// with a `Stopped`.
+    #[test]
+    fn link_collider_emits_events() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        let mut mb = crate::multibody::MultiBody::new(0, 1.0, Vector3::ONE, true, false);
+        mb.finalize_multidof();
+        mb.set_base_collider(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            0.5,
+            0.0,
+        );
+        mb.base_pos = Vector3::ZERO;
+        world.add_multibody(mb);
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 3.0, 0.0),
+                1.0,
+            )
+            .collision_events(true),
+        );
+        let dt = 1.0 / 60.0;
+        let mut started = None;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+            for &ev in world.contact_events() {
+                if let CollisionEvent::Started { a, b, sensor } = ev {
+                    started = Some((a, b, sensor));
+                }
+            }
+        }
+        let (a, b, sensor) = started.expect("rigid ball never touched the link collider");
+        let link = CollisionObject::Link {
+            body: MultiBodyHandle::from_index(0),
+            link: -1,
+        };
+        assert!(
+            (a == CollisionObject::Body(ball) && b == link)
+                || (a == link && b == CollisionObject::Body(ball)),
+            "unexpected pair: {a:?} / {b:?}"
+        );
+        assert!(!sensor);
+        world.remove_body(ball);
+        assert!(
+            world
+                .contact_events()
+                .iter()
+                .any(|e| matches!(e, CollisionEvent::Stopped { .. })),
+            "removal did not end the collider touch"
+        );
+    }
+
+    /// A soft body is a pair-level event source: a rope landing on an
+    /// opt-in plate emits `Started` with the rope side reported as a
+    /// [`CollisionObject::Soft`].
+    #[test]
+    fn soft_body_pair_events() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(3.0, 0.5, 3.0)),
+                Vector3::ZERO,
+            )
+            .collision_events(true),
+        );
+        let mut rope = crate::softbody::helpers::create_rope(
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+            8,
+            0,
+        );
+        rope.collision_events = true;
+        world.add_soft_body(rope);
+        let dt = 1.0 / 60.0;
+        let mut started = false;
+        for _ in 0..120 {
+            world.step_simulation(dt);
+            if world.contact_events().iter().any(|e| {
+                matches!(e, CollisionEvent::Started { a, b, .. }
+                    if matches!(a, CollisionObject::Soft(_)) || matches!(b, CollisionObject::Soft(_)))
+            }) {
+                started = true;
+            }
+        }
+        assert!(started, "the rope never touched the plate");
+    }
+
+    /// Removing a soft body ends its touches with a `Stopped` and the
+    /// surviving soft slots renumber inside the tracked keys (the next
+    /// step's diff stays consistent).
+    #[test]
+    fn remove_soft_body_emits_stopped() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(3.0, 0.5, 3.0)),
+                Vector3::ZERO,
+            )
+            .collision_events(true),
+        );
+        let mut rope = crate::softbody::helpers::create_rope(
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+            8,
+            0,
+        );
+        rope.collision_events = true;
+        world.add_soft_body(rope);
+        // A second soft body behind the rope in slot order: removing the
+        // rope shifts its tracked keys down by one.
+        let rope2 = crate::softbody::helpers::create_rope(
+            Vector3::new(2.0, 5.0, 0.0),
+            Vector3::new(2.0, 4.0, 0.0),
+            8,
+            0,
+        );
+        world.add_soft_body(rope2);
+        let dt = 1.0 / 60.0;
+        let mut saw_started = false;
+        for _ in 0..120 {
+            world.step_simulation(dt);
+            saw_started |= !world.contact_events().is_empty();
+        }
+        assert!(saw_started, "no events before the removal");
+        world.remove_soft_body(SoftBodyHandle::from_index(0));
+        let stopped = world
+            .contact_events()
+            .iter()
+            .filter_map(|e| match e {
+                CollisionEvent::Stopped { a, b, .. } => Some((a, b)),
+                _ => None,
+            })
+            .any(|(a, b)| {
+                matches!(a, CollisionObject::Soft(_)) || matches!(b, CollisionObject::Soft(_))
+            });
+        assert!(stopped, "removal did not end the soft body's touches");
     }
 
     /// The CCD sweep respects the group/mask filter.
@@ -1849,5 +2039,97 @@ mod tests {
             "the spin should be drained: wz = {}",
             w.z
         );
+    }
+
+    // ---- motion states (Bullet's `btMotionState`)
+
+    /// Records the poses handed to [`MotionState::synchronize`], shared with
+    /// the test through an `Rc<RefCell>` (the world owns the state itself).
+    struct RecordingState {
+        initial: Transform,
+        log: std::rc::Rc<core::cell::RefCell<Vec<Transform>>>,
+    }
+
+    impl MotionState for RecordingState {
+        fn initial_pose(&self) -> Transform {
+            self.initial
+        }
+        fn synchronize(&mut self, pose: &Transform) {
+            self.log.borrow_mut().push(*pose);
+        }
+    }
+
+    /// A body with a motion state is placed at the state's pose (Bullet's
+    /// constructor `getWorldTransform` read), and every step pushes the
+    /// final pose back (Bullet's `synchronizeMotionStates`).
+    #[test]
+    fn motion_state_places_body_and_synchronizes() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        let log = std::rc::Rc::new(core::cell::RefCell::new(Vec::new()));
+        let initial = crate::body::pose_transform(Vector3::new(1.0, 5.0, 2.0), Quaternion::IDENTITY);
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::ZERO,
+                1.0,
+            )
+            .motion_state(Box::new(RecordingState {
+                initial,
+                log: log.clone(),
+            })),
+        );
+        // The constructor position is overridden by the motion state.
+        let p = world.body(ball).position;
+        assert_relative_eq!(p.x, 1.0, epsilon = 1e-6);
+        assert_relative_eq!(p.y, 5.0, epsilon = 1e-6);
+        assert_relative_eq!(p.z, 2.0, epsilon = 1e-6);
+
+        world.step_simulation(1.0 / 60.0);
+        let received = log.borrow();
+        assert_eq!(received.len(), 1, "one synchronize per step");
+        let (_, _, translation) = received[0].to_scale_rotation_translation();
+        // Semi-implicit Euler: x_{n+1} = x_n + (g·dt)·dt.
+        assert_relative_eq!(translation.x, 1.0, epsilon = 1e-5);
+        assert_relative_eq!(
+            translation.y,
+            5.0 - 10.0 * (1.0 / 60.0) * (1.0 / 60.0),
+            epsilon = 1e-5
+        );
+        assert_relative_eq!(translation.z, 2.0, epsilon = 1e-5);
+    }
+
+    /// Static and kinematic bodies never synchronize (Bullet's
+    /// `synchronizeSingleMotionState` gate: `!isStaticOrKinematicObject`).
+    #[test]
+    fn motion_state_skips_static_and_kinematic() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        let immovables = [
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.0, -0.5, 0.0),
+            ),
+            RigidBody::new_kinematic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.0, 4.0, 0.0),
+            ),
+        ];
+        for make in immovables {
+            let log = std::rc::Rc::new(core::cell::RefCell::new(Vec::new()));
+            world.add_body(
+                make.motion_state(Box::new(RecordingState {
+                    initial: crate::body::pose_transform(Vector3::ZERO, Quaternion::IDENTITY),
+                    log: log.clone(),
+                })),
+            );
+            for _ in 0..10 {
+                world.step_simulation(1.0 / 60.0);
+            }
+            assert!(
+                log.borrow().is_empty(),
+                "immovable bodies must not synchronize"
+            );
+        }
     }
 }

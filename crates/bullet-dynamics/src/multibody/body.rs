@@ -141,6 +141,9 @@ pub struct LinkCollider {
     /// Collision filter mask (default
     /// [`filter_groups::ALL`](crate::body::filter_groups::ALL)).
     pub collision_mask: u16,
+    /// Whether pairs this collider touches emit collision events (the
+    /// per-side opt-in, like [`RigidBody::collision_events`]).
+    pub collision_events: bool,
 }
 
 /// A Featherstone articulated rigid body.
@@ -1835,6 +1838,7 @@ impl MultiBody {
             restitution,
             collision_group: crate::body::filter_groups::DEFAULT,
             collision_mask: crate::body::filter_groups::ALL,
+            collision_events: false,
         });
     }
 
@@ -1852,6 +1856,7 @@ impl MultiBody {
             restitution,
             collision_group: crate::body::filter_groups::DEFAULT,
             collision_mask: crate::body::filter_groups::ALL,
+            collision_events: false,
         });
     }
 
