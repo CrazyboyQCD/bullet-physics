@@ -56,24 +56,29 @@ struct Face {
     plane_distance: Real,
 }
 
-/// Internal outcome of an EPA run. Kept private: the public [`penetration`]
-/// returns the best `(normal, depth)` of the *intact* hull in every exit, and
-/// its sole caller (`convex_convex`) rejects non-positive depths, so a
-/// public result type is not warranted. Tests assert on this to pin the
-/// failure paths.
+/// Internal outcome of an EPA run. Kept crate-private: the public
+/// [`penetration`] returns the best `(normal, depth)` of the *intact* hull in
+/// every exit, and its callers reject non-positive depths, so a public
+/// result type is not warranted. Tests assert on this to pin the failure
+/// paths, and `convex_convex` consumes it to mirror Bullet's per-status
+/// acceptance semantics.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum EpaStatus {
+pub(crate) enum EpaStatus {
     /// The closest face bounds the polytope (support point within
-    /// `EPSILON` of it): normal convergence.
+    /// `EPSILON` of it): normal convergence. Bullet's `AccuraryReached`.
     Converged,
     /// A degenerate expansion was rejected before the hull was mutated
     /// (including the fully degenerate seed returning the zero result) —
-    /// Bullet's `InvalidHull` early exit.
+    /// Bullet's `InvalidHull`. Bullet's expand is transactional too (the
+    /// hull is committed only after a fully valid horizon), so this mirrors
+    /// its "return the intact hull's best face" exit.
     DegenerateExpansion,
-    /// `MAX_ITERATIONS` expansions ran without converging.
+    /// `MAX_ITERATIONS` expansions ran without converging. Bullet's loop
+    /// simply ends after `EPA_MAX_ITERATIONS` with the status still `Valid`
+    /// and reports the current best face — accepted there as well.
     IterationLimit,
     /// `MAX_VERTICES` reached; the polytope stopped growing (Bullet's
-    /// `OutOfVertices`).
+    /// `OutOfVertices`, which also reports the best face and is accepted).
     VertexLimit,
 }
 
@@ -94,6 +99,19 @@ pub fn penetration(
 ) -> (Vector3, Real) {
     let (_, normal, depth) = penetration_inner(simplex, support, scratch);
     (normal, depth)
+}
+
+/// Crate-internal variant of [`penetration`] that also reports the
+/// [`EpaStatus`], so the contact layer can mirror Bullet's acceptance
+/// semantics (every non-fatal exit reports the intact hull's best face and
+/// is accepted; only a zero/negative depth — the degenerate seed's zero
+/// result or Bullet's `FallBack` with `m_depth = 0` — yields no contact).
+pub(crate) fn penetration_with_status(
+    simplex: &[Vector3; 4],
+    support: impl Fn(Vector3) -> Vector3,
+    scratch: &mut EpaScratch,
+) -> (EpaStatus, Vector3, Real) {
+    penetration_inner(simplex, support, scratch)
 }
 
 /// Pooled EPA buffers (capacity survives `clear()`, so steady-state calls

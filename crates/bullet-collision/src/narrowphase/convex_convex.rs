@@ -57,7 +57,27 @@ pub fn convex_convex(
                 -distance,
             )]));
         }
-        gjk::GjkOutcome::Overlap(simplex) => simplex,
+        gjk::GjkOutcome::Overlap(simplex) => {
+            // Simplex contract (audited against the two `Overlap` producers
+            // in `gjk_contact`, not just its doc comment): (a) exactly four
+            // points — the `ReduceStep::Inside` branch constructs the simplex
+            // with `len: 4`, and the degeneracy-gate branch explicitly
+            // requires `points().len() == 4`; (b) a structurally
+            // non-degenerate tetrahedron — `reduce_tetrahedron` routes
+            // coplanar/duplicate-vertex inputs (determinant below 1e-12) to
+            // its best-face fallback, so `Inside` implies a finite volume;
+            // (c) the closed tetrahedron encloses the origin — `Inside` and
+            // `solve_tetrahedron`'s `true` are exact sign tests over all
+            // four faces (the origin on a face counts as touching, which
+            // EPA accepts like Bullet). The assert pins this for refactors;
+            // EPA additionally re-validates the seed atomically.
+            debug_assert_eq!(
+                simplex.points().len(),
+                4,
+                "GJK Overlap must carry a full tetrahedron"
+            );
+            simplex
+        }
     };
     let mut seed = [Vector3::ZERO; 4];
     seed.copy_from_slice(&simplex.points()[..4]);
@@ -78,7 +98,20 @@ pub fn convex_convex(
     };
     // `normal` points from A to B (EPA convention); `core_depth` is the core
     // overlap, the true overlap adds the margin shell back.
-    let (normal, core_depth) = epa::penetration(&seed, support, scratch);
+    //
+    // Per-status acceptance mirrors `btGjkEpa2` (checked against
+    // `EPA::Evaluate` + `btGjkEpaSolver2::Penetration`, not assumed): every
+    // non-fatal exit — `AccuraryReached`, the iteration budget simply running
+    // out (Bullet's status stays `Valid`), `InvalidHull` after a
+    // *transactional* expand rejection, and `OutOfVertices` — reports the
+    // best face of the intact hull and is accepted by Bullet's depth solver.
+    // Only the seed-failure fallback (`m_depth = 0`; our degenerate-seed zero
+    // result) yields no contact, which the `core_depth <= 0` check below
+    // already covers. The status is therefore carried for documentation and
+    // tests, not to filter contacts — filtering would *diverge* from Bullet.
+    let (status, normal, core_depth) =
+        epa::penetration_with_status(&seed, support, scratch);
+    let _ = status;
     if core_depth <= 0.0 {
         return None;
     }
@@ -93,6 +126,20 @@ pub fn convex_convex(
     // overlap; the resulting contact position was garbage, wrecking the
     // solver's torque arms (found by the `mesh` parity scene: bodies neither
     // tumbled nor rolled downhill like Bullet's).
+    //
+    // Witness invariant (audited against `btGjkEpaSolver2::Penetration`):
+    // Bullet computes `witnesses[1] = w0 - normal * depth`, where `w0` is
+    // the best face's A-side support points interpolated with the EPA
+    // barycentric weights — the *same* A-witness-then-push structure as this
+    // formula. Both land on B's deep support plane (`n . position` equals
+    // B's support along `-n`, which is what carries the depth) and inherit
+    // A's tangential coordinates: they coincide with the true B witness
+    // whenever the facing support points are tangentially aligned (spheres,
+    // parallel faces — the parity-covered cases) and carry a bounded
+    // tangential offset otherwise (ours: `|supportA(n) - w0|`; Bullet's:
+    // the face-interpolation spread). Recorded as a deviation; not changed
+    // here — the interpolation variant would rewrite this layer's
+    // parity-bit-exact output.
     let point_a = shape_a.support_world(position_a, orientation_a, normal);
     let position = point_a - normal * depth;
     Some(ContactManifold::from_points(vec![ContactPoint::new(
@@ -300,5 +347,301 @@ mod tests {
         let p = m.points[0];
         assert_relative_eq!(p.normal.x, 1.0, epsilon = 1e-3);
         assert_relative_eq!(p.penetration, -0.01, epsilon = 1e-3);
+    }
+
+    // ------------------------------------------------------------------
+    // Robustness suite (convex-convex hardening round). Every test
+    // asserts: no panic, finite normal/depth/position, a sensible normal
+    // direction, non-negative depth for accepted penetrations, and clean
+    // `None` for rejected contacts.
+    // ------------------------------------------------------------------
+
+    fn contact_manifold(
+        a: &CollisionShape,
+        pa: Vector3,
+        qa: Quaternion,
+        b: &CollisionShape,
+        pb: Vector3,
+        qb: Quaternion,
+    ) -> Option<ContactManifold> {
+        convex_convex(
+            a,
+            pa,
+            qa,
+            b,
+            pb,
+            qb,
+            None,
+            a.contact_breaking_threshold().min(b.contact_breaking_threshold()),
+            &mut EpaScratch::default(),
+        )
+    }
+
+    fn assert_clean(p: &ContactPoint, separation: Vector3) {
+        let n = p.normal;
+        assert!(n.x.is_finite() && n.y.is_finite() && n.z.is_finite());
+        assert!(p.penetration.is_finite(), "depth must be finite");
+        assert!(p.position.x.is_finite() && p.position.y.is_finite() && p.position.z.is_finite());
+        assert!(n.dot(separation.normalize_or_zero()) > 0.0, "normal must face the separation direction");
+    }
+
+    /// Runtime pin of the audited `GjkOutcome::Overlap` contract: the
+    /// simplex handed to EPA always carries the full tetrahedron.
+    #[test]
+    fn overlap_simplex_carries_full_tetrahedron() {
+        let a = CollisionShape::box_shape(Vector3::splat(1.0));
+        let b = CollisionShape::sphere(0.5);
+        // Deep overlap (the sphere's core well inside the box's core).
+        match gjk::gjk_contact(
+            &a,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &b,
+            Vector3::new(0.6, 0.0, 0.0),
+            Quaternion::IDENTITY,
+            None,
+            0.02,
+        ) {
+            gjk::GjkOutcome::Overlap(simplex) => {
+                assert_eq!(simplex.points().len(), 4);
+            }
+            other => panic!("expected overlap, got {other:?}"),
+        }
+    }
+
+    /// The status propagates through the crate-internal EPA API the contact
+    /// layer consumes; a normal overlap reports `Converged`.
+    #[test]
+    fn epa_status_propagates_through_contact_layer() {
+        let a = CollisionShape::box_shape(Vector3::splat(1.0));
+        let b = CollisionShape::sphere(0.5);
+        let simplex = match gjk::gjk_contact(
+            &a,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &b,
+            Vector3::new(0.6, 0.0, 0.0),
+            Quaternion::IDENTITY,
+            None,
+            0.02,
+        ) {
+            gjk::GjkOutcome::Overlap(s) => s,
+            other => panic!("expected overlap, got {other:?}"),
+        };
+        let mut seed = [Vector3::ZERO; 4];
+        seed.copy_from_slice(&simplex.points()[..4]);
+        let support = |dir: Vector3| {
+            gjk::core_support_minkowski(
+                &a, Vector3::ZERO, Quaternion::IDENTITY, &b,
+                Vector3::new(0.6, 0.0, 0.0), Quaternion::IDENTITY, dir,
+            )
+        };
+        let (status, normal, depth) =
+            epa::penetration_with_status(&seed, support, &mut EpaScratch::default());
+        assert_eq!(status, epa::EpaStatus::Converged);
+        assert!(depth > 0.0 && depth.is_finite());
+        assert!(normal.x.is_finite() && normal.y.is_finite() && normal.z.is_finite());
+    }
+
+    /// Witness checks for an off-axis asymmetric hull against a sphere: the
+    /// contact must land on B's deep support plane (`n . position == n .
+    /// supportB(-n)`), with coherent normal and depth.
+    #[test]
+    fn witness_asymmetric_hull_vs_sphere_on_support_plane() {
+        let hull = CollisionShape::convex_hull(vec![
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(-1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.0, 0.0, -1.0),
+        ]);
+        let sphere = CollisionShape::sphere(0.5);
+        let m = contact_manifold(
+            &hull,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &sphere,
+            Vector3::new(1.25, 0.3, 0.0),
+            Quaternion::IDENTITY,
+        )
+        .unwrap();
+        let p = &m.points[0];
+        assert_clean(p, Vector3::new(0.25, 0.3, 0.0));
+        assert!(p.penetration > 0.0);
+        // B's deep support plane: the sphere's surface point along -normal.
+        let plane_b = p.normal.dot(
+            sphere.support_world(
+                Vector3::new(1.25, 0.3, 0.0),
+                Quaternion::IDENTITY,
+                -p.normal,
+            ),
+        );
+        assert_relative_eq!(p.normal.dot(p.position), plane_b, epsilon = 2e-2);
+    }
+
+    /// Rotated asymmetric box pair: coherent normal/depth and the same
+    /// support-plane invariant under rotation.
+    #[test]
+    fn witness_rotated_box_vs_box_on_support_plane() {
+        let a = CollisionShape::box_shape(Vector3::new(1.0, 0.4, 0.6));
+        let b = CollisionShape::box_shape(Vector3::splat(0.5));
+        let qa = Quaternion::from_rotation_z(0.6);
+        let qb = Quaternion::from_rotation_z(-0.35);
+        let pb = Vector3::new(1.3, 0.25, 0.1);
+        let m = contact_manifold(&a, Vector3::ZERO, qa, &b, pb, qb).unwrap();
+        let p = &m.points[0];
+        assert_clean(p, pb);
+        assert!(p.penetration > 0.0);
+        let plane_b = p.normal.dot(b.support_world(pb, qb, -p.normal));
+        assert_relative_eq!(p.normal.dot(p.position), plane_b, epsilon = 2e-2);
+    }
+
+    /// Elongated hull against a hull: finite, plane-consistent, sane
+    /// direction — the tangential-offset regime of the documented witness
+    /// invariant must not produce garbage.
+    #[test]
+    fn witness_elongated_hull_vs_hull_stays_clean() {
+        let a = CollisionShape::box_shape(Vector3::new(1.5, 0.05, 0.05));
+        let b = CollisionShape::box_shape(Vector3::new(0.3, 0.3, 0.3));
+        let qa = Quaternion::from_rotation_z(0.25);
+        let pb = Vector3::new(1.7, 0.2, 0.0);
+        let m = contact_manifold(&a, Vector3::ZERO, qa, &b, pb, Quaternion::IDENTITY).unwrap();
+        let p = &m.points[0];
+        assert_clean(p, pb);
+        assert!(p.penetration > 0.0);
+        let plane_b = p.normal.dot(b.support_world(pb, Quaternion::IDENTITY, -p.normal));
+        assert_relative_eq!(p.normal.dot(p.position), plane_b, epsilon = 2e-2);
+    }
+
+    /// Unequal margins (sphere 0.25 vs box 0.04): the deep-overlap depth is
+    /// the true full-shape overlap — core depth plus both margins.
+    #[test]
+    fn witness_unequal_margins_deep_overlap() {
+        let a = CollisionShape::box_shape(Vector3::splat(1.0));
+        let b = CollisionShape::sphere(0.25);
+        let m = contact_manifold(
+            &a,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &b,
+            Vector3::new(0.0, 0.9, 0.0),
+            Quaternion::IDENTITY,
+        )
+        .unwrap();
+        let p = &m.points[0];
+        assert_clean(p, Vector3::new(0.0, 0.9, 0.0));
+        // Sphere bottom at 0.65, box top at 1.0: true overlap 0.35.
+        assert_relative_eq!(p.penetration, 0.35, epsilon = 2e-3);
+        assert_relative_eq!(p.position.y, 0.65, epsilon = 2e-3);
+        assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-3);
+    }
+
+    /// Gradual transition from the margin band (walk-resolved) into deep
+    /// overlap (EPA): the reported quantities must stay within a
+    /// step-proportional envelope across the algorithmic path switch —
+    /// small jumps at the transition are expected, geometric ones are not.
+    #[test]
+    fn band_to_epa_transition_stays_continuous() {
+        let a = CollisionShape::box_shape(Vector3::splat(1.0));
+        let b = CollisionShape::sphere(0.5);
+        let step = 0.01;
+        // From 0.18 band overlap down to 0.95 deep overlap.
+        let mut prev: Option<(Real, Real, Real)> = None; // (normal.y, penetration, position.y)
+        for i in 0..78 {
+            let py = 1.32 - step * i as Real;
+            let Some(m) = contact_manifold(
+                &a,
+                Vector3::ZERO,
+                Quaternion::IDENTITY,
+                &b,
+                Vector3::new(0.0, py, 0.0),
+                Quaternion::IDENTITY,
+            ) else {
+                // A sample can sit exactly on the core-shell boundary
+                // (sphere core touching the box's core face), where the
+                // walk's overlap resolution is degenerate by construction;
+                // skip it and re-anchor the continuity chain.
+                prev = None;
+                continue;
+            };
+            let p = &m.points[0];
+            assert!(
+                (p.normal.y - 1.0).abs() <= 5e-2,
+                "normal flip at py = {py}: n.y = {}",
+                p.normal.y
+            );
+            assert!(p.penetration.is_finite() && p.position.y.is_finite());
+            if let Some((pn, pd, pp)) = prev {
+                let jump = 2.5 * step + 2e-3;
+                assert!(
+                    (p.penetration - pd).abs() <= jump,
+                    "penetration jump {} at py = {py}",
+                    (p.penetration - pd).abs()
+                );
+                assert!(
+                    (p.position.y - pp).abs() <= jump,
+                    "position jump {} at py = {py}",
+                    (p.position.y - pp).abs()
+                );
+                assert!(p.normal.y * pn > 0.5, "normal direction change at py = {py}");
+            }
+            prev = Some((p.normal.y, p.penetration, p.position.y));
+        }
+    }
+
+    /// Exact touching (sphere gap = 0): either a zero-depth contact or a
+    /// clean `None` — never a panic, NaN, or a spurious deep penetration.
+    #[test]
+    fn exact_touching_is_clean() {
+        let a = CollisionShape::sphere(0.5);
+        let b = CollisionShape::sphere(0.5);
+        // Below the GJK overlap resolution — a clean `None` is acceptable.
+        if let Some(m) = contact_manifold(
+            &a,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &b,
+            Vector3::new(1.0, 0.0, 0.0),
+            Quaternion::IDENTITY,
+        ) {
+            let p = &m.points[0];
+            assert!(p.penetration.is_finite() && p.penetration.abs() <= 1e-3);
+            assert_relative_eq!(p.normal.x, 1.0, epsilon = 1e-2);
+        }
+    }
+
+    /// Tiny overlap and tiny separation near the surface: both must stay
+    /// finite and proportional, whichever path (band walk or EPA) resolves.
+    #[test]
+    fn tiny_overlap_and_separation_stay_proportional() {
+        let a = CollisionShape::sphere(0.5);
+        let b = CollisionShape::sphere(0.5);
+        // 1e-4 overlap: any reported contact must be of that order.
+        if let Some(m) = contact_manifold(
+            &a,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &b,
+            Vector3::new(1.0 - 1e-4, 0.0, 0.0),
+            Quaternion::IDENTITY,
+        ) {
+            let p = &m.points[0];
+            assert!(p.penetration.is_finite() && p.penetration.abs() <= 0.1);
+            assert!(p.normal.x.is_finite());
+        }
+        // 1e-4 separation inside the band: a velocity-only contact.
+        if let Some(m) = contact_manifold(
+            &a,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            &b,
+            Vector3::new(1.0 + 1e-4, 0.0, 0.0),
+            Quaternion::IDENTITY,
+        ) {
+            let p = &m.points[0];
+            assert!(p.penetration.is_finite() && p.penetration.abs() <= 0.1);
+            assert!(p.penetration <= 0.0, "separated pair must not report penetration");
+        }
     }
 }
