@@ -20,7 +20,8 @@ sources on 2026-08-24; implementation lands in phases (§6).
 
 **Out of scope (later or never)**
 - Articulated warm starting (`SOLVER_USE_ARTICULATED_WARMSTARTING`, off by
-  default in Bullet) and `btMultiBodyJointFeedback` — follow-ups.
+  default in Bullet) — unported; `btMultiBodyJointFeedback` landed 2026-08-26
+  (§6 phase E).
 - Split impulse for multibody contacts — Bullet does not implement it either
   (the branch is commented out in `setupMultiBodyContactConstraint`).
 - MLCP solver, RK4, kinematic links — unchanged roadmap items.

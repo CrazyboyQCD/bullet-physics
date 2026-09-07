@@ -1,9 +1,9 @@
 # Parity Harness — frame-by-frame numerical comparison with Bullet
 
 > Design for verifying that this Rust reimplementation reproduces Bullet's
-> behavior numerically, not just semantically. All seven scenes are landed in
+> behavior numerically, not just semantically. All eight scenes are landed in
 > both precisions (f32 + f64 pairs, 2026-08-14; `composite_consumer`
-> 2026-09-03); see `docs/bullet-compare.md`
+> 2026-09-03; `rolling` 2026-09-07); see `docs/bullet-compare.md`
 > for the ledger. This document records the harness design and run protocol.
 
 ## Goal and key preconditions
@@ -48,7 +48,7 @@ docs/
   recorded bodies); `tools/generate_scenes.py` derives the C++ and Rust scene
   tables, so the two recorders can never drift apart. Current scenes:
   `falling_box`, `falling_capsule`, `stacking`, `mesh`, `ccd`, `sleeping`,
-  `composite_consumer` (all landed in both precisions).
+  `composite_consumer`, `rolling` (all landed in both precisions).
   Adding a scene = one JSON block + a parity run + a classification entry.
   Consumer-API scene fields (all optional, ignored by scenes that omit them):
   body `gravity[x,y,z]` (implies `DISABLE_WORLD_GRAVITY`), body
@@ -103,8 +103,10 @@ All steps are done; the list records how the harness was landed.
 
 - **Quaternion double cover**: `qw` may differ in sign between engines — take
   `min(angle(q1, q2), angle(-q1, q2))`.
-- **Manifold differences**: Bullet keeps persistent manifolds; we rebuild per
-  step with an impulse cache. Rest states should converge; transient motion
-  may differ slightly — this is a recorded trade-off, not a bug.
+- **Manifold differences**: both engines run per-pair persistent manifolds
+  now (our merge-on-capture + anchored refresh landed 2026-09-01, matching
+  `btPersistentManifold`'s semantics; see `bullet-deviations.md` §1).
+  Rest states should converge; transient motion may differ slightly — this
+  is a recorded trade-off, not a bug.
 - **Build time**: first Bullet compile ~5–10 min; incremental afterwards.
 - Toolchain verified: CMake 3.31 + MSVC (VS2022) available on the dev machine.

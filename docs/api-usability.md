@@ -14,10 +14,11 @@ gap. Behavior semantics are out of scope here — see
 - **Resource lifetime**: shapes and bodies are values; nothing to
   `delete`. Bullet's ownership (who frees the shape? the motion state?)
   is a classic leak/UB source — its own demos leak.
-- **Stable body indices**: `add_body` returns an index that survives
-  other removals; `remove_body` cascades constraints and panics on
-  double removal. Bullet hands out raw pointers and leaves constraint
-  cleanup to the caller.
+- **Typed handles**: `add_body` / `add_multibody` / `add_soft_body` return
+  `BodyHandle` / `MultiBodyHandle` / `SoftBodyHandle` (2026-09-03), so the
+  three index spaces cannot be mixed up at the call site; `remove_body`
+  cascades constraints and panics on double removal. Bullet hands out raw
+  pointers and leaves constraint cleanup to the caller.
 - **Precision**: f64 is a cargo feature (`--features f64`), not a
   library rebuild; tests and demos run in both modes from one source.
 - **Soft bodies**: `create_patch` → `add_soft_body` without the
@@ -54,31 +55,35 @@ gap. Behavior semantics are out of scope here — see
   lines while any other renderer implements the same closure. Bullet's
   OpenGL debug visualization is a big part of its tuning workflow;
   today we only have dumps and prints.
-- **P4 — callbacks** (core done 2026-09-02): the Rapier event model,
-  not Bullet's process-global function pointers — `world.contact_events()`
-  drains `CollisionEvent::Started/Stopped { a, b, sensor }` per step
-  (pair transitions; game code wants enter/exit, not a per-contact-point
-  callback storm), with **per-body opt-in**
+- **P4 — callbacks** (core done 2026-09-02; sides generalized 2026-09-07):
+  the Rapier event model, not Bullet's process-global function pointers —
+  `world.contact_events()` drains `CollisionEvent::Started/Stopped { a, b,
+  sensor }` per step (pair transitions; game code wants enter/exit, not a
+  per-contact-point callback storm), with **per-body opt-in**
   (`body.collision_events(true)`) so quiet scenes pay nothing, and
   **trigger volumes** via `body.no_contact_response(true)` (Bullet's
-  `CF_NO_CONTACT_RESPONSE`): detected and reported, never solved. Bullet's
+  `CF_NO_CONTACT_RESPONSE`): detected and reported, never solved. Since
+  2026-09-07 the `a`/`b` sides are the `CollisionObject` enum (`Body` /
+  `Link { body, link }` / `Soft`) — a breaking change covering multibody
+  colliders and soft bodies as event sources. Bullet's
   `setInternalTickCallback` needs no counterpart: callers own the step
   loop. Still open: a contact-force event with a magnitude threshold
   (post-release); per-pair solver hooks map onto the existing
   `no_collision_pairs` / filter system.
-- **P5 — typed handles** (breaking; schedule before 1.0):
-  `add_body` / `add_multibody` / `add_soft_body` all return `usize`, so
-  a confused index compiles fine and fails at runtime (or silently).
-  Newtype handles (`BodyHandle`, `MultiBodyHandle`, `SoftBodyHandle`)
-  would catch the mistake at compile time.
-- **P6 — the §3 feature surface** (partially done 2026-09-02): collision
-  groups/masks (`body.collision_group` / `.collision_mask`, symmetric
-  `group & mask` pair test on every pair + CCD sweep) and trigger
-  volumes are in. Still open: serialization, motion states... see
-  `bullet-deviations.md` §3 for the verified, categorized list. The
-  ghost-object overlap listing landed as `world.overlapping(sensor)`
-  (2026-09-07): a persistent per-body list of everything currently
-  touching it, the level-query alternative to diffing events by hand.
+- **P5 — typed handles** (done 2026-09-03, breaking):
+  `add_body` / `add_multibody` / `add_soft_body` return the newtypes
+  `BodyHandle` / `MultiBodyHandle` / `SoftBodyHandle` (`NonZeroU32`), so a
+  confused index no longer compiles; constraint endpoints, events, filters,
+  ray/sweep returns and soft anchors are typed too. Migration is mechanical:
+  `handle.index()` at any remaining raw-slot site.
+- **P6 — the §3 feature surface** (mostly done; last batch 2026-09-07):
+  collision groups/masks, trigger volumes, all-hits rays + ray filters,
+  per-body gravity, the pair filter, typed handles, ghost overlap listing,
+  kinematic rigid bodies (2026-09-04), rolling friction, compound child
+  transforms, motion states and multibody/soft-body collision-event sources
+  (2026-09-07) are in. Still open: serialization and the remaining property
+  surface (anisotropic friction, contact stiffness/damping) — see
+  `bullet-deviations.md` §3 for the verified, categorized list.
 
 ## 3. Migration cheat-sheet (Bullet → this crate)
 
@@ -88,19 +93,20 @@ gap. Behavior semantics are out of scope here — see
 | `world->setGravity(v)` | `world.set_gravity(v)` | |
 | `new btRigidBody(info)` | `RigidBody::new_dynamic(shape, pos, mass)` | inertia computed (exact analytic for most shapes) |
 | static body | `RigidBody::new_static(shape, pos)` | starts asleep, like Bullet |
-| `addRigidBody` | `world.add_body(b)` | returns the stable body index |
+| `addRigidBody` | `world.add_body(b)` | returns a typed `BodyHandle` |
 | `stepSimulation(dt)` | `world.step_simulation(dt)` | |
-| `setLinearVelocity(v)` | `world.body_mut(i).linear_velocity = v` | or the `.velocity(v)` builder before adding |
+| `setLinearVelocity(v)` | `world.body_mut(h).linear_velocity = v` | or the `.velocity(v)` builder before adding |
 | `applyCentralImpulse(j)` | `body.apply_impulse(j, Vector3::ZERO)` | |
 | `applyImpulse(j, rel)` | `body.apply_impulse(j, rel)` | |
-| `setWorldTransform(...)` | `world.set_body_transform(i, pos, rot)` | |
-| `removeRigidBody` | `world.remove_body(i)` | cascades constraints (§1 deviation) |
+| `setWorldTransform(...)` | `world.set_body_transform(h, pos, rot)` | |
+| `removeRigidBody` | `world.remove_body(h)` | cascades constraints (§1 deviation) |
 | `addConstraint` / `removeConstraint` | `world.add_constraint(c)` / `remove_constraint(i)` | |
 | `p2p->setMaxImpulseClamp(x)` | `c.point2point_mut().set_impulse_clamp(x)` | one dispatch per kind |
 | `body->setDamping(l, a)` | `body.set_damping(l, a)` | factors clamped to `[0, 1]` |
+| `body->setMotionState(ms)` | `body.motion_state(ms)` (builder) / `set_motion_state(ms)` | `MotionState::initial_pose` read at `add_body`, `synchronize` after each step |
 | collision groups / masks | `body.collision_group` / `.collision_mask` | symmetric `group & mask` pair test |
 | trigger volume / sensor | `body.no_contact_response(true)` + `.collision_events(true)` | `world.contact_events()` drain |
-| `btGhostObject` overlap list | `world.overlapping(sensor)` | persistent touch list; narrow-phase level (Bullet's is AABB level) |
+| `btGhostObject` overlap list | `world.overlapping(handle)` | persistent touch list; narrow-phase level (Bullet's is AABB level) |
 | `body->setRollingFriction(x)` | `body.rolling_friction = x` | torsional rows per contact; combined `rf_a·μ_b + rf_b·μ_a` (Bullet quirk) |
 | `rayTest` (closest) | `world.raycast_closest(...)` | |
 | `rayTest` (all hits) | `world.raycast_all(...)` / `raycast_all_filtered(...)` | filter = the ray's own group/mask |
@@ -113,4 +119,5 @@ gap. Behavior semantics are out of scope here — see
 | `btSoftBodyHelpers::CreatePatch` | `softbody::helpers::create_patch` | |
 | `btMultiBody` | `MultiBody` | colliders attach to the shared world |
 
-Re-verified against the codebase 2026-09-01.
+Re-verified against the codebase 2026-09-07 (typed-handle migration
+reflected throughout).

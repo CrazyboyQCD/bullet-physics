@@ -2,8 +2,10 @@
 
 This document describes the design of `bullet_physics`, a pure Rust
 reimplementation of the core of Bullet Physics. It reflects the code as of
-phase 5b (Featherstone multibody + multibody constraints). Behavior-level
-differences from Bullet are tracked in `bullet-deviations.md`, not here.
+commit `64ab184` (2026-09-07): the full rigid-body pipeline, Featherstone
+multibodies with collision integration, the classic SoftBody system, and the
+consumer-facing API layer. Behavior-level differences from Bullet are tracked
+in `bullet-deviations.md`, not here.
 
 ## 1. Workspace crates
 
@@ -54,6 +56,10 @@ behavior per feature.
 - `spatial` ports `btSpatialAlgebra.h` (spatial motion/force vectors,
   symmetric spatial dyads, spatial transform matrices) for the Featherstone
   subsystem.
+- `#![no_std]` builds: every engine-side transcendental routes through
+  `bullet_math::math` (std branch is a bit-identical pass-through; `libm`
+  feature is the scalar backend), selected per crate via the `std` (default)
+  / `libm` feature pair.
 
 ## 4. Shapes
 
@@ -135,26 +141,35 @@ hull/compound, vertex point masses for meshes (matching Bullet).
 
 ## 7. Dynamics & simulation loop
 
-`PhysicsWorld::step_simulation` mirrors `btDiscreteDynamicsWorld`:
+`PhysicsWorld::step_simulation` mirrors `btDiscreteDynamicsWorld` (with
+`btMultiBodyDynamicsWorld`/`btSoftRigidDynamicsWorld` stages fused inline —
+rigid steps below; multibody `1m/3m` and soft-body `1s/3s/5s/7s/8s` inserts
+are documented in `multibody-collision.md` D1 and `softbody.md` §4):
 
 1. integrate velocities (gravity + accumulated forces, semi-implicit Euler);
 2. predict positions (`position + v·dt`) for contact detection;
 3. update broad-phase AABBs (sleeping bodies skip — they do not move);
 4. compute broad-phase pairs;
-5. narrow phase → contact manifolds → warm-start matching (cached normal
+5. simulation-island pass (union-find over broad-phase pairs, joints and
+   multibody constraints): an island with any awake member wakes its
+   sleeping members, an all-resting island sleeps as a unit — the island
+   pass runs *before* the narrow phase so later stages filter on the final
+   activation states;
+6. narrow phase → contact manifolds → warm-start matching (cached normal
    impulses inherited for points within `gContactBreakingThreshold` with a
    consistent normal; friction impulses are never inherited — a documented
    deviation that prevents tangent-basis rotation oscillation);
-6. joint rows flattened from the current poses (`convertJoints` equivalent);
-7. wake-up propagation: a sleeping body touching (or joint-linked to) an
-   active body wakes; two sleeping bodies never wake each other;
+7. joint rows flattened from the current poses (`convertJoints` equivalent);
 8. solve constraints (correct velocities);
 9. write solved impulses back to the warm-start cache;
 10. deactivation check (`updateDeactivation` / `goToSleep` semantics);
 11. integrate positions with the corrected velocities — CCD fast-movers are
     clamped at the first swept-sphere TOI, and split-impulse push velocities
     are applied to the pose here;
-12. clear accumulated forces.
+12. synchronize motion states: opted-in `MotionState`s of *active,
+    non-static/kinematic* bodies receive the step's final pose (Bullet's
+    `synchronizeMotionStates` point);
+13. clear accumulated forces.
 
 **Sleeping**: `ActivationState` mirrors Bullet's five states; thresholds
 0.8 linear / 1.0 angular, `DEACTIVATION_TIME = 2 s`; static bodies start
@@ -223,8 +238,10 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
   integration → row conversion + PGS (10×1 iterations, alternating
   direction) → writeback with `±maxCoordinateVelocity` clamping → position
   integration → sleeping check, interleaved with the rigid-body stages.
-  Collision integration (`btMultiBodyLinkCollider`) is the next roadmap
-  item.
+  Collision integration (`btMultiBodyLinkCollider`) landed with phases B–D
+  of `docs/multibody-collision.md`: link/base colliders register in the
+  shared broad phase, detect contacts with rigid bodies and each other, and
+  solve in the same PGS loop, inside shared simulation islands.
 
 ## 11. Higher-level features
 
@@ -238,44 +255,68 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
   impulses, lateral friction with the friction-cone sliding clamp and
   `ROLLING_INFLUENCE_FIX`. Runs after `step_simulation` like Bullet's actions;
   wheel rays explicitly exclude the chassis.
+- **Consumer-facing collision surface** (`docs/api-gaps.md`): collision
+  groups/masks with the symmetric `group & mask` pair test (every narrow
+  phase, the CCD sweep, the soft dispatch, ray filters); trigger volumes via
+  `CollisionFlags::NO_CONTACT_RESPONSE`; Rapier-style collision events
+  (`world.contact_events()`, per-body opt-in, sides reported as the
+  `CollisionObject` enum for rigid bodies, multibody link colliders and soft
+  bodies); the persistent touch listing `world.overlapping(handle)`;
+  kinematic rigid bodies (`CollisionFlags::KINEMATIC`, velocity-driven pose);
+  motion states (`MotionState` trait); optional `PairFilter` predicate.
 
 ## 12. Memory management
 
 - Arenas (`Vec<RigidBody>`) owned by `PhysicsWorld`; bodies are addressed by
-  index (body removal is not supported yet — indices double as broad-phase
-  proxy handles; see deviations §3).
+  typed handles (`BodyHandle`/`MultiBodyHandle`/`SoftBodyHandle` — newtypes
+  over `NonZeroU32`, the analog of Bullet's raw pointers; rigid slots are
+  stable and never reused, soft-body slots renumber on removal).
+- Body removal is supported: `remove_body` destroys the proxy and cascades
+  the constraints and cached manifolds that referenced the body (a tombstoned
+  slot panics on later access — see deviations §1/§3).
 - No per-step heap allocation on the hot path beyond reusable buffers.
 - `CollisionShape` is a value enum, cheap to clone and shareable across bodies
   (equivalent to Bullet sharing one `btCollisionShape`).
 
 ## 13. Verification strategy
 
-- **Unit tests**: 197 tests (110 collision + 81 dynamics), all run in both
-  precisions; `python tools/check.py` runs them plus the 8 demo assertions.
+- **Unit tests**: 350 tests across the crates, all run in both precisions
+  (`--features f64`); `python tools/check.py` runs them plus the 14 demo
+  assertions.
 - **Parity harness** (`docs/parity-harness.md`): frame-by-frame trajectory
   comparison against the real Bullet static library (C++ and Rust recorders
-  driven from one `tools/scenes.json`), 6 scenes × f32/f64; the difference
+  driven from one `tools/scenes.json`), 8 scenes × f32/f64; the difference
   ledger `docs/bullet-compare.md` classifies every exceedance as a known
   trade-off or an implementation problem.
 - **Multibody probes**: `tools/multibody_probe.cpp` vs
-  `crates/bullet/examples/multibody_probe.rs`, 19 scenes × f32/f64 against
-  the real Bullet library (13 multibody-dynamics scenes + the 6 collider
-  scenes of `docs/multibody-collision.md` §7, compared with
+  `crates/bullet/examples/multibody_probe.rs`, 24 scenes × f32/f64 against
+  the real Bullet library (13 multibody-dynamics scenes, the 6 collider
+  scenes of `docs/multibody-collision.md` §7, the joint-feedback pair and
+  the three multibody-vs-rigidbody constraint scenes, compared with
   `tools/mbdiff.py`; build via `tools/build_multibody_probe.py`).
+- **Soft-body / GImpact probes**: `tools/softbody_probe.cpp` +
+  `examples/softbody_probe.rs` (classic soft-body scenes against
+  `BulletSoftBody`) and `tools/gimpact_probe.cpp` +
+  `examples/gimpact_probe.rs` (dynamic mesh bodies), same ledger.
+- **no_std**: `cargo check --no-default-features --features libm` per crate
+  (f32 + f64) plus a `wasm32-unknown-unknown` cross-check.
 
-## 14. Roadmap
+## 14. Status
 
-- **Phase 1 (done)**: MVP end-to-end rigid-body pipeline.
-- **Phase 2 (done)**: all primitive + convex + compound + plane shapes,
-  raycast, `AxisSweep3`, triangle mesh (BVH) and heightfield, warm starting,
-  manifold reduction.
-- **Phase 3 (done)**: sleeping/activation, CCD, character controller, vehicle.
-- **Phase 4 (done)**: the six rigid-body joints.
-- **Phase 5 (done)**: Featherstone multibody core, constraints and world;
-  phase 5b added the joint-limit / spherical limit / spherical motor
-  constraints.
-- **Next**: multibody collision integration (`btMultiBodyLinkCollider` in a
-  unified world). Later candidates: serialization.
+- **Done**: the end-to-end rigid-body pipeline (all shape classes, both
+  broad phases, GJK/EPA narrow phase, persistent manifolds, sequential-
+  impulse solver, CCD, sleeping/islands, six joints, kinematic bodies,
+  rolling friction, motion states); Featherstone multibodies with collision
+  integration and the full constraint set; the classic SoftBody system
+  phases A–F (rope/cloth/volume/clusters/joints/cut/refine, soft↔multibody
+  coupling); raycast vehicle + kinematic character controller; the consumer
+  API layer (typed handles, collision groups/masks, pair filter, all-hits
+  rays, per-body gravity, triggers + collision events for all
+  collision-object kinds, ghost overlap list, compound child transforms);
+  `#![no_std]` builds (`libm` backend).
+- **Next**: minimal debug draw (`world.debug_primitives`,
+  `docs/api-gaps.md` P3), then correctness hardening / independent
+  subsystem audits (`docs/audit/`). Later candidates: serialization.
 
 ## 15. Bullet → Rust mapping
 
@@ -302,4 +343,8 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
 | `btKinematicCharacterController`         | `dynamics::KinematicCharacterController`    |
 | `btRaycastVehicle`                       | `dynamics::RaycastVehicle`                  |
 | `btMultiBody` / `btMultiBodyConstraint` / `btMultiBodyDynamicsWorld` | `multibody::{MultiBody, MultiBodyConstraint}`, stepped by `dynamics::PhysicsWorld` |
-| `btMultiBodyLinkCollider`                | not ported (next roadmap item)              |
+| `btMultiBodyLinkCollider` | `multibody::MultiBody` link/base collider slots registered in the shared broad phase (phases B–D of `docs/multibody-collision.md`) |
+| `btRigidBody::setRollingFriction` | `RigidBody.rolling_friction` (torsional rows per contact) |
+| `btMotionState` | `dynamics::MotionState` trait (`initial_pose` / `synchronize`, builder `motion_state(..)`) |
+| `btGhostObject` overlap listing | sensor flag (`CollisionFlags::NO_CONTACT_RESPONSE`) + `PhysicsWorld::overlapping(handle)` |
+| `btCollisionObject` (collision-object kinds in the events API) | `CollisionObject` enum: `Body` / `Link { body, link }` / `Soft` |

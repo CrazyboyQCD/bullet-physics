@@ -63,7 +63,13 @@ solvers 2026-09-01, see §4).
 | EPA `INSIDE_EPS` / `FALLBACK` | Not implemented (degenerate → abort with current best) | `INSIDE_EPS = 0.01` (f32), `FALLBACK = 10 × EPA_ACCURACY` | Edge-case polytope handling may differ in extreme configurations |
 | Warm-starting factor | `0.85` | `m_warmstartingFactor = 0.85` | Aligned |
 
-## 3. Not yet implemented
+## 3. Feature surface — gaps and landed items
+
+This section mixes the two directions of the feature ledger: entries marked
+"(added …)" / "(ported …)" / "ARE ported" / "IS ported" record consumer-API
+items that have **landed** (with their semantic notes), the rest are the
+remaining **not-implemented** gaps, re-verified against the codebase as
+noted. Each entry carries its own status; the section title is historical.
 
 - **CCD candidate pruning** (added 2026-09-02): each fast-mover's sweep pretests every target against the swept segment's bound box (`Aabb::new(from.min(to), from.max(to)).expanded(radius)`) before the exact cast — a conservative overlap pretest on the margin-padded proxy AABBs, so the output is unchanged and only the per-step cost differs from Bullet's broad-phase-pruned `convexSweepTest`. (Removed bodies are skipped in the sweep — their proxy is destroyed; joint-linked pairs with suppressed collisions are skipped too, like Bullet's dispatcher `needsCollision`, since 2026-09-01.)
 - **Collision filter groups / masks** (ported 2026-09-02): `RigidBody::collision_group` / `collision_mask` (with `SoftBody` and `MultiBody` `LinkCollider` equivalents) implement the symmetric `btBroadphaseProxy` pair test (`a.group & b.mask != 0 && b.group & a.mask != 0`, defaults group 1 / mask all), gating every narrow-phase pair, the CCD sweep and the soft-body dispatch. Trigger volumes work through `CollisionFlags::NO_CONTACT_RESPONSE` (Bullet's `CF_NO_CONTACT_RESPONSE`): the pair is detected and queried normally but no contact rows are built, so nothing is blocked or woken. Per-ray filter masks and the custom overlap-filter callback are in (2026-09-02): rays carry their own `RayFilter` group/mask (the symmetric test, default group 1 / mask all — note the semantic change: a body whose mask excludes group 1 was previously ray-tested unconditionally and is now invisible to default rays), and `PhysicsWorld::set_pair_filter` gates rigid pairs and the CCD sweep on top of the group & mask test (soft and multibody-collider pairs do not consult it yet). Default scenes (group 1 / mask all / everything with contact response) behave identically.

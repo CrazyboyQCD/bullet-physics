@@ -82,14 +82,14 @@ replaces everything with indices (Bullet's own serialization path
 | `Link` | `Link { n: [u32;2], mat: u32, rl, c0, c1, c2, c3, bending }` | c0=(im0+im1)/kLST (division, source semantics), c1=rl², c2=1/(grad²·c0) at runtime |
 | `Face` | `Face { n: [u32;3], mat: u32, normal, ra, leaf }` | m_pcontact/m_n0/m_n1 are deformable-only, not ported |
 | `Tetra` | `Tetra { n: [u32;4], mat: u32, rv, leaf, c0:[Vector3;4], c1, c2 }` | `m_Dm_inverse/m_F/P_inv` are deformable force-model fields; the classic kVST only uses c0/c1/c2 |
-| `Anchor` | `Anchor { node, body: usize, local, influence, c0, c1, c2 }` | body = RigidBody index |
+| `Anchor` | `Anchor { node, body: BodyHandle, local, influence, c0, c1, c2 }` | body = typed handle of the pinned-to rigid body |
 | `RContact` | `RContact { cti: Cti, node, c0: Matrix3, c1, c2, c3, c4 }` | the mb-side jacobian is computed at solve time via `MbSolveContext` (Phase F) |
 | `Cti` | `Cti { body: ContactOwner, normal, offset }` | `ContactOwner::{Rigid(usize), Link{mb, link}}` (Phase F; index-based stand-in for the `m_colObj` pointer) |
 | `SContact` | `SContact { node, face, weights, normal, margin, friction, cfm: [Real;2] }` | |
 | `Pose` | `Pose { bvolume, bframe, volume, pos, wgh, com, rot, scl, aqq }` | |
 | `Cluster` | `Cluster { masses, nodes, framerefs, framexform, idmass, imass, locii, invwi, com, vimpulses, dimpulses, lv, av, leaf, ndamping, ldamping, adamping, matching, contains_anchor, collide, index }` | btTransform framexform → (Vector3, Quaternion) |
 | `Joint/LJoint/AJoint/CJoint` | `enum SoftJoint { Linear(..), Angular(..), Contact(..) }` + `Prepare/Solve/Terminate` dispatched on the enum | the three virtual states of Bullet's Joint |
-| `Body{soft,rigid}` | `enum Side { Cluster { soft, cluster }, Rigid(usize) }` | impulse dispatch helper (§6 joints) |
+| `Body{soft,rigid}` | `enum Side { Cluster { soft: SoftBodyHandle, cluster }, Rigid(BodyHandle) }` | impulse dispatch helper (§6 joints); handle-typed since the typed-handles migration |
 | `Config` | `Config { ...same-named fields, collisions: SoftCollision, psequence: Vec<PSolverKind>, ... }` | fCollision/fMaterial as bitflags (project convention: bitflags for stackable flag combinations, enums for exclusive states) |
 | `SolverState` | `SolverState { sdt, isdt, velmrg, radmrg, updmrg }` | |
 | `btSoftBody` | `SoftBody { cfg, sst, pose, nodes, links, faces, tetras, anchors, rcontacts, scontacts, joints, materials, clusters, ndbvt, fdbvt, cdbvt, bounds, b_update_rt_cst, timeacc, max_speed_squared, ... }` | the world owns `Vec<SoftBody>`; `SoftBodyWorldInfo` not ported (gravity/air merged into world and Config) |
@@ -452,4 +452,4 @@ order → settle-class scatter (deviations §11-⑤).
 | softbody/joints.rs | btSoftBody.cpp 3390-3747 (Joint::Prepare/Solve/Terminate) + Body 515-620 |
 | softbody/helpers.rs | btSoftBodyHelpers.cpp 691-1120 (Rope/Patch/Ellipsoid/TriMesh/ConvexHull) |
 | softbody/quickhull.rs | Extras/ConvexDecomposition/… HullLibrary semantics, reduced (new implementation) |
-| world.rs stages 1s/3s/4b/5s/7s/8s | btSoftRigidDynamicsWorld.cpp 69-118 + btDiscreteDynamicsWorld stepping |
+| world.rs stages 1s/3s/4b/5s/7s/8s (now `world/step.rs` + `world/softbody_pass.rs` + `world/islands.rs`) | btSoftRigidDynamicsWorld.cpp 69-118 + btDiscreteDynamicsWorld stepping |
