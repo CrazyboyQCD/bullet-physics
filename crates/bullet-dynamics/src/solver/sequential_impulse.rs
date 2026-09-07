@@ -1,6 +1,9 @@
 //! Sequential-impulse constraint solver: contact constraints with friction and
 //! restitution, adapted from Bullet's `btSequentialImpulseConstraintSolver`.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use bullet_collision::manifold::ContactPoint;
 use crate::body::RigidBody;
 use bullet_math::{math, FRAC_1_SQRT_2, Matrix3, Real, Vector3};
