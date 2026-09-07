@@ -2307,11 +2307,139 @@ fn kinematic_static_and_kinematic_kinematic_pairs_are_inert() {
     for _ in 0..120 {
         world.step_simulation(1.0 / 60.0);
     }
-    // They flew apart (or through each other) but no solver row ever touched
-    // their velocities, and the static ground still holds them where their
+    // They flew apart (or through each other) but no solver row ever touched   
+    // their velocities, and the static ground still holds them where their     
     // velocities put them.
     assert_eq!(world.body(a).linear_velocity, va);
     assert_eq!(world.body(b).linear_velocity, vb);
     assert!(world.body(a).position.y > 0.0);
+    let _ = ground;
+}
+
+/// Mutating a static compound's child between steps must refresh the
+/// broad-phase proxy immediately: the per-step AABB pass only covers
+/// active bodies, so a moved child would otherwise stay invisible to
+/// pair detection at its new location (a ray walks the proxy first).
+#[test]
+fn static_compound_child_transform_refreshes_the_proxy() {
+    let mut world = PhysicsWorld::new();
+    let compound = world.add_body(RigidBody::new_static(
+        bullet_collision::shapes::CollisionShape::compound(vec![
+            bullet_collision::shapes::CompoundChild::new(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.5)),
+                Vector3::new(0.0, 0.5, 0.0),
+            ),
+        ]),
+        Vector3::ZERO,
+    ));
+    assert!(world.set_child_transform(
+        compound,
+        0,
+        Vector3::new(6.0, 0.5, 0.0),
+        Quaternion::IDENTITY,
+    ));
+
+    // A downward ray at the new location hits the moved child; at the old
+    // location it finds nothing (of this compound).
+    let hit = world.raycast_closest(Vector3::new(6.0, 3.0, 0.0), Vector3::new(6.0, -1.0, 0.0));
+    assert!(hit.is_some(), "moved child invisible: proxy not refreshed");
+    let hit = world.raycast_closest(Vector3::new(0.0, 3.0, 0.0), Vector3::new(0.0, -1.0, 0.0));
+    assert!(hit.is_none(), "stale child bounds still visible");
+    world.step_simulation(1.0 / 60.0);
+    // The refresh survives a step (update_aabbs skips inactive bodies).
+    let hit = world.raycast_closest(Vector3::new(6.0, 3.0, 0.0), Vector3::new(6.0, -1.0, 0.0));
+    assert!(hit.is_some(), "moved child lost after a step");
+}
+
+/// A dynamic compound's inverse inertia follows the child layout (the
+/// construction formula re-run); an unchanged axis stays untouched.
+#[test]
+fn dynamic_compound_child_transform_recomputes_inertia() {
+    let mut door = RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::compound(vec![
+            bullet_collision::shapes::CompoundChild::new(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 2.0, 0.25)),
+                Vector3::new(-3.0, 0.0, 0.0),
+            ),
+            bullet_collision::shapes::CompoundChild::new(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 2.0, 0.25)),
+                Vector3::new(3.0, 0.0, 0.0),
+            ),
+        ]),
+        Vector3::ZERO,
+        12.0,
+    );
+    let wide = door.inv_inertia_local();
+    // Pull the second child in (the first stays at x = -3): the bounding
+    // box shrinks along x, so I_y and I_z shrink while I_x (which only
+    // sees the unchanged y/z extents) stays put.
+    assert!(door.set_child_transform(1, Vector3::new(1.0, 0.0, 0.0), Quaternion::IDENTITY));
+    let narrow = door.inv_inertia_local();
+    assert_relative_eq!(narrow.x, wide.x);
+    assert!(narrow.y > wide.y && narrow.z > wide.z);
+
+    // A non-compound body reports the miss.
+    let mut ball = RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::sphere(0.5),
+        Vector3::ZERO,
+        1.0,
+    );
+    assert!(!ball.set_child_transform(0, Vector3::ZERO, Quaternion::IDENTITY));
+    assert!(ball.remove_child_shape(0).is_none());
+}
+
+/// A kinematic compound (a vehicle slab with a raised bumper child)
+/// pushes a dynamic ball purely through its velocity: the end-to-end
+/// kinematic x compound interaction (pair gate, infinite-mass solver
+/// rows, per-step proxy refresh) with no solver row touching the
+/// kinematic body's velocity.
+#[test]
+fn kinematic_compound_pushes_a_ball() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+    let ground = world.add_body(RigidBody::new_static(
+        bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+        Vector3::ZERO,
+    ));
+    // Vehicle: slab + bumper, driven at constant +x from x = -4.
+    let vehicle = world.add_body(RigidBody::new_kinematic(
+        bullet_collision::shapes::CollisionShape::compound(vec![
+            bullet_collision::shapes::CompoundChild::new(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.25, 0.5)),
+                Vector3::new(0.0, 0.25, 0.0),
+            ),
+            bullet_collision::shapes::CompoundChild::new(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.1, 0.4, 0.5)),
+                Vector3::new(0.6, 0.4, 0.0),
+            ),
+        ]),
+        Vector3::new(-4.0, 0.0, 0.0),
+    ));
+    world.body_mut(vehicle).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+    // Ball resting on the ground in the vehicle's path.
+    let ball = world.add_body(RigidBody::new_dynamic(
+        bullet_collision::shapes::CollisionShape::sphere(0.3),
+        Vector3::new(0.0, 0.3, 0.0),
+        1.0,
+    ));
+
+    for _ in 0..240 {
+        world.step_simulation(1.0 / 60.0);
+    }
+
+    // The vehicle drove through the ball's start and carried it along,
+    // its own velocity untouched (infinite mass).
+    assert!(
+        world.body(ball).position.x > 0.5,
+        "ball at {}",
+        world.body(ball).position.x
+    );
+    assert!(world.body(ball).position.y > 0.0);
+    assert_eq!(
+        world.body(vehicle).linear_velocity,
+        Vector3::new(1.0, 0.0, 0.0)
+    );
+    // Drove ~4 m from x = -4 (the 240-frame budget lands it near 0).
+    assert!(world.body(vehicle).position.x > -0.5);
     let _ = ground;
 }

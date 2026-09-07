@@ -1,5 +1,5 @@
 use bullet_math::{math, Matrix3, Quaternion, Real, Vector3};
-use bullet_collision::shapes::CollisionShape;
+use bullet_collision::shapes::{CollisionShape, CompoundChild};
 
 /// Seconds a body must stay below the sleeping thresholds before it sleeps
 /// (Bullet's hard-coded `m_deactivationTime > btScalar(2.)` check).
@@ -102,6 +102,16 @@ impl CollisionFlags {
     }
 }
 
+/// Reciprocal local inertia components (the `new_dynamic` formula,
+/// clamped away from zero so a degenerate axis never divides by zero).
+fn inv_inertia_components(inertia: Vector3) -> Vector3 {
+    Vector3::new(
+        1.0 / inertia.x.max(Real::EPSILON),
+        1.0 / inertia.y.max(Real::EPSILON),
+        1.0 / inertia.z.max(Real::EPSILON),
+    )
+}
+
 /// A rigid body with mass, inertia, pose and velocity state.
 ///
 /// Equivalent to Bullet's `btRigidBody` (with an inline `btCollisionShape`).
@@ -170,12 +180,7 @@ pub struct RigidBody {
 impl RigidBody {
     /// A dynamic body with the given mass (> 0).
     pub fn new_dynamic(shape: CollisionShape, position: Vector3, mass: Real) -> Self {
-        let inertia = shape.local_inertia(mass);
-        let inv_inertia = Vector3::new(
-            1.0 / inertia.x.max(Real::EPSILON),
-            1.0 / inertia.y.max(Real::EPSILON),
-            1.0 / inertia.z.max(Real::EPSILON),
-        );
+        let inv_inertia = inv_inertia_components(shape.local_inertia(mass));
         Self {
             shape,
             position,
@@ -537,6 +542,13 @@ impl RigidBody {
         bullet_math::inertia_tensor_world(self.inv_inertia_local, self.orientation)
     }
 
+    /// Body-space inverse inertia diagonal (zero for static/kinematic
+    /// bodies).
+    #[inline]
+    pub fn inv_inertia_local(&self) -> Vector3 {
+        self.inv_inertia_local
+    }
+
     /// Mass in kilograms (`1 / inv_mass`); infinite for static bodies.
     #[inline]
     pub fn mass(&self) -> Real {
@@ -623,6 +635,57 @@ impl RigidBody {
     pub fn set_damping(&mut self, linear: Real, angular: Real) {
         self.linear_damping = linear.clamp(0.0, 1.0);
         self.angular_damping = angular.clamp(0.0, 1.0);
+    }
+
+    /// Move/rotate a child shape of a compound body in the compound's
+    /// local frame (the data half of Bullet's
+    /// `btCompoundShape::updateChildTransform`): the inverse inertia of a
+    /// dynamic body is recomputed from the new child layout, exactly like
+    /// at construction; static/kinematic bodies keep their zero inertia.
+    /// Broad-phase bounds are *not* touched here (the body knows no
+    /// proxies) — prefer `PhysicsWorld::set_child_transform`, which
+    /// also refreshes the proxy immediately so sleeping/static compounds
+    /// are safe to mutate. Returns `false` when the shape is not a
+    /// compound.
+    pub fn set_child_transform(
+        &mut self,
+        child: usize,
+        position: Vector3,
+        orientation: Quaternion,
+    ) -> bool {
+        let CollisionShape::Compound(compound) = &mut self.shape else {
+            return false;
+        };
+        compound.set_child_transform(child, position, orientation);
+        self.refresh_compound_inertia();
+        true
+    }
+
+    /// Remove a child shape from a compound body (Bullet's
+    /// `removeChildShape`), recomputing the inertia like
+    /// `RigidBody::set_child_transform`. Returns the removed child, or
+    /// `None` when the shape is not a compound (or the index is out of
+    /// bounds; the child list is empty).
+    pub fn remove_child_shape(&mut self, child: usize) -> Option<CompoundChild> {
+        let CollisionShape::Compound(compound) = &mut self.shape else {
+            return None;
+        };
+        let removed = compound.remove_child(child);
+        self.refresh_compound_inertia();
+        Some(removed)
+    }
+
+    /// Recompute the inverse inertia from the current compound layout
+    /// (the `new_dynamic` formula); static/kinematic bodies keep zero.
+    fn refresh_compound_inertia(&mut self) {
+        if self.inv_mass > 0.0 {
+            let mass = 1.0 / self.inv_mass;
+            let inertia = match &self.shape {
+                CollisionShape::Compound(c) => c.local_inertia(mass),
+                _ => unreachable!("refresh_compound_inertia on a non-compound"),
+            };
+            self.inv_inertia_local = inv_inertia_components(inertia);
+        }
     }
 
     /// Per-body gravity acceleration. It starts as the world gravity at

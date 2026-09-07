@@ -10,6 +10,7 @@ use bullet_collision::broadphase::{BroadPhase, BroadPhaseBackend};
 use bullet_collision::manifold::{ContactManifold, PersistentManifold, CONTACT_BREAKING_THRESHOLD};
 use bullet_collision::narrowphase::{self, epa::EpaScratch, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
+use bullet_collision::shapes::CompoundChild;
 use crate::body::{CollisionFlags, RayFilter, RigidBody};
 use crate::constraint::{self, Constraint};
 use crate::handles::{BodyHandle, MultiBodyHandle, SoftBodyHandle};
@@ -397,6 +398,64 @@ impl PhysicsWorld {
             index
         );
         &mut self.bodies[index]
+    }
+
+    /// Move/rotate a child shape of a compound body between steps (the
+    /// equivalent of Bullet's `btCompoundShape::updateChildTransform` +
+    /// `updateSingleAabb`): the dynamic body's inverse inertia is
+    /// recomputed from the new child layout, and the broad-phase proxy is
+    /// re-expanded from the current pose immediately — necessary because
+    /// the per-step AABB pass only covers active bodies, so sleeping or
+    /// static compounds would otherwise keep stale bounds after their
+    /// children move. Call between steps: the contact assembly reads
+    /// child shapes while stepping; solver rows hold no child references
+    /// across steps.
+    ///
+    /// Returns `false` when the body was removed or its shape is not a
+    /// compound.
+    pub fn set_child_transform(
+        &mut self,
+        handle: BodyHandle,
+        child: usize,
+        position: Vector3,
+        orientation: Quaternion,
+    ) -> bool {
+        let index = handle.index();
+        let body = &mut self.bodies[index];
+        if body.is_removed() || !body.set_child_transform(child, position, orientation) {
+            return false;
+        }
+        let aabb = body
+            .shape
+            .world_aabb(body.position, body.orientation)
+            .expanded(BROADPHASE_AABB_MARGIN);
+        self.broadphase.set_aabb(self.body_proxies[index], aabb);
+        true
+    }
+
+    /// Remove a child shape from a compound body (Bullet's
+    /// `removeChildShape` + `updateSingleAabb`), refreshing the inertia
+    /// and broad-phase proxy like
+    /// [`PhysicsWorld::set_child_transform`](Self::set_child_transform).
+    /// Returns the removed child, or `None` when the body was removed,
+    /// its shape is not a compound, or the index is out of bounds.
+    pub fn remove_child_shape(
+        &mut self,
+        handle: BodyHandle,
+        child: usize,
+    ) -> Option<CompoundChild> {
+        let index = handle.index();
+        let body = &mut self.bodies[index];
+        if body.is_removed() {
+            return None;
+        }
+        let removed = body.remove_child_shape(child)?;
+        let aabb = body
+            .shape
+            .world_aabb(body.position, body.orientation)
+            .expanded(BROADPHASE_AABB_MARGIN);
+        self.broadphase.set_aabb(self.body_proxies[index], aabb);
+        Some(removed)
     }
 
     pub fn bodies(&self) -> &[RigidBody] {

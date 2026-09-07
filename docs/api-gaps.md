@@ -200,21 +200,28 @@ S/M/L · **See** = existing notes.
     interaction order with group/mask must mirror Bullet (both must
     pass).
   - Size: S.
-- **compound child transforms**: fixed at construction; no
-  `removeChildShape` / dynamic child transforms.
-  - Impl: `Compound` owns `Vec<CompoundChild>`; add
-    `remove_child(i)` / `set_child_transform(i, ...)`, recompute the
-    compound's local AABB (+ cached tree, if touched), and refresh the
-    owning body's broad-phase AABB (it re-expands on the next
-    `update_aabbs` pass anyway for awake bodies).
+- **compound child transforms** ✅ (2026-09-07): `set_child_transform` /
+  `remove_child_shape` at the `Compound`, `RigidBody` and
+  `PhysicsWorld` layers (Bullet's `updateChildTransform` +
+  `removeChildShape` + `updateSingleAabb`).
+  - Impl: `Compound` keeps no derived caches (AABB/support/inertia are
+    computed on demand), so the shape-layer mutation is plain data;
+    `RigidBody::set_child_transform` recomputes `inv_inertia_local` for
+    dynamic bodies (static/kinematic keep zero) via the constructor
+    formula; `PhysicsWorld::set_child_transform` additionally refreshes
+    the broad-phase proxy from the current pose immediately — required
+    because the per-step AABB pass only covers *active* bodies, so
+    sleeping/static compounds would keep stale bounds (verified by a
+    ray-walk test through the proxy). Kinematic compounds (moving
+    vehicles with animated doors) refresh naturally every step.
   - Files: `bullet-collision/src/shapes/compound.rs`,
-    `bullet-dynamics/src/body.rs` (inertia invalidation).
-  - Risk: the body's inertia was computed at construction from the old
-    children — either recompute on mutation (Bullet recomputes via
-    `calculateLocalInertia` on demand) or document stale inertia;
-    mutation must happen between steps (solver rows hold no child
-    references, so inter-step is safe).
-  - Size: M.
+    `bullet-dynamics/src/body.rs` (+ `inv_inertia_local()` accessor),
+    `bullet-dynamics/src/world.rs`.
+  - Risk resolved: mutation must happen between steps (solver rows hold
+    no child references, so inter-step is safe) — documented on the
+    world API. Numerically inert for existing scenes (no default-path
+    change; parity untouched).
+  - Size: M (as estimated; the missing cached tree made it S–M).
 
 ## Farther (on demand — see deviations §3 for details)
 

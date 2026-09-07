@@ -51,6 +51,33 @@ impl Compound {
         Self { children }
     }
 
+    /// Mutable access to child `i` (Bullet's `getChildShape`). The
+    /// compound itself keeps no derived caches — AABB, support and
+    /// inertia are computed on demand — so mutating `position` /
+    /// `orientation` here takes effect immediately for narrow phase;
+    /// the *owning body's* inertia and broad-phase bounds are the
+    /// consumer's responsibility. Prefer `RigidBody::set_child_transform`
+    /// / `PhysicsWorld::set_child_transform`, which keep those in sync.
+    #[inline]
+    pub fn child_mut(&mut self, i: usize) -> &mut CompoundChild {
+        &mut self.children[i]
+    }
+
+    /// Moves/rotates child `i` in the compound's local frame (Bullet's
+    /// `btCompoundShape::updateChildTransform`).
+    #[inline]
+    pub fn set_child_transform(&mut self, i: usize, position: Vector3, orientation: Quaternion) {
+        let child = self.child_mut(i);
+        child.position = position;
+        child.orientation = orientation;
+    }
+
+    /// Removes child `i` and returns it (Bullet's `removeChildShape`).
+    #[inline]
+    pub fn remove_child(&mut self, i: usize) -> CompoundChild {
+        self.children.remove(i)
+    }
+
     #[inline]
     pub fn margin(&self) -> Real {
         0.0
@@ -184,5 +211,26 @@ mod tests {
         assert_relative_eq!(i.x, 2.0 * (0.25 + 0.25));
         assert_relative_eq!(i.y, 2.0 * (2.25 + 0.25));
         assert_relative_eq!(i.z, 2.0 * (2.25 + 0.25));
+    }
+
+    #[test]
+    fn child_transform_updates_derived_quantities() {
+        let mut c = compound_of_two_spheres();
+        c.set_child_transform(1, Vector3::new(2.0, 0.0, 0.0), Quaternion::IDENTITY);
+        let a = c.local_aabb();
+        assert_relative_eq!(a.max.x, 2.5);
+        let p = c.support_local(Vector3::X);
+        assert_relative_eq!(p.x, 2.5);
+    }
+
+    #[test]
+    fn remove_child_shrinks_the_compound() {
+        let mut c = compound_of_two_spheres();
+        let removed = c.remove_child(0);
+        assert_eq!(c.children.len(), 1);
+        assert_relative_eq!(removed.position.x, -1.0);
+        let a = c.local_aabb();
+        assert_relative_eq!(a.min.x, 0.5);
+        assert_relative_eq!(a.max.x, 1.5);
     }
 }
