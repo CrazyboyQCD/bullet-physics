@@ -1467,7 +1467,7 @@ impl MultiBody {
 
         // Step the joint positions.
         for i in 0..num_links {
-            let joint_vel = self.joint_vel_multidof(i).to_vec();
+            let joint_vel = self.joint_vel_multidof(i);
             match self.links[i].joint_type {
                 JointType::Prismatic | JointType::Revolute => {
                     self.links[i].joint_pos[0] += dt * joint_vel[0];
@@ -1491,9 +1491,10 @@ impl MultiBody {
                     self.links[i].joint_pos[3] = joint_ori.w;
                 }
                 JointType::Planar => {
-                    self.links[i].joint_pos[0] += dt * joint_vel[0];
-                    let q0_coors = joint_vel[1] * self.links[i].axis_bottom(1)
-                        + joint_vel[2] * self.links[i].axis_bottom(2);
+                    let (v0, v1, v2) = (joint_vel[0], joint_vel[1], joint_vel[2]);
+                    self.links[i].joint_pos[0] += dt * v0;
+                    let q0_coors = v1 * self.links[i].axis_bottom(1)
+                        + v2 * self.links[i].axis_bottom(2);
                     let no_q0_coors =
                         quat_from_axis_angle(self.links[i].axis_top(0), self.links[i].joint_pos[0]) * q0_coors;
                     self.links[i].joint_pos[1] += self.links[i].axis_bottom(1).dot(no_q0_coors) * dt;
