@@ -270,11 +270,11 @@ impl SoftBody {
     /// `initializeClusters`).
     pub fn initialize_clusters(&mut self) {
         for ci in 0..self.clusters.len() {
-            let nodes: Vec<usize> = self.clusters[ci].nodes.clone();
+            let nodes = &self.clusters[ci].nodes;
             let mut masses = Vec::with_capacity(nodes.len());
             let mut contains_anchor = false;
             let mut imass = 0.0 as Real;
-            for &ni in &nodes {
+            for &ni in nodes {
                 let im = self.nodes[ni].im;
                 let mass = if im == 0.0 {
                     contains_anchor = true;
