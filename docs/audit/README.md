@@ -30,13 +30,14 @@ no one has done a dedicated source-level review of that subsystem yet.
 | RigidBody | 🟡 | unit tests; kinematic / motion-state / rolling-friction semantics documented | — |
 | Solver (sequential impulse) | 🟡 | parity stacks; solver-info defaults audited 2026-09-01 (deviations §1/§2) | — |
 | Persistent Manifold | 🟡 | **audit-complete** 2026-09-08 (`01-manifold.md`): 18 decision points covered, 4 queued risks resolved, D1–D3 accepted deviations pinned by 11 adversarial tests (`ba3cd9a`; D1 is behavioral: contact-patch coverage / manifold adaptation, no instability reproduced) | `01-manifold.md` |
-| GJK | 🔍 | exercised by every parity/probe scene; no dedicated source review | planned: `02-gjk.md` |
-| EPA | 🔍 | `btGjkEpa2` line-by-line claim from the porting round; not re-audited | planned: `03-epa.md` |
-| Convex-Convex (dispatch + fast paths) | 🔍 | sphere/sphere, sphere/box, box/box SAT covered by scenes | planned: `04-convex-convex.md` |
-| AxisSweep3 | 🔍 | default broad phase; perf parity | planned: `05-axis-sweep3.md` |
+| GJK | 🟡 | **audit-complete** 2026-09-08 (`02-gjk.md`): strict-walk/contact-walk routing, simplex reduction, scale guards (two reproduced bugs fixed `d876cfa`/`9aebf38`), degeneracy limits pinned; remaining thresholds classified as tolerance policy | `02-gjk.md` |
+| EPA | 🟡 | **audit-complete** 2026-09-08 (`03-epa.md`): constants/budgets verbatim, two-phase transactional horizon (`1286304`), status acceptance mirrored from `btGjkEpaSolver2::Penetration`; the queued `INSIDE_EPS`/`FALLBACK` risk closed as dead reference constants | `03-epa.md` |
+| Convex-Convex (dispatch + fast paths) | 🟡 | **audit-complete** 2026-09-08 (`04-convex-convex.md`): GJK→EPA contract proven and `debug_assert`-pinned, per-status acceptance mirrored; the witness construction recorded as the documented behavioral deviation (deviations §1) | `04-convex-convex.md` |
+| AxisSweep3 | 🟡 | **audit-complete** 2026-09-08 (`05-axis-sweep3.md`): `addHandle`/`updateHandle` semantics verbatim; superset invariant proven and validated by the randomized suite (6 seeds × 2048 ops, per-op brute-force comparison); auto-frame/frame-limit policies documented | `05-axis-sweep3.md` |
 | DBVT (tree + broadphase) | 🟡 | **audit-complete** 2026-09-08 (`06-dbvt.md`): one reproduced bug fixed during the audit round — pair-cache cleanup now uses the fat leaf-volume test like Bullet's cleanup pass (`ef25fa9`); adversarial suite (randomized state machine × per-op tree-invariant checks, brute-force oracles) pins the superset invariant; tree-shape heuristics documented as accepted engineering choices | `06-dbvt.md` |
 | Multibody | 🟡 | 24 mb-probe scenes × f32/f64; islands documented | — |
 | SoftBody | 🟡 | soft-body probes; structural offsets quantified (deviations §1) | — |
+| BroadPhase integration | 🔵 | next stage: world-level dispatch over both broad phases and their interaction with the step pipeline | planned: `07-broadphase-integration.md` |
 | API surface | 🟢 | consumer backlog shipped through batch 2 (`docs/api-gaps.md`) | — |
 | Parity harness | 🟢 | 8 scenes × f32/f64, ledger current | `docs/parity-harness.md` |
 | Performance | 🟢 | perf ledger current (2026-09-04 rerun) | `docs/bullet-perf.md` |

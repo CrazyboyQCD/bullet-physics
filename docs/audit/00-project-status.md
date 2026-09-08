@@ -7,8 +7,8 @@
 
 ## Current HEAD
 
-`9aebf38` — *fix: GJK strict-walk direction invariant* (2026-09-08).
-`origin/main` is in sync at `9aebf38`.
+`817e552` — *docs(audit): DBVT independent source audit record* (2026-09-08).
+`origin/main` is behind by 4 commits (push pending).
 
 ## Current Phase
 
@@ -60,11 +60,21 @@ Feature status at this HEAD (evidence for *tested* cases only):
 
 ## In Progress
 
-- Independent source audit of the correctness-critical subsystems. Manifold
-  done (2026-09-08, [`01-manifold.md`](01-manifold.md)): 18 reference
-  decision points covered, 3 deviation rows added to
-  `docs/bullet-deviations.md` §1, all four queued manifold risks resolved
-  with no reproduced candidate; GJK is next.
+Independent source audit of the correctness-critical subsystems. All six
+subsystem records are complete (2026-09-08): Manifold
+([`01`](01-manifold.md)), GJK ([`02`](02-gjk.md)), EPA ([`03`](03-epa.md)),
+Convex-Convex ([`04`](04-convex-convex.md)), AxisSweep3
+([`05`](05-axis-sweep3.md)), DBVT ([`06`](06-dbvt.md)). The records for
+02–05 consolidate conclusions that were already fixed by the hardening and
+adversarial rounds; no re-audit was performed. GJK/EPA hardening alone
+collected 3 reproduced bugs (fixed), the DBVT round 1 (pair-cache cleanup
+criterion), all pinned by adversarial suites.
+
+**Next stage: broadphase integration** (planned slot
+[`07-broadphase-integration.md`](07-broadphase-integration.md)) — the
+world-level dispatch over both broad phases and their interaction with the
+step pipeline — followed by a full integrated adversarial pass, then the
+remaining 1.0 items.
 
 ## Known Deviations
 
@@ -82,25 +92,29 @@ motion-state interpolation blend, kinematic-driven motion states. These are
 Items that **need independent verification** (none is currently a confirmed
 bug — see the audit policy in [`README.md`](README.md)):
 
-- EPA degenerate-polytope paths (`INSIDE_EPS` / `FALLBACK` not ported,
-  deviations §2) — needs independent verification on adversarial inputs.
+- none — the last queued item (EPA `INSIDE_EPS`/`FALLBACK`) was resolved by
+  the EPA audit: both are dead constants in the reference source, defined
+  and `#undef`'d without a single use.
 
-Resolved by the manifold audit (2026-09-08, [`01-manifold.md`](01-manifold.md)):
-persistent-manifold rotation-drift semantics (self-authored refresh-guard
-mechanism, now fully documented incl. the 0.01 rad rotation gate), quaternion
-q/−q double cover (no correctness issue; at most one spurious re-detection),
-contact-point matching robustness (two policy differences recorded as the
-point-matching deviation row), manifold reduction beyond tested scenes
-(population-policy deviation row recorded; adversarial inputs deferred to the
-dedicated adversarial-testing phase).
+Resolved by the audits (2026-09-08): EPA degenerate-polytope paths
+(`INSIDE_EPS`/`FALLBACK` not ported — dead constants in the reference;
+[`03-epa.md`](03-epa.md) §3); persistent-manifold rotation-drift semantics
+(self-authored refresh-guard mechanism, now fully documented incl. the
+0.01 rad rotation gate), quaternion q/−q double cover (no correctness
+issue; at most one spurious re-detection), contact-point matching
+robustness (two policy differences recorded as the point-matching
+deviation row), manifold reduction beyond tested scenes (population-policy
+deviation row recorded; adversarial inputs deferred to the dedicated
+adversarial-testing phase).
 
 ## 1.0 Required
 
-- Independent source audits of the correctness-critical subsystems
-  (manifold, GJK, EPA, convex-convex, AxisSweep3, DBVT) — see
-  [`README.md`](README.md).
+- Independent source audits of the correctness-critical subsystems —
+  **done** for manifold, GJK, EPA, convex-convex, AxisSweep3 and DBVT
+  (records 01–06); broadphase integration is the next stage.
 - Adversarial correctness testing (deep penetration, extreme mass ratios,
-  high spin, degenerate shapes).
+  high spin, degenerate shapes) — partially covered per-subsystem by the
+  audit suites; the integrated pass remains.
 - Minimal debug draw (`docs/api-gaps.md` P3).
 - API freeze review: naming, docs, breaking-change surface settled
   (typed handles were the last planned breaking change).
