@@ -538,6 +538,13 @@ fn hull_distance_direction(points: &[Vector3], point: Vector3) -> (Real, Vector3
         simplex.push(w);
         v = closest_origin(&mut simplex);
     }
+    // Exhausted iterations with the final refinement having enclosed the
+    // origin (point inside the hull): the head check never saw the collapsed
+    // `v`, and the division below would be 0/0. Same predicate as the head
+    // check, applied to the final value.
+    if v.length_squared() < 1e-10 {
+        return (0.0, Vector3::ZERO); // Inside or touching after the last refinement.
+    }
     (v.length_squared(), v / v.length())
 }
 
