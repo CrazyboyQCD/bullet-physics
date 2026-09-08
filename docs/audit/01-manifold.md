@@ -13,11 +13,19 @@
   `btCollisionDispatcher.cpp::getNewManifold`, `btCollisionShape.cpp`
   (`getContactBreakingThreshold` / `getAngularMotionDisc`),
   `btContactSolverInfo.h` (warm-start factor).
-- **Verdict**: 🟡 — implemented with documented deviations. No correctness
-  candidate reproduced. Three deviation rows added to
-  `docs/bullet-deviations.md` §1 (population policy, matching policy,
-  rotation-drift gate detail); two stale doc comments fixed in `manifold.rs`
-  (comment-only, zero behavior).
+- **Verdict**: ✅ **Audit-complete with documented behavioral deviations.**
+  No correctness or solver-instability candidate reproduced. Three accepted
+  deviation rows in `docs/bullet-deviations.md` §1 (population policy,
+  matching policy, rotation-drift gate detail); two stale doc comments fixed
+  in `manifold.rs` (comment-only, zero behavior). Deviations D1–D3 are
+  pinned by the adversarial validation round (`ba3cd9a`, 2026-09-08, 11
+  focused tests) — see §6 for the final per-deviation verdicts.
+
+> Reading guide: "audit-complete" means every observable decision point has
+> been compared and the behavioral differences are precisely measured and
+> pinned by tests. It does **not** mean the subsystem is 100 % Bullet-
+> equivalent — D1 in particular is a real behavioral deviation (accepted,
+> see §6).
 
 ## 1. Reference decisions covered
 
@@ -79,7 +87,7 @@ Mechanical comparison of every observable decision point:
    flat-box probe already exercise; adversarial reduction inputs belong to
    the dedicated adversarial-testing phase.
 
-## 3. Deviations (new rows in `docs/bullet-deviations.md` §1)
+## 3. Deviations (rows in `docs/bullet-deviations.md` §1)
 
 - **D1 — Population policy on overflow**: sort-by-depth truncate vs
   area-maximizing slot replacement (`sortCachedPoints`); shallow new points
@@ -91,14 +99,25 @@ Mechanical comparison of every observable decision point:
   row): the `0.01` rad per-body rotation gate and its q/−q asymmetry
   (spurious re-detection only).
 
-## 4. Test gaps
+## 4. Test gaps → closed by the adversarial validation round
 
-- No unit test drives the overflow path (merging a batch that pushes the
-  cache past 4 points) — the sort-truncate policy is untested as such.
-- No test distinguishes first-match from nearest-match (two cached points
-  inside the matching radius of one detection point).
-- No test covers the rotation gate's q/−q asymmetry (low value; behavior is
-  "one extra detection").
+The three gaps below at audit time are all closed by `ba3cd9a` (11 tests,
+`manifold.rs` `#[cfg(test)]`):
+
+- ~~No unit test drives the overflow path~~ → clustered 6-point batch,
+  spread-cache + near-duplicate divergence, planar/triangular patch
+  evolution under repeated overflow (capacity, deep-anchor stability,
+  identity freeze, spread retention), each against a minimal reference of
+  Bullet's `sortCachedPoints`.
+- ~~No test distinguishes first-match from nearest-match~~ → two cached
+  points inside one matching radius: the reference model would pick the
+  other point; inheritance follows cache order deterministically; the
+  0.9 normal-agreement guard appends instead of inheriting.
+- ~~No test covers the rotation gate's q/−q asymmetry~~ → gate boundaries
+  (strict `>`, either body alone, opposite rotations add up),
+  near-threshold self-consistency, q/−q (one spurious re-detection,
+  identical refreshed contact geometry), and 20-frame resting-contact
+  churn (anchors bit-stable, impulse riding, separation kills the point).
 
 ## 5. Candidates (none reproduced — remain candidates)
 
@@ -112,3 +131,39 @@ Mechanical comparison of every observable decision point:
   the overflow path was "Bullet's `sortCachedPoints`" and "the deepest four
   survive" — neither is what the code does (see D1); the wording now
   describes the actual policy and names the difference.
+
+## 6. Final verdicts (post adversarial validation, `ba3cd9a`)
+
+- **D1 — Accepted deviation (behavioral).** The cache
+  population/reduction policy differs materially from Bullet's
+  area-maximizing replacement: a clustered 6-point batch keeps
+  `{deep + 3 clustered}` where the reference keeps `{deep + 2 far + 1
+  clustered}` (spread 0.04 vs 1.41), and under growing contact patches the
+  cache identity freezes after the fourth frame — newly arriving points are
+  absorbed later than Bullet would absorb them (contact-patch coverage /
+  manifold-adaptation deviation). Mitigations that contain it in practice:
+  the depth-order policy self-heals (a tilting contact deepens its point
+  into the top-4), the lateral-drift refresh frees slots, and the detection
+  layer pre-reduces to a spread set. The divergence is bidirectional — on
+  spread inputs Bullet admits a shallow near-duplicate and evicts a support
+  point, which ours refuses. No correctness or solver instability was
+  reproduced in the parity/probe/test corpus (8 parity scenes, 24 mb
+  probes, the adversarial evolution tests). Future convergence toward
+  Bullet should implement area-maximizing replacement and requires a
+  parity re-record.
+- **D2 — Accepted deviation (intentional engineering choice).** First-match
+  + normal agreement is deterministic (follows cache order, tests pin both
+  orders), the inherited impulse always comes from the point actually
+  matched, and a flipped normal never inherits across the flip (Bullet
+  would). The extra `dot ≥ 0.9` gate is considered the right call for this
+  codebase: it trades an occasional warm-start reset for never inheriting
+  an impulse across a contact-normal flip.
+- **D3 — Accepted deviation (intentional refresh policy).** The
+  rotation-drift gate is part of the self-authored refresh-guard mechanism
+  (deviations §1 "refresh guards"); q/−q double cover can cause one
+  redundant re-detection only — the refreshed contact geometry is
+  identical either way.
+
+Subsystems not covered by this audit: narrow-phase band semantics
+(`04-convex-convex`), detection-side `reduce` targets, and solver consumption
+of the emitted rows — those live in their own audit slots.
