@@ -813,5 +813,468 @@ mod tests {
             assert_eq!(sweep.aabb_candidates(q), brute.aabb_candidates(q), "query {q:?}");
         }
     }
+
+    // --------------------------------------------------------------
+    // Adversarial validation: the quantized/incremental pair cache must
+    // always be a superset of the exact overlapping pairs, so that
+    // `compute_pairs`' exact filter reproduces brute force pair for pair.
+    // --------------------------------------------------------------
+
+    use super::super::BruteForceBroadPhase;
+
+    /// Deterministic LCG shared by the randomized adversarial tests.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0
+        }
+
+        /// Uniform integer in `[0, n)`.
+        fn below(&mut self, n: u64) -> u64 {
+            self.next_u64() % n
+        }
+
+        /// Uniform `Real` in `[0, 1)`.
+        fn unit(&mut self) -> Real {
+            (self.next_u64() >> 11) as Real / (1u64 << 53) as Real
+        }
+
+        /// Uniform `Real` in `[lo, hi)`.
+        fn range(&mut self, lo: Real, hi: Real) -> Real {
+            lo + (hi - lo) * self.unit()
+        }
+    }
+
+    fn random_aabb(rng: &mut Lcg) -> Aabb {
+        let base = Vector3::new(rng.range(-20.0, 20.0), rng.range(-20.0, 20.0), rng.range(-20.0, 20.0));
+        let extent = Vector3::new(rng.range(0.1, 2.0), rng.range(0.1, 2.0), rng.range(0.1, 2.0));
+        Aabb::new(base, base + extent)
+    }
+
+    /// One interleaved state-machine step applied identically to both broad
+    /// phases: create / small move (sub-quantum jitter through bin-crossing
+    /// drift) / near teleport / far teleport (frame escapes) / destroy.
+    fn random_step(
+        rng: &mut Lcg,
+        sweep: &mut AxisSweep3,
+        brute: &mut BruteForceBroadPhase,
+        state: &mut [Option<Aabb>],
+        live: &mut Vec<usize>,
+    ) {
+        let op = rng.below(100);
+        if live.is_empty() || (live.len() < state.len() && op < 25) {
+            let aabb = random_aabb(rng);
+            let s = sweep.create_proxy(aabb);
+            let b = brute.create_proxy(aabb);
+            assert_eq!(s, b);
+            state[s] = Some(aabb);
+            live.push(s);
+        } else if op < 65 {
+            // Small move with a randomly scaled offset: sub-quantum jitter
+            // (bin width here is ~6e-4 units), small bin crossings, and
+            // larger drifts.
+            let i = live[rng.below(live.len() as u64) as usize];
+            let cur = state[i].unwrap();
+            let scale = match rng.below(4) {
+                0 => 2e-6 * (1.0 + cur.min.x.abs()),
+                1 => 1e-3,
+                2 => 1e-1,
+                _ => 1.0,
+            };
+            let d = Vector3::new(rng.range(-scale, scale), rng.range(-scale, scale), rng.range(-scale, scale));
+            let next = Aabb::new(cur.min + d, cur.max + d);
+            sweep.set_aabb(i, next);
+            brute.set_aabb(i, next);
+            state[i] = Some(next);
+        } else if op < 75 {
+            // Near teleport (stays inside the established frame).
+            let i = live[rng.below(live.len() as u64) as usize];
+            let cur = state[i].unwrap();
+            let center = Vector3::new(rng.range(-20.0, 20.0), rng.range(-20.0, 20.0), rng.range(-20.0, 20.0));
+            let half = (cur.max - cur.min) * 0.5;
+            let next = Aabb::new(center - half, center + half);
+            sweep.set_aabb(i, next);
+            brute.set_aabb(i, next);
+            state[i] = Some(next);
+        } else if op < 80 {
+            // Far teleport: likely escapes the frame and forces a rebuild.
+            let i = live[rng.below(live.len() as u64) as usize];
+            let cur = state[i].unwrap();
+            let side = if rng.below(2) == 0 { 1.0 } else { -1.0 };
+            let base = Vector3::new(side * rng.range(200.0, 2000.0), 0.0, 0.0);
+            let half = (cur.max - cur.min) * 0.5;
+            let next = Aabb::new(base - half, base + half);
+            sweep.set_aabb(i, next);
+            brute.set_aabb(i, next);
+            state[i] = Some(next);
+        } else if live.len() > 4 {
+            // Destroy (keep a healthy pool so pairs keep forming).
+            let k = rng.below(live.len() as u64) as usize;
+            let i = live.swap_remove(k);
+            sweep.destroy_proxy(i);
+            brute.destroy_proxy(i);
+            state[i] = None;
+        } else {
+            let aabb = random_aabb(rng);
+            let s = sweep.create_proxy(aabb);
+            let b = brute.create_proxy(aabb);
+            assert_eq!(s, b);
+            state[s] = Some(aabb);
+            live.push(s);
+        }
+    }
+
+    /// Thousands of interleaved create/move/teleport/destroy operations
+    /// across several seeds; after every single operation the pair output
+    /// must match brute force exactly (the empirical core of the
+    /// superset-invariant validation).
+    #[test]
+    fn randomized_state_machine_matches_brute_force() {
+        const SEEDS: u64 = 6;
+        const OPS: usize = 2048;
+        const POOL: usize = 48;
+        for seed in 0..SEEDS {
+            let mut rng = Lcg::new(0x9e37_79b9_7f4a_7c15 ^ seed.wrapping_mul(0x517c_c1b7_2722_0a95));
+            let mut sweep = AxisSweep3::new();
+            let mut brute = BruteForceBroadPhase::new();
+            let mut state = vec![None; POOL];
+            let mut live = Vec::new();
+            for op in 0..OPS {
+                random_step(&mut rng, &mut sweep, &mut brute, &mut state, &mut live);
+                assert_eq!(
+                    sweep.compute_pairs(),
+                    brute.compute_pairs(),
+                    "seed {seed} diverged at op {op}"
+                );
+            }
+        }
+    }
+
+    /// Direct inspection of the internal pair cache: it must stay strictly
+    /// sorted without duplicates, reference only live proxies (no stale
+    /// entries after destroys), contain every exact overlapping pair (the
+    /// superset property itself, not just the filtered output), and its
+    /// exact-filtered output must equal the brute-force pair set.
+    #[test]
+    fn pair_cache_is_live_superset_of_exact_pairs() {
+        const OPS: usize = 512;
+        const POOL: usize = 24;
+        for seed in 0..2u64 {
+            let mut rng = Lcg::new(0x243f_6a88_85a3_08d3 ^ seed.wrapping_mul(0x517c_c1b7_2722_0a95));
+            let mut sweep = AxisSweep3::new();
+            let mut brute = BruteForceBroadPhase::new();
+            let mut state = vec![None; POOL];
+            let mut live = Vec::new();
+            for _ in 0..OPS {
+                random_step(&mut rng, &mut sweep, &mut brute, &mut state, &mut live);
+                // Strictly sorted by construction (no duplicates).
+                assert!(sweep.pairs.windows(2).all(|w| w[0] < w[1]));
+                // Every cached pair references live proxies.
+                for &(a, b) in &sweep.pairs {
+                    assert!(state[a].is_some() && state[b].is_some(), "stale cache pair ({a}, {b})");
+                }
+                // Superset: every exact overlapping pair must be cached.
+                for (i, a) in state.iter().enumerate() {
+                    let Some(a) = a else { continue };
+                    for (j, b) in state.iter().enumerate().skip(i + 1) {
+                        let Some(b) = b else { continue };
+                        if a.overlaps(b) {
+                            assert!(
+                                sweep.pairs.binary_search(&(i, j)).is_ok(),
+                                "exact pair ({i}, {j}) missing from cache"
+                            );
+                        }
+                    }
+                }
+                // Filtered output equals brute force.
+                assert_eq!(sweep.compute_pairs(), brute.compute_pairs());
+            }
+        }
+    }
+
+    /// Sweep one proxy through another along each axis: coarse steps cross
+    /// both contact boundaries, then sub-quantum fine steps crawl across the
+    /// boundaries themselves. Every step must reproduce the brute-force pair
+    /// set — this covers separation/touch/overlap transitions on min and max
+    /// edges, movements across equal quantized positions, and the tie regions
+    /// between neighboring edges on all three axes.
+    #[test]
+    fn quantization_boundary_scan_matches_brute_force() {
+        for axis in 0..3 {
+            let mut sweep = AxisSweep3::new();
+            let mut brute = BruteForceBroadPhase::new();
+            let a = Aabb::new(Vector3::ZERO, Vector3::ONE);
+            assert_eq!(sweep.create_proxy(a), brute.create_proxy(a));
+            let mut bmin = Vector3::new(0.25, 0.25, 0.25);
+            let mut bmax = Vector3::new(0.75, 0.75, 0.75);
+            bmin[axis] = -3.0;
+            bmax[axis] = -2.0;
+            let b0 = Aabb::new(bmin, bmax);
+            assert_eq!(sweep.create_proxy(b0), brute.create_proxy(b0));
+            let place = |t: Real,
+                             bmin: &mut Vector3,
+                             bmax: &mut Vector3,
+                             sweep: &mut AxisSweep3,
+                             brute: &mut BruteForceBroadPhase| {
+                bmin[axis] = t;
+                bmax[axis] = t + 1.0;
+                let b = Aabb::new(*bmin, *bmax);
+                sweep.set_aabb(1, b);
+                brute.set_aabb(1, b);
+                assert_eq!(
+                    sweep.compute_pairs(),
+                    brute.compute_pairs(),
+                    "axis {axis} diverged at t = {t}"
+                );
+            };
+            // Coarse pass: cross B.max vs A.min, then B.min vs A.max.
+            let steps = 200;
+            for i in 0..=steps {
+                let t = -3.0 + 5.0 * i as Real / steps as Real;
+                place(t, &mut bmin, &mut bmax, &mut sweep, &mut brute);
+            }
+            // Fine passes with sub-quantum steps around both boundaries.
+            for i in 0..=400 {
+                let t = 0.98 + i as Real * 1e-4; // B.min crosses A.max = 1
+                place(t, &mut bmin, &mut bmax, &mut sweep, &mut brute);
+            }
+            for i in 0..=400 {
+                let t = -1.02 + i as Real * 1e-4; // B.max crosses A.min = 0
+                place(t, &mut bmin, &mut bmax, &mut sweep, &mut brute);
+            }
+        }
+    }
+
+    /// Degenerate point proxies (min == max): coincident points touch
+    /// (`overlaps` uses `<=`) and must pair; a sub-quantum step apart must
+    /// unpair via the exact filter while the quantized edges stay put; and
+    /// stepping back must restore the pair from the untouched cache.
+    #[test]
+    fn degenerate_point_proxies_match_brute_force() {
+        let mut sweep = AxisSweep3::new();
+        let mut brute = BruteForceBroadPhase::new();
+        let p = Vector3::splat(0.5);
+        let pa = Aabb::new(p, p);
+        assert_eq!(sweep.create_proxy(pa), brute.create_proxy(pa));
+        let pb = Aabb::new(p, p);
+        assert_eq!(sweep.create_proxy(pb), brute.create_proxy(pb));
+        // Coincident points overlap (touching counts).
+        assert_eq!(sweep.compute_pairs().len(), 1);
+        assert_eq!(sweep.compute_pairs(), brute.compute_pairs());
+        // A sub-quantum step apart: quantized edges unchanged, exact filter
+        // must drop the pair.
+        let apart = Aabb::new(p + Vector3::splat(1e-5), p + Vector3::splat(1e-5));
+        sweep.set_aabb(1, apart);
+        brute.set_aabb(1, apart);
+        assert!(sweep.compute_pairs().is_empty());
+        assert_eq!(sweep.compute_pairs(), brute.compute_pairs());
+        // Moving back restores the pair.
+        sweep.set_aabb(1, pb);
+        brute.set_aabb(1, pb);
+        assert_eq!(sweep.compute_pairs().len(), 1);
+        assert_eq!(sweep.compute_pairs(), brute.compute_pairs());
+    }
+
+    /// Every non-empty axis-overlap combination (X only, X+Y, ... XYZ): a
+    /// pair must be reported exactly when all three axes overlap.
+    #[test]
+    fn per_axis_overlap_combinations() {
+        for mask in 1..8u32 {
+            let mut sweep = AxisSweep3::new();
+            let mut brute = BruteForceBroadPhase::new();
+            let a = Aabb::new(Vector3::ZERO, Vector3::ONE);
+            assert_eq!(sweep.create_proxy(a), brute.create_proxy(a));
+            let mut bmin = Vector3::new(2.0, 2.0, 2.0);
+            let mut bmax = Vector3::new(3.0, 3.0, 3.0);
+            for k in 0..3 {
+                if mask & (1 << k) != 0 {
+                    bmin[k] = 0.25;
+                    bmax[k] = 0.75;
+                }
+            }
+            let b = Aabb::new(bmin, bmax);
+            assert_eq!(sweep.create_proxy(b), brute.create_proxy(b));
+            let expected: Vec<(usize, usize)> = if mask == 7 { vec![(0, 1)] } else { Vec::new() };
+            assert_eq!(sweep.compute_pairs(), expected, "mask {mask}");
+            assert_eq!(sweep.compute_pairs(), brute.compute_pairs(), "mask {mask}");
+        }
+    }
+
+    /// Destroying proxies out of a fully-overlapping cluster one at a time:
+    /// the cache must shed exactly the destroyed proxy's pairs (no stale
+    /// entries, no duplicates) and output must match brute force throughout.
+    #[test]
+    fn destroy_from_dense_cluster_sheds_cache_pairs() {
+        let mut sweep = AxisSweep3::new();
+        let mut brute = BruteForceBroadPhase::new();
+        for i in 0..16u32 {
+            let off = Vector3::new(0.1 * i as Real, 0.0, 0.0);
+            let aabb = Aabb::new(off, off + Vector3::splat(2.0));
+            assert_eq!(sweep.create_proxy(aabb), brute.create_proxy(aabb));
+        }
+        // 16 pairwise-overlapping boxes -> 120 pairs.
+        assert_eq!(sweep.compute_pairs().len(), 120);
+        // Deterministic scattered destruction order (7 is coprime to 16).
+        let mut order: Vec<usize> = (0..16).collect();
+        order.sort_by_key(|&i| (i * 7) % 16);
+        for (step, &slot) in order.iter().enumerate() {
+            sweep.destroy_proxy(slot);
+            brute.destroy_proxy(slot);
+            assert!(
+                sweep.pairs.iter().all(|&(a, b)| a != slot && b != slot),
+                "stale pairs for destroyed slot {slot}"
+            );
+            assert!(sweep.pairs.windows(2).all(|w| w[0] < w[1]));
+            assert_eq!(sweep.compute_pairs(), brute.compute_pairs(), "step {step}");
+        }
+        assert!(sweep.pairs.is_empty());
+    }
+
+    /// Repeated far teleports (0 <-> 800): every teleport escapes the frame
+    /// (100% headroom cannot cover the jump) and must trigger a full rebuild,
+    /// with brute-force equivalence after every step.
+    #[test]
+    fn oscillating_escapes_rebuild_and_match_brute_force() {
+        let mut sweep = AxisSweep3::new();
+        let mut brute = BruteForceBroadPhase::new();
+        let a = sweep.create_proxy(Aabb::new(Vector3::ZERO, Vector3::ONE));
+        brute.create_proxy(Aabb::new(Vector3::ZERO, Vector3::ONE));
+        let mut rebuilds = 0;
+        for round in 0..12u32 {
+            for x in [800.0, 0.0] {
+                let next = Aabb::new(Vector3::new(x, 0.0, 0.0), Vector3::new(x + 1.0, 1.0, 1.0));
+                if sweep.needs_rebuild(&next) {
+                    rebuilds += 1;
+                }
+                sweep.set_aabb(a, next);
+                brute.set_aabb(a, next);
+                assert_eq!(sweep.compute_pairs(), brute.compute_pairs(), "round {round}");
+            }
+        }
+        assert!(rebuilds >= 24, "expected an escape rebuild every teleport, got {rebuilds}");
+    }
+
+    /// A far teleport widens the quantization frame (it must span the home
+    /// proxies kept behind and the far region), and moving back does not
+    /// shrink it (documented perf-only stickiness: only an escape triggers a
+    /// rebuild). Correctness must not depend on frame granularity: a dense
+    /// cluster under the resulting coarse quantization stays brute-force
+    /// exact through the exact filter.
+    #[test]
+    fn frame_sticks_after_far_round_trip_and_stays_exact() {
+        let mut sweep = AxisSweep3::new();
+        let mut brute = BruteForceBroadPhase::new();
+        let home = Aabb::new(Vector3::ZERO, Vector3::ONE);
+        let a = sweep.create_proxy(home);
+        brute.create_proxy(home);
+        // Keep a home body behind so the frame spans both regions during the
+        // far phase; the return trip is then not an escape and the wide
+        // frame sticks.
+        sweep.create_proxy(home);
+        brute.create_proxy(home);
+        let far = Aabb::new(Vector3::splat(1e6), Vector3::splat(1e6 + 1.0));
+        sweep.set_aabb(a, far);
+        brute.set_aabb(a, far);
+        assert_eq!(sweep.compute_pairs(), brute.compute_pairs());
+        sweep.set_aabb(a, home);
+        brute.set_aabb(a, home);
+        assert_eq!(sweep.compute_pairs(), brute.compute_pairs());
+        // The frame kept the far region (only escapes trigger rebuilds).
+        let width = (sweep.frame_max - sweep.frame_min).max_element();
+        assert!(width > 5e5, "frame unexpectedly shrunk to {width}");
+        assert!(!sweep.needs_rebuild(&home), "home must sit inside the sticky frame");
+        // A dense cluster under the coarse quantization must stay exact:
+        // boxes with extent 1 at spacing 0.25 (binary-exact, so the overlap
+        // window is precision-independent) overlap while their slot distance
+        // is <= 4 (touching at exactly 4) and separate beyond.
+        for i in 0..12u32 {
+            let off = Vector3::new(0.25 * i as Real, 0.0, 0.0);
+            let cluster = Aabb::new(off, off + Vector3::splat(1.0));
+            sweep.create_proxy(cluster);
+            brute.create_proxy(cluster);
+            assert_eq!(sweep.compute_pairs(), brute.compute_pairs(), "cluster {i}");
+        }
+        // 38 cluster pairs + 2 x 5 home/cluster + 1 home pair.
+        assert_eq!(sweep.compute_pairs().len(), 49);
+    }
+
+    /// Plane-like infinite AABBs, a half-bounded proxy (finite min, infinite
+    /// max — collapsing `frame_max` to -INF on that axis), and finite
+    /// coordinates around `FRAME_COMPONENT_LIMIT`: no panic anywhere, and
+    /// brute-force-equivalent output in every configuration.
+    #[test]
+    fn extreme_and_unbounded_proxies_match_brute_force() {
+        let inf = Real::INFINITY;
+        let ninf = Real::NEG_INFINITY;
+        // Plane-like fully unbounded proxy alongside finite bodies.
+        let mut sweep = AxisSweep3::new();
+        let mut brute = BruteForceBroadPhase::new();
+        let plane = Aabb::new(Vector3::splat(ninf), Vector3::splat(inf));
+        sweep.create_proxy(plane);
+        brute.create_proxy(plane);
+        for i in 0..8u32 {
+            let off = Vector3::new(1.0 + i as Real, 2.0, 3.0);
+            let body = Aabb::new(off, off + Vector3::ONE);
+            sweep.create_proxy(body);
+            brute.create_proxy(body);
+        }
+        assert_eq!(sweep.compute_pairs(), brute.compute_pairs());
+        // Half-bounded proxy mixed in (finite min, infinite max).
+        let half = Aabb::new(Vector3::new(-1.0, ninf, ninf), Vector3::splat(inf));
+        sweep.create_proxy(half);
+        brute.create_proxy(half);
+        assert_eq!(sweep.compute_pairs(), brute.compute_pairs());
+        // Degenerate frame corner on its own: every proxy has a finite min
+        // but an infinite max, so frame_max collapses to -INF and the axis
+        // quantizes fully conservatively; the exact filter restores output.
+        let mut sweep2 = AxisSweep3::new();
+        let mut brute2 = BruteForceBroadPhase::new();
+        let h1 = Aabb::new(Vector3::new(-1.0, ninf, ninf), Vector3::splat(inf));
+        sweep2.create_proxy(h1);
+        brute2.create_proxy(h1);
+        let h2 = Aabb::new(Vector3::new(5.0, ninf, ninf), Vector3::splat(inf));
+        sweep2.create_proxy(h2);
+        brute2.create_proxy(h2);
+        assert!(sweep2.frame_max.x < 0.0, "expected the collapsed frame_max corner");
+        assert_eq!(sweep2.compute_pairs(), brute2.compute_pairs());
+        // Extreme finite magnitudes at/around the frame limit.
+        let bases: [Real; 5] = [1e17, 1e18, 1.5e18, 1e19, 1e30];
+        for base in bases {
+            let mut sweep = AxisSweep3::new();
+            let mut brute = BruteForceBroadPhase::new();
+            // Scale the extents with the base so f32 keeps them representable.
+            let ext = (base * 1e-9).max(1.0);
+            let aabb_a = Aabb::new(Vector3::new(base, 0.0, 0.0), Vector3::new(base + ext, ext, ext));
+            let aabb_b = Aabb::new(
+                Vector3::new(base + ext * 0.5, 0.0, 0.0),
+                Vector3::new(base + ext * 1.5, ext, ext),
+            );
+            let aabb_c = Aabb::new(
+                Vector3::new(base + ext * 10.0, 0.0, 0.0),
+                Vector3::new(base + ext * 11.0, ext, ext),
+            );
+            assert_eq!(sweep.create_proxy(aabb_a), brute.create_proxy(aabb_a));
+            assert_eq!(sweep.create_proxy(aabb_b), brute.create_proxy(aabb_b));
+            assert_eq!(sweep.create_proxy(aabb_c), brute.create_proxy(aabb_c));
+            assert_eq!(sweep.compute_pairs(), brute.compute_pairs(), "base {base}");
+            // Moving an extreme-scale proxy must not panic or corrupt pairs.
+            let moved = Aabb::new(
+                Vector3::new(base + ext * 0.25, 0.0, 0.0),
+                Vector3::new(base + ext * 1.25, ext, ext),
+            );
+            sweep.set_aabb(1, moved);
+            brute.set_aabb(1, moved);
+            assert_eq!(sweep.compute_pairs(), brute.compute_pairs(), "base {base} moved");
+        }
+    }
 }
 
