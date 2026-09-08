@@ -60,13 +60,17 @@ impl UnionFind {
 /// `btUnionFind` per `buildAndProcessIslands`): the union-find arrays plus
 /// the awake-flag vectors, grown to the node count on demand so steady-state
 /// steps allocate nothing (the 1000-body stack profile billed five per-step
-/// heap allocations here).
+/// heap allocations here). `proxy_flags` carries one eligibility byte per
+/// broad-phase proxy (bit 0: sensor — never merges islands; bit 1:
+/// non-default group/mask — needs the full pair test), so the all-default
+/// common case is a single byte test per pair side.
 #[derive(Default)]
 pub(crate) struct IslandScratch {
     pub(crate) uf: UnionFind,
     pub(crate) island_awake: Vec<bool>,
     pub(crate) body_awake: Vec<bool>,
     pub(crate) mb_awake: Vec<bool>,
+    pub(crate) proxy_flags: Vec<u8>,
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ use crate::softbody::cluster::solve_clusters;
 use crate::softbody::collide::collide_vf_ss;
 use crate::softbody::solver::MbSolveContext;
 use crate::softbody::config::SoftCollision;
-use crate::softbody::{AngularJointSpecs, LinearJointSpecs, Side, SoftBody};
+use crate::softbody::{AngularJointSpecs, LinearJointSpecs, Side, SoftBody, SoftJoint};
 use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
 use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, RollingFriction, SLOP, SPLIT_TURN_ERP};
 
@@ -628,13 +628,6 @@ impl PhysicsWorld {
                     sensor,
                 });
         }
-        self.no_collision_pairs.clear();
-        for c in &self.constraints {
-            if c.disable_collisions() {
-                let (a, b) = (c.body_a().index(), c.body_b().index());
-                Self::insert_suppressed(&mut self.no_collision_pairs, a, b);
-            }
-        }
     }
 
     /// Collision events of the step that ran last. Every pair with at
@@ -698,6 +691,21 @@ impl PhysicsWorld {
         let pair = (a.min(b), a.max(b));
         if let Err(pos) = set.binary_search(&pair) {
             set.insert(pos, pair);
+        }
+    }
+
+    /// Rebuild the joint-collision-suppression set from the current
+    /// constraint list. Bullet resolves suppression live at pair processing
+    /// (`checkCollideWithOverride` over the ignore list), so a runtime
+    /// `set_disable_collisions` flip takes effect on the next step — this
+    /// per-step rebuild is the cached equivalent.
+    fn rebuild_no_collision_pairs(&mut self) {
+        self.no_collision_pairs.clear();
+        for c in &self.constraints {
+            if c.disable_collisions() {
+                let (a, b) = (c.body_a().index(), c.body_b().index());
+                Self::insert_suppressed(&mut self.no_collision_pairs, a, b);
+            }
         }
     }
 
@@ -817,13 +825,52 @@ impl PhysicsWorld {
         SoftBodyHandle::from_index(index)
     }
 
+    /// The two sides of any soft joint (every [`SoftJoint`] variant carries
+    /// a `bodies` pair).
+    fn joint_sides(joint: &SoftJoint) -> &[Side; 2] {
+        match joint {
+            SoftJoint::Linear(j) => &j.bodies,
+            SoftJoint::Angular(j) => &j.bodies,
+            SoftJoint::Contact(j) => &j.bodies,
+        }
+    }
+
+    fn joint_sides_mut(joint: &mut SoftJoint) -> &mut [Side; 2] {
+        match joint {
+            SoftJoint::Linear(j) => &mut j.bodies,
+            SoftJoint::Angular(j) => &mut j.bodies,
+            SoftJoint::Contact(j) => &mut j.bodies,
+        }
+    }
+
     /// Remove a soft body: its proxy is destroyed (slot recycled) and any
     /// anchors of *rigid* bodies pinning it become inert (Bullet removes
     /// the soft body's anchors with it). The other soft bodies renumber —
     /// their handles shift down past the removed slot (index semantics,
-    /// unlike the stable rigid-body handles).
+    /// unlike the stable rigid-body handles); cross-body soft joints
+    /// renumber with them and joints anchored to the removed body die.
     pub fn remove_soft_body(&mut self, handle: SoftBodyHandle) {
         let index = handle.index();
+        // Collision events: the soft body's touches end with a Stopped,
+        // like `remove_body` (its pairs' other sides stay alive). The pair
+        // keys are resolved and the per-pair event metadata computed BEFORE
+        // any list shifts: the surviving soft slots renumber below, so a
+        // post-removal lookup by the old key would read the wrong body —
+        // or past the end of the list.
+        let removed = ContactKey::soft(index);
+        let mut ended = Vec::new();
+        self.prev_touching.retain(|p| {
+            let hit = p.0 == removed || p.1 == removed;
+            if hit {
+                ended.push(*p);
+            }
+            !hit
+        });
+        self.touching.retain(|p| p.0 != removed && p.1 != removed);
+        let ended: Vec<_> = ended
+            .into_iter()
+            .map(|(a, b)| (a, b, self.pair_opted_in(a, b), self.pair_sensor(a, b)))
+            .collect();
         let proxy = self.soft_proxies[index];
         self.broadphase.destroy_proxy(proxy);
         self.proxy_owners[proxy] = ProxyOwner::Free;
@@ -837,20 +884,9 @@ impl PhysicsWorld {
                 *i -= 1;
             }
         }
-        // Collision events: the soft body's touches end with a Stopped,
-        // like `remove_body` (its pairs' other sides stay alive). The
-        // surviving soft slots renumber, so their tracked keys shift down
-        // with them.
-        let removed = ContactKey::soft(index);
-        let mut ended = Vec::new();
-        self.prev_touching.retain(|p| {
-            let hit = p.0 == removed || p.1 == removed;
-            if hit {
-                ended.push(*p);
-            }
-            !hit
-        });
-        self.touching.retain(|p| p.0 != removed && p.1 != removed);
+        // The surviving soft slots renumber, so their tracked keys shift
+        // down with them (the removed body's own keys left with the
+        // `retain`s above).
         let renumber = |k: &mut ContactKey| {
             if k.0 == 2 && k.1 > index as u32 {
                 k.1 -= 1;
@@ -864,11 +900,31 @@ impl PhysicsWorld {
             renumber(&mut p.0);
             renumber(&mut p.1);
         }
-        for (a, b) in ended {
-            if !self.pair_opted_in(a, b) {
+        // Cross-body soft joints (user-installed, plus the previous step's
+        // contact joints): joints anchored to the removed body die with it,
+        // the surviving cluster sides renumber with their bodies. Without
+        // this the cluster solver would index a shifted (or out-of-range)
+        // body.
+        for sb in &mut self.soft_bodies {
+            sb.joints.retain(|joint| {
+                !Self::joint_sides(joint).iter().any(|s| {
+                    matches!(s, Side::Cluster { soft, .. } if soft.index() == index)
+                })
+            });
+            for joint in &mut sb.joints {
+                for side in Self::joint_sides_mut(joint) {
+                    if let Side::Cluster { soft, .. } = side
+                        && soft.index() > index
+                    {
+                        *soft = SoftBodyHandle::from_index(soft.index() - 1);
+                    }
+                }
+            }
+        }
+        for (a, b, opted_in, sensor) in ended {
+            if !opted_in {
                 continue;
             }
-            let sensor = self.pair_sensor(a, b);
             self.contact_events
                 .push(CollisionEvent::Stopped {
                     a: a.object(),
@@ -1048,13 +1104,6 @@ impl PhysicsWorld {
     /// `addConstraint`; the joint suppresses collisions between its bodies by
     /// default, see [`Constraint::set_disable_collisions`]).
     pub fn add_constraint(&mut self, constraint: Constraint) -> usize {
-        if constraint.disable_collisions() {
-            Self::insert_suppressed(
-                &mut self.no_collision_pairs,
-                constraint.body_a().index(),
-                constraint.body_b().index(),
-            );
-        }
         self.constraints.push(constraint);
         self.constraints.len() - 1
     }
@@ -1075,13 +1124,6 @@ impl PhysicsWorld {
     /// applied (Bullet's `removeConstraint`; later joints shift down).
     pub fn remove_constraint(&mut self, index: usize) {
         self.constraints.remove(index);
-        self.no_collision_pairs.clear();
-        for c in &self.constraints {
-            if c.disable_collisions() {
-                let (a, b) = (c.body_a().index(), c.body_b().index());
-                Self::insert_suppressed(&mut self.no_collision_pairs, a, b);
-            }
-        }
     }
 
 }
@@ -1097,6 +1139,178 @@ mod tests {
     use crate::body::ActivationState;
     use crate::body::filter_groups;
     use approx::assert_relative_eq;
+
+    /// Removing the LAST soft body while its pair is event-tracked: the
+    /// ended pair's opt-in/sensor lookups must resolve against the
+    /// pre-removal soft-body list (the old key indexes past the end after
+    /// the removal), and the Stopped must still be emitted.
+    #[test]
+    fn remove_last_soft_body_with_tracked_touch_emits_stopped() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.25, 2.0)),
+                Vector3::new(0.0, 0.25, 0.0),
+            )
+            .collision_events(true),
+        );
+        // Slot 0: parked far away, never touches anything.
+        let far = crate::softbody::helpers::create_rope(
+            Vector3::new(50.0, 5.0, 0.0),
+            Vector3::new(50.0, 3.0, 0.0),
+            6,
+            0,
+        );
+        world.add_soft_body(far);
+        // Slot 1 (the last): rests on the plate, tracked via the plate's
+        // opt-in.
+        let near = crate::softbody::helpers::create_rope(
+            Vector3::new(0.0, 1.4, 0.0),
+            Vector3::new(0.0, 0.2, 0.0),
+            6,
+            0,
+        );
+        world.add_soft_body(near);
+        let dt = 1.0 / 60.0;
+        let mut saw_touch = false;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+            saw_touch |= !world.contact_events().is_empty();
+        }
+        assert!(saw_touch, "precondition: no touch before the removal");
+        world.remove_soft_body(SoftBodyHandle::from_index(1));
+        assert!(
+            world.contact_events().iter().any(|e| matches!(
+                e,
+                CollisionEvent::Stopped {
+                    a: CollisionObject::Body(_),
+                    b: CollisionObject::Soft(h),
+                    ..
+                } if h.index() == 1
+            )),
+            "removing the last soft body lost its Stopped event"
+        );
+    }
+
+    /// Removing a MIDDLE soft body keeps the tracked-pair bookkeeping
+    /// coherent: the Stopped for its touches is emitted with the removed
+    /// body's identity, and the surviving keys renumber. The end pair's
+    /// opt-in must be resolved BEFORE the list shifts — after it, the slot
+    /// holds a different body whose flags decide the event's fate.
+    #[test]
+    fn remove_middle_soft_body_emits_stopped() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.25, 2.0)),
+            Vector3::new(0.0, 0.25, 0.0),
+        ));
+        // Slot 0: far away.
+        let far0 = crate::softbody::helpers::create_rope(
+            Vector3::new(50.0, 5.0, 0.0),
+            Vector3::new(50.0, 3.0, 0.0),
+            6,
+            0,
+        );
+        world.add_soft_body(far0);
+        // Slot 1 (middle): rests on the plate; THIS body opts into events.
+        let mut near = crate::softbody::helpers::create_rope(
+            Vector3::new(0.0, 1.4, 0.0),
+            Vector3::new(0.0, 0.2, 0.0),
+            6,
+            0,
+        );
+        near.collision_events = true;
+        world.add_soft_body(near);
+        // Slot 2: far away, NOT opted in — after the removal it slides into
+        // slot 1, so a post-removal opt-in lookup would read its flags and
+        // silently drop the event.
+        let far2 = crate::softbody::helpers::create_rope(
+            Vector3::new(-50.0, 5.0, 0.0),
+            Vector3::new(-50.0, 3.0, 0.0),
+            6,
+            0,
+        );
+        world.add_soft_body(far2);
+        let dt = 1.0 / 60.0;
+        let mut saw_touch = false;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+            saw_touch |= !world.contact_events().is_empty();
+        }
+        assert!(saw_touch, "precondition: no touch before the removal");
+        world.remove_soft_body(SoftBodyHandle::from_index(1));
+        assert!(
+            world.contact_events().iter().any(|e| matches!(
+                e,
+                CollisionEvent::Stopped {
+                    a: CollisionObject::Body(_),
+                    b: CollisionObject::Soft(h),
+                    ..
+                } if h.index() == 1
+            )),
+            "removing a middle soft body dropped the opted-in body's Stopped event"
+        );
+    }
+
+    /// Cross-body soft joints renumber with the removal: a joint on a
+    /// surviving body whose other side is a cluster of a shifted body
+    /// retargets to the body's new slot (joints anchored to the removed
+    /// body die with it), so the cluster solver never indexes a stale or
+    /// out-of-range body.
+    #[test]
+    fn remove_soft_body_renumbers_cross_soft_joint_sides() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let cluster_at = |x: Real, y: Real| {
+            let mut sb = crate::softbody::SoftBody::new(
+                &[Vector3::new(x, y, 0.0), Vector3::new(x, y - 0.5, 0.0)],
+                &[1.0, 1.0],
+            );
+            sb.generate_clusters(1, 10_000);
+            sb
+        };
+        let s0 = world.add_soft_body(cluster_at(0.0, 5.0));
+        // Slot 1: the middle body that will be removed.
+        let s1 = crate::softbody::helpers::create_rope(
+            Vector3::new(30.0, 5.0, 0.0),
+            Vector3::new(30.0, 3.0, 0.0),
+            6,
+            0,
+        );
+        world.add_soft_body(s1);
+        let s2 = world.add_soft_body(cluster_at(-30.0, 5.0));
+        // A user joint on S0 anchored to S2's master cluster.
+        world.add_soft_linear_joint(
+            s0,
+            LinearJointSpecs {
+                position: Vector3::new(0.0, 5.0, 0.0),
+                ..LinearJointSpecs::default()
+            },
+            Side::Cluster {
+                soft: s2,
+                cluster: 0,
+            },
+        );
+        world.remove_soft_body(SoftBodyHandle::from_index(1));
+        let sides = match &world.soft_body(s0).joints[0] {
+            SoftJoint::Linear(j) => j.bodies,
+            _ => panic!("expected the linear joint to survive"),
+        };
+        assert_eq!(
+            sides[1],
+            Side::Cluster {
+                soft: SoftBodyHandle::from_index(1),
+                cluster: 0,
+            },
+            "the joint side still points at the removed body's old slot"
+        );
+        // The retargeted joint keeps solving without indexing out of range.
+        for _ in 0..10 {
+            world.step_simulation(1.0 / 60.0);
+        }
+    }
 
     /// A composite "game moment" exercising the consumer-API tier together:
     /// an anti-gravity balloon rises through a trigger volume (per-body

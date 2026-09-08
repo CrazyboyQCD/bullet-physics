@@ -83,6 +83,11 @@ impl PhysicsWorld {
         self.contact_events.clear();
         self.touching.clear();
         self.rolling_rows.clear();
+        // Joint-collision suppression is re-derived from the current
+        // constraint list every step (Bullet resolves it live at pair
+        // processing, so runtime `set_disable_collisions` flips take effect
+        // on the step after they happen).
+        self.rebuild_no_collision_pairs();
 
         // 1. Integrate velocities from gravity and accumulated forces.
         // Sample the end-of-last-step speeds first: they feed the refresh-
@@ -1374,6 +1379,157 @@ mod tests {
             world.body(ball).position.z > 4.0,
             "filtered wall stopped the CCD ball: z = {}",
             world.body(ball).position.z
+        );
+    }
+
+    /// A `DisableSimulation` body keeps colliding like Bullet's: the
+    /// dispatcher only rejects pairs where BOTH sides are inactive, so the
+    /// solver writes impulses into it (its velocity changes) while the
+    /// integrator never moves it (`integrateTransforms` gates on
+    /// `isActive()`).
+    #[test]
+    fn disable_simulation_body_takes_solver_impulses_without_integrating() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let a = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 0.0, 0.0),
+                1.0,
+            )
+            .disable_deactivation(),
+        );
+        let b = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.6, 0.0, 0.0),
+                1.0,
+            )
+            .disable_simulation(),
+        );
+        world.body_mut(a).linear_velocity = Vector3::new(2.0, 0.0, 0.0);
+        world.step_simulation(1.0 / 60.0);
+        assert!(
+            world.body(b).linear_velocity.x > 0.0,
+            "the solver never wrote into the disabled body"
+        );
+        assert_eq!(
+            world.body(b).position,
+            Vector3::new(0.6, 0.0, 0.0),
+            "the disabled body was integrated"
+        );
+    }
+
+    /// Runtime `set_disable_collisions` flips take effect on the next step
+    /// (Bullet resolves suppression live at pair processing over the ignore
+    /// list): a suppressed pair starts colliding when suppression is
+    /// cleared, and a pair starts being suppressed when it is set. The
+    /// joint itself is disabled so only the collision path is exercised.
+    #[test]
+    fn constraint_suppression_flips_take_effect_next_step() {
+        let dt = 1.0 / 60.0;
+        let setup = |suppress: bool| -> (PhysicsWorld, BodyHandle, usize) {
+            let mut world = PhysicsWorld::new();
+            world.set_gravity(Vector3::ZERO);
+            let a = world.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::sphere(0.5),
+                    Vector3::new(0.0, 0.0, 0.0),
+                    1.0,
+                )
+                .disable_deactivation(),
+            );
+            let b = world.add_body(RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.75, 0.0, 0.0),
+            ));
+            let mut joint =
+                crate::constraint::Constraint::point2point(a, b, Vector3::ZERO, Vector3::ZERO);
+            joint.set_disable_collisions(suppress);
+            joint.set_enabled(false);
+            let index = world.add_constraint(joint);
+            (world, a, index)
+        };
+        let charge = |world: &mut PhysicsWorld, a: BodyHandle| {
+            let body = world.body_mut(a);
+            body.position = Vector3::new(0.0, 0.0, 0.0);
+            body.linear_velocity = Vector3::new(3.0, 0.0, 0.0);
+        };
+        let run = |world: &mut PhysicsWorld| {
+            for _ in 0..90 {
+                world.step_simulation(dt);
+            }
+        };
+        // Suppressed at build: the pair is skipped, A tunnels through B.
+        let (mut world, a, index) = setup(true);
+        charge(&mut world, a);
+        run(&mut world);
+        assert!(
+            world.body(a).position.x > 1.5,
+            "suppressed pair did not tunnel: x = {}",
+            world.body(a).position.x
+        );
+        // Clearing suppression at runtime resumes collisions: A is stopped
+        // by B.
+        charge(&mut world, a);
+        world.constraint_mut(index).set_disable_collisions(false);
+        run(&mut world);
+        assert!(
+            world.body(a).position.x < 1.5,
+            "cleared suppression still skips the pair: x = {}",
+            world.body(a).position.x
+        );
+        // Setting suppression at runtime (joint built unsuppressed) skips
+        // the pair again.
+        let (mut world, a, index) = setup(false);
+        charge(&mut world, a);
+        run(&mut world);
+        assert!(
+            world.body(a).position.x < 1.5,
+            "unsuppressed baseline did not collide: x = {}",
+            world.body(a).position.x
+        );
+        charge(&mut world, a);
+        world.constraint_mut(index).set_disable_collisions(true);
+        run(&mut world);
+        assert!(
+            world.body(a).position.x > 1.5,
+            "runtime suppression had no effect: x = {}",
+            world.body(a).position.x
+        );
+    }
+
+    /// A disabled joint still suppresses collisions between its bodies —
+    /// Bullet's ignore list is independent of `setEnabled` (only the solver
+    /// rows stop).
+    #[test]
+    fn disabled_constraint_still_suppresses_collisions() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let a = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 0.0, 0.0),
+                1.0,
+            )
+            .disable_deactivation(),
+        );
+        let b = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.75, 0.0, 0.0),
+        ));
+        let mut joint =
+            crate::constraint::Constraint::point2point(a, b, Vector3::ZERO, Vector3::ZERO);
+        joint.set_enabled(false);
+        world.add_constraint(joint);
+        world.body_mut(a).linear_velocity = Vector3::new(3.0, 0.0, 0.0);
+        for _ in 0..90 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(
+            world.body(a).position.x > 1.5,
+            "the disabled joint stopped suppressing collisions: x = {}",
+            world.body(a).position.x
         );
     }
 

@@ -2,6 +2,7 @@
 //! `docs/multibody-collision.md`), driven from the pair pass in `step.rs`.
 
 use super::*;
+use crate::body::filter_groups;
 
 impl PhysicsWorld {
 
@@ -10,13 +11,20 @@ impl PhysicsWorld {
     /// of `btSimulationIslandManager::buildIslands`; phase D design
     /// `docs/multibody-collision.md` §9).
     ///
-    /// Node space: one node per non-static rigid body, then one per
-    /// multibody (a multibody's collider chain is connected by construction,
-    /// so a single node yields the same partitions as Bullet's per-collider
-    /// chain merge). Merge rules: broad-phase AABB pairs between two dynamic
-    /// owners (conservative, like `findUnions` on the pair cache), enabled
-    /// joints between two dynamic bodies, and multibody constraints
-    /// (collider-less, a recorded deviation). An island with any awake
+    /// Node space: one node per non-static rigid body (including
+    /// `DisableSimulation` — Bullet's tag pass only skips static/kinematic
+    /// objects, so a disabled body still merges islands and can bridge its
+    /// neighbors), then one per multibody (a multibody's collider chain is
+    /// connected by construction, so a single node yields the same partitions
+    /// as Bullet's per-collider chain merge). Merge rules: collision-eligible
+    /// broad-phase pairs between two island members — group/mask and the
+    /// custom overlap filter (Bullet's pair-creation filter
+    /// `needsBroadphaseCollision`) plus the sensor exclusion of
+    /// `mergesSimulationIslands`; constraint-suppressed pairs still merge
+    /// (they live in the pair cache and `findUnions` never consults
+    /// `checkCollideWithOverride`) — then enabled joints between two dynamic
+    /// bodies, and multibody constraints (collider-less, a recorded
+    /// deviation). An island with any awake
     /// member (`Active`/`DisableDeactivation`, or an awake multibody) wakes
     /// its sleeping members; an island where everyone is sleep-ready goes to
     /// sleep as a unit.
@@ -27,8 +35,13 @@ impl PhysicsWorld {
         let total = soft_base + self.soft_bodies.len();
         // Pooled buffers, grown to the node count on demand (union-find
         // reset to `n` singletons).
-        let IslandScratch { uf, island_awake, body_awake, mb_awake } =
-            &mut self.island_scratch;
+        let IslandScratch {
+            uf,
+            island_awake,
+            body_awake,
+            mb_awake,
+            proxy_flags,
+        } = &mut self.island_scratch;
         uf.reset(total);
         island_awake.clear();
         island_awake.resize(total, false);
@@ -39,17 +52,134 @@ impl PhysicsWorld {
         // touching it stays awake.
         let bodies = &self.bodies;
         let collider_entries = &self.collider_entries;
+        let multibodies = &self.multibodies;
+        let soft_bodies = &self.soft_bodies;
+        let proxy_owners = &self.proxy_owners;
+        let pair_filter = self.pair_filter.as_deref();
         let node_of = |owner: ProxyOwner| match owner {
             ProxyOwner::Body(i) => bodies[i].participates_in_islands().then_some(i),
             ProxyOwner::Collider(e) => Some(num_bodies + collider_entries[e].mb),
             ProxyOwner::Soft(i) => Some(soft_base + i),
             ProxyOwner::Free => None,
         };
+        // Island-union eligibility per pair (Bullet's pair cache + the
+        // `findUnions` gate): the cache only holds group/mask- and
+        // overlap-filter-compatible pairs (`needsBroadphaseCollision` runs at
+        // pair creation) and `mergesSimulationIslands` additionally excludes
+        // sensor objects from merging. Constraint-suppressed pairs
+        // deliberately stay eligible: they live in the pair cache and
+        // `findUnions` never consults `checkCollideWithOverride`.
+        //
+        // The per-proxy flags precompute the rare cases (sensor bit,
+        // non-default filter bit) once per step, so the all-default common
+        // case is one byte test per side instead of the full walk.
+        proxy_flags.clear();
+        proxy_flags.resize(proxy_owners.len(), 0);
+        for (p, owner) in proxy_owners.iter().enumerate() {
+            let triple = match *owner {
+                ProxyOwner::Body(i) => {
+                    let b = &bodies[i];
+                    Some((
+                        b.collision_group,
+                        b.collision_mask,
+                        b.collision_flags
+                            .contains(CollisionFlags::NO_CONTACT_RESPONSE),
+                    ))
+                }
+                ProxyOwner::Collider(e) => {
+                    let ent = &collider_entries[e];
+                    let mb = &multibodies[ent.mb];
+                    let col = if ent.link < 0 {
+                        mb.base_collider()
+                    } else {
+                        mb.link_collider(ent.link as usize)
+                    };
+                    col.map(|col| (col.collision_group, col.collision_mask, false))
+                }
+                ProxyOwner::Soft(i) => {
+                    let s = &soft_bodies[i];
+                    Some((s.collision_group, s.collision_mask, false))
+                }
+                ProxyOwner::Free => None,
+            };
+            let Some((g, m, sensor)) = triple else {
+                continue;
+            };
+            let mut f = 0u8;
+            if sensor {
+                f |= 1;
+            }
+            if g != filter_groups::DEFAULT || m != filter_groups::ALL {
+                f |= 2;
+            }
+            proxy_flags[p] = f;
+        }
+        let proxy_flags: &[u8] = proxy_flags;
+        let pair_eligible = |pi: usize, pj: usize| -> bool {
+            let (fa, fb) = (proxy_flags[pi], proxy_flags[pj]);
+            // A sensor on either side never merges islands.
+            if (fa | fb) & 1 != 0 {
+                return false;
+            }
+            // Both sides on the default filter (and no custom overlap
+            // filter installed): the group/mask test cannot reject and the
+            // filter has nothing to say.
+            if (fa | fb) & 2 == 0 && pair_filter.is_none() {
+                return true;
+            }
+            let side = |p: usize| -> Option<(u16, u16, bool)> {
+                match proxy_owners[p] {
+                    ProxyOwner::Body(i) => {
+                        let b = &bodies[i];
+                        Some((
+                            b.collision_group,
+                            b.collision_mask,
+                            b.collision_flags
+                                .contains(CollisionFlags::NO_CONTACT_RESPONSE),
+                        ))
+                    }
+                    ProxyOwner::Collider(e) => {
+                        let ent = &collider_entries[e];
+                        let mb = &multibodies[ent.mb];
+                        let col = if ent.link < 0 {
+                            mb.base_collider()?
+                        } else {
+                            mb.link_collider(ent.link as usize)?
+                        };
+                        Some((col.collision_group, col.collision_mask, false))
+                    }
+                    ProxyOwner::Soft(i) => {
+                        let s = &soft_bodies[i];
+                        Some((s.collision_group, s.collision_mask, false))
+                    }
+                    ProxyOwner::Free => None,
+                }
+            };
+            let (Some((ga, ma, sa)), Some((gb, mbm, sb))) = (side(pi), side(pj)) else {
+                return false;
+            };
+            if sa || sb || !filters_collide(ga, ma, gb, mbm) {
+                return false;
+            }
+            if let (ProxyOwner::Body(i), ProxyOwner::Body(j)) =
+                (proxy_owners[pi], proxy_owners[pj])
+                && let Some(filter) = pair_filter
+                && !filter(
+                    BodyHandle::from_index(i),
+                    &bodies[i],
+                    BodyHandle::from_index(j),
+                    &bodies[j],
+                )
+            {
+                return false;
+            }
+            true
+        };
         for &(pi, pj) in pairs {
-            if let (Some(a), Some(b)) = (
-                node_of(self.proxy_owners[pi]),
-                node_of(self.proxy_owners[pj]),
-            ) {
+            if !pair_eligible(pi, pj) {
+                continue;
+            }
+            if let (Some(a), Some(b)) = (node_of(proxy_owners[pi]), node_of(proxy_owners[pj])) {
                 uf.unite(a, b);
             }
         }
@@ -105,24 +235,37 @@ impl PhysicsWorld {
         // pair is the overlap signal). An idle kinematic (zero velocities)
         // keeps its resting contacts sleeping, like Bullet.
         for &(pi, pj) in pairs {
-            for (pa, pb) in [(pi, pj), (pj, pi)] {
-                let ProxyOwner::Body(k) = self.proxy_owners[pa] else {
-                    continue;
+            // Cheap kinematic pretest first: the eligibility check below
+            // only runs for pairs that actually carry a moving kinematic
+            // side (a pair the dispatcher would reject never produced a
+            // manifold for Bullet's contact-time `activate()` to fire on).
+            let kinematic_side = [(pi, pj), (pj, pi)].into_iter().find_map(|(pa, _)| {
+                let ProxyOwner::Body(k) = proxy_owners[pa] else {
+                    return None;
                 };
                 let kb = &bodies[k];
-                if !kb.is_kinematic()
-                    || (kb.linear_velocity.length_squared() == 0.0
-                        && kb.angular_velocity.length_squared() == 0.0)
+                if kb.is_kinematic()
+                    && (kb.linear_velocity.length_squared() != 0.0
+                        || kb.angular_velocity.length_squared() != 0.0)
                 {
-                    continue;
+                    Some(pa)
+                } else {
+                    None
                 }
-                let node = match self.proxy_owners[pb] {
-                    ProxyOwner::Body(i) if bodies[i].participates_in_islands() => i,
-                    ProxyOwner::Collider(e) => num_bodies + collider_entries[e].mb,
-                    _ => continue,
-                };
-                island_awake[uf.find(node)] = true;
+            });
+            let Some(pa) = kinematic_side else {
+                continue;
+            };
+            if !pair_eligible(pi, pj) {
+                continue;
             }
+            let pb = if pa == pi { pj } else { pi };
+            let node = match proxy_owners[pb] {
+                ProxyOwner::Body(i) if bodies[i].participates_in_islands() => i,
+                ProxyOwner::Collider(e) => num_bodies + collider_entries[e].mb,
+                _ => continue,
+            };
+            island_awake[uf.find(node)] = true;
         }
 
         // Resolve every member's island state first (the decisions borrow
@@ -155,7 +298,7 @@ impl PhysicsWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body::ActivationState;
+    use crate::body::{filter_groups, ActivationState, CollisionFlags};
     use approx::assert_relative_eq;
 
     /// A body at rest for longer than `DEACTIVATION_TIME` goes to sleep and
@@ -455,5 +598,211 @@ mod tests {
             }
         }
         assert!(woke, "the moving kinematic must wake the sleeping island");
+    }
+
+    /// A pair the collision filter excludes (group/mask) must not affect
+    /// island construction: Bullet's pair cache never contains it (the
+    /// filter runs at pair creation, `needsBroadphaseCollision`), so
+    /// `findUnions` cannot unite the two bodies. A permanently-awake body
+    /// overlapping a still one through an excluded pair must therefore not
+    /// keep it awake.
+    #[test]
+    fn group_mask_excluded_pair_does_not_pin_island_awake() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO); // B rests by stillness alone
+        let b = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            )
+            .collision_filter(2, 3),
+        );
+        // A is awake forever and overlaps B's broad-phase AABB only: the
+        // pair is excluded both ways (B.group(2) & A.mask(1) == 0), and the
+        // centers sit one margin past contact distance so the solver can
+        // never separate them and invalidate the overlap.
+        let a = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.72, 0.5, 0.72),
+                1.0,
+            )
+            .collision_filter(filter_groups::DEFAULT, filter_groups::DEFAULT)
+            .disable_deactivation(),
+        );
+        let dt = 1.0 / 60.0;
+        for _ in 0..(3.5 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        assert_eq!(
+            world.body(b).activation_state(),
+            ActivationState::IslandSleeping,
+            "an overlap the collision filter excludes pinned the still body awake"
+        );
+        // Control: making the same pair filter-compatible unites the island
+        // again and A pins B awake. The spheres are placed one broad-phase
+        // margin apart (AABBs overlap, surfaces do not), so the solver
+        // cannot separate them and the union persists.
+        world.body_mut(a).collision_group = filter_groups::DEFAULT;
+        world.body_mut(a).collision_mask = filter_groups::ALL;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert_ne!(
+            world.body(b).activation_state(),
+            ActivationState::IslandSleeping,
+            "control failed: B should be pinned awake once the pair is eligible"
+        );
+    }
+
+    /// A sensor (`CF_NO_CONTACT_RESPONSE`) never merges simulation islands
+    /// (Bullet's `mergesSimulationIslands`), so an awake trigger overlapping
+    /// a still body leaves it asleep, while the same body without the flag
+    /// pins the neighbor awake.
+    #[test]
+    fn sensor_body_does_not_pin_island_awake() {
+        let run = |sensor: bool| -> ActivationState {
+            let mut world = PhysicsWorld::new();
+            world.set_gravity(Vector3::ZERO);
+            let b = world.add_body(RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            ));
+            let a = world.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::sphere(0.5),
+                    Vector3::new(0.72, 0.5, 0.72),
+                    1.0,
+                )
+                .disable_deactivation(),
+            );
+            if sensor {
+                world.body_mut(a).collision_flags = CollisionFlags::NO_CONTACT_RESPONSE;
+            }
+            let dt = 1.0 / 60.0;
+            for _ in 0..(3.5 / dt) as usize {
+                world.step_simulation(dt);
+            }
+            world.body(b).activation_state()
+        };
+        assert_ne!(
+            run(false),
+            ActivationState::IslandSleeping,
+            "control failed: an awake plain body should pin its neighbor awake"
+        );
+        assert_eq!(
+            run(true),
+            ActivationState::IslandSleeping,
+            "an awake sensor pinned the still body awake (sensors do not merge islands)"
+        );
+    }
+
+    /// The moving-kinematic wake rides the collision filter too: Bullet's
+    /// contact-time `activate()` needs a manifold, which an excluded pair
+    /// never produces.
+    #[test]
+    fn moving_kinematic_does_not_wake_group_excluded_body() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        // The box must rest on the plane (mask covers the plane's group 1)
+        // while excluding the kinematic slab both ways.
+        let box_body = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.25, 0.25, 0.25)),
+                Vector3::new(0.0, 0.25, 0.0),
+                1.0,
+            )
+            .collision_filter(2, 3),
+        );
+        for _ in 0..600 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(!world.body(box_body).is_active(), "precondition: asleep");
+
+        let slab = world.add_body(
+            RigidBody::new_kinematic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 0.5, 0.5)),
+                Vector3::new(-4.0, 0.25, 0.0),
+            )
+            .collision_filter(filter_groups::DEFAULT, filter_groups::DEFAULT),
+        );
+        world.body_mut(slab).linear_velocity = Vector3::new(6.0, 0.0, 0.0);
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        assert!(
+            !world.body(box_body).is_active(),
+            "the kinematic woke a body the collision filter excludes"
+        );
+    }
+
+    /// A `DisableSimulation` body still merges islands (Bullet's tag pass
+    /// only skips static/kinematic objects), so it bridges its neighbors: an
+    /// awake body added on one side wakes a sleeping body on the other side
+    /// through it, while the disabled body's own state is never touched
+    /// (Bullet's `setActivationState` guard).
+    #[test]
+    fn disable_simulation_body_bridges_islands() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        // The bridge and the still body first: neither counts as an awake
+        // contributor, so C falls asleep. All three spheres below sit one
+        // broad-phase margin apart (AABBs overlap, surfaces do not), so the
+        // solver cannot separate them and break the bridge.
+        let b = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(1.02, 0.0, 0.0),
+                1.0,
+            )
+            .disable_simulation(),
+        );
+        let c = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(2.04, 0.0, 0.0),
+            1.0,
+        ));
+        let dt = 1.0 / 60.0;
+        for _ in 0..(3.5 / dt) as usize {
+            world.step_simulation(dt);
+        }
+        assert_eq!(
+            world.body(c).activation_state(),
+            ActivationState::IslandSleeping,
+            "precondition: C asleep (the disabled bridge is not an awake contributor)"
+        );
+        assert_eq!(
+            world.body(b).activation_state(),
+            ActivationState::DisableSimulation,
+            "the island pass rewrote the disabled body's state"
+        );
+        // An awake body on the bridge's other side unites the island through
+        // it and wakes C.
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 0.0, 0.0),
+                1.0,
+            )
+            .disable_deactivation(),
+        );
+        for _ in 0..30 {
+            world.step_simulation(dt);
+        }
+        assert!(
+            world.body(c).is_active(),
+            "the sleeping body was not woken through the DisableSimulation bridge"
+        );
+        assert_eq!(
+            world.body(b).activation_state(),
+            ActivationState::DisableSimulation,
+            "the island pass rewrote the disabled body's state"
+        );
     }
 }

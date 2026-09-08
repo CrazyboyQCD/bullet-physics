@@ -412,19 +412,24 @@ impl RigidBody {
     /// Put the body to sleep: zero its velocities and stop simulating it
     /// (Bullet's `goToSleep()`).
     pub fn go_to_sleep(&mut self) {
+        // Bullet's `btCollisionObject::setActivationState` guard: a
+        // `DisableSimulation` body's state is user-owned and is never
+        // rewritten by the island pass (it still merges islands, so this is
+        // reachable from the sleep branch of the activation resolution).
+        if self.activation_state == ActivationState::DisableSimulation {
+            return;
+        }
         self.activation_state = ActivationState::IslandSleeping;
         self.linear_velocity = Vector3::ZERO;
         self.angular_velocity = Vector3::ZERO;
     }
-
-    /// Whether this body is an island member: dynamic bodies participate;
-    /// static bodies and `DisableSimulation` bodies do not (they are never
-    /// simulated and must not be forced into `IslandSleeping`).
+    /// Whether this body is an island member: dynamic bodies participate
+    /// (including `DisableSimulation` — Bullet's
+    /// `STATIC_SIMULATION_ISLAND_OPTIMIZATION` tag pass only skips
+    /// static/kinematic objects, so a disabled body still merges islands and
+    /// can bridge its neighbors); static and kinematic bodies do not.
     pub(crate) fn participates_in_islands(&self) -> bool {
-        !self.removed
-            && !self.is_static
-            && !self.is_kinematic()
-            && self.activation_state != ActivationState::DisableSimulation      
+        !self.removed && !self.is_static && !self.is_kinematic()
     }
 
     /// Whether this body keeps its island awake (the `buildIslands`

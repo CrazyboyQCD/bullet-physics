@@ -445,7 +445,11 @@ impl Constraint {
     }
 
     /// Enable/disable the constraint (Bullet's `setEnabled`); disabled
-    /// constraints produce no rows and do not suppress collisions.
+    /// constraints produce no solver rows. Collision suppression between
+    /// their bodies is independent of `enabled` — Bullet's ignore list
+    /// (installed by `addConstraint(..., true)`) keeps suppressing until
+    /// the constraint is removed or `set_disable_collisions(false)` clears
+    /// it.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
