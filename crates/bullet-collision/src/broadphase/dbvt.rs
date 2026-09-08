@@ -754,26 +754,38 @@ impl BroadPhase for DbvtBroadPhase {
 
     fn compute_pairs(&mut self) -> Vec<(usize, usize)> {
         self.tick();
-        // Exact-filtered output over the cached pairs; pairs whose exact
-        // AABBs no longer overlap are pruned from the cache here (the
-        // counterpart of Bullet's cleanup pass, which scans a slice of the
-        // hash pair cache per step — the pair set is small enough that a
-        // full single pass is cheaper than the bookkeeping).
+        // The cache lives at fat-overlap granularity: a pair stays cached
+        // while its leaf volumes overlap even when the exact AABBs are
+        // separated, because within-fat motion skips both the tree update
+        // and the collide pass, so nothing would re-insert the pair once
+        // the exact AABBs close the gap again (Bullet's cleanup pass
+        // likewise only drops pairs outside the margin). The reported
+        // output is the exact-filtered subset.
         let mut out = Vec::with_capacity(self.pairs.len());
         let pairs = &mut self.pairs;
         let proxies = &self.proxies;
+        let (dynamic, fixed) = (&self.dynamic, &self.fixed);
         let mut write = 0;
         for read in 0..pairs.len() {
             let key = pairs[read];
-            let overlap = proxies[key.0]
-                .as_ref()
-                .unwrap()
-                .aabb
-                .overlaps(&proxies[key.1].as_ref().unwrap().aabb);
-            if overlap {
+            let p0 = proxies[key.0].as_ref().unwrap();
+            let p1 = proxies[key.1].as_ref().unwrap();
+            let v0 = if p0.stage == FIXED_STAGE {
+                fixed.volume(p0.leaf)
+            } else {
+                dynamic.volume(p0.leaf)
+            };
+            let v1 = if p1.stage == FIXED_STAGE {
+                fixed.volume(p1.leaf)
+            } else {
+                dynamic.volume(p1.leaf)
+            };
+            if v0.overlaps(&v1) {
                 pairs[write] = key;
                 write += 1;
-                out.push(key);
+                if p0.aabb.overlaps(&p1.aabb) {
+                    out.push(key);
+                }
             }
         }
         pairs.truncate(write);
@@ -1058,5 +1070,566 @@ mod tests {
         for q in queries {
             assert_eq!(dbvt.aabb_candidates(q), brute.aabb_candidates(q), "query {q:?}");
         }
+    }
+
+    // --------------------------------------------------------------
+    // Adversarial validation: the cached fat-overlap pair set must always
+    // be a superset of the exact overlapping pairs (compute_pairs' exact
+    // filter then reproduces brute force after every state transition),
+    // and the trees must keep their structural invariants through every
+    // operation.
+    // --------------------------------------------------------------
+
+    impl Rng {
+        /// Uniform integer in `[0, n)`.
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+
+        /// Uniform `Real` in `[0, 1)`.
+        fn unit(&mut self) -> Real {
+            (self.next() >> 11) as Real / (1u64 << 53) as Real
+        }
+
+        /// Uniform `Real` in `[lo, hi)`.
+        fn range(&mut self, lo: Real, hi: Real) -> Real {
+            lo + (hi - lo) * self.unit()
+        }
+    }
+
+    /// Structural checker for a `DbvtTree`: root/leaf bookkeeping,
+    /// parent-child pointer consistency, live/dead slot and free-list
+    /// agreement, and payload uniqueness.
+    fn check_tree_invariants(tree: &DbvtTree) {
+        let none = DbvtTree::NONE;
+        if tree.root == none {
+            assert_eq!(tree.leaves, 0, "empty tree must have no leaves");
+            // Free slots may linger (the last removed leaf's own slot).
+            assert!(tree.nodes.iter().all(Option::is_none), "live nodes in an empty tree");
+            return;
+        }
+        assert_ne!(tree.leaves, 0);
+        assert_eq!(tree.parent(tree.root), none, "root must have no parent");
+        let mut seen = vec![false; tree.nodes.len()];
+        let mut live_leaf_count = 0u32;
+        let mut payloads = Vec::new();
+        let mut stack = vec![tree.root];
+        while let Some(n) = stack.pop() {
+            assert!(n != none, "NONE child reference");
+            assert!(!seen[n as usize], "node {n} reached twice");
+            seen[n as usize] = true;
+            let node = tree.nodes[n as usize]
+                .as_ref()
+                .unwrap_or_else(|| panic!("node {n} referenced but dead"));
+            match &node.kind {
+                NodeKind::Leaf { proxy } => {
+                    live_leaf_count += 1;
+                    payloads.push(*proxy);
+                }
+                NodeKind::Internal { children } => {
+                    for &c in children {
+                        assert!(c != none, "internal node with a NONE child");
+                        assert!(
+                            tree.nodes[c as usize].is_some(),
+                            "child {c} referenced but dead"
+                        );
+                        assert_eq!(tree.parent(c), n, "child/parent pointer mismatch at {c}");
+                    }
+                    stack.extend(children);
+                }
+            }
+        }
+        assert_eq!(live_leaf_count, tree.leaves, "reachable leaf count != leaves counter");
+        payloads.sort_unstable();
+        let total = payloads.len();
+        payloads.dedup();
+        assert_eq!(payloads.len(), total, "duplicate leaf payloads");
+        // Free list: dead slots only, no duplicates.
+        let mut free_seen = vec![false; tree.nodes.len()];
+        for &f in &tree.free {
+            assert!(tree.nodes[f as usize].is_none(), "free list entry {f} is live");
+            assert!(!free_seen[f as usize], "free list duplicate {f}");
+            free_seen[f as usize] = true;
+        }
+        // No leaks: dead exactly when free-listed, live exactly when reachable.
+        for (i, slot) in tree.nodes.iter().enumerate() {
+            if seen[i] {
+                assert!(slot.is_some(), "reachable node {i} is dead");
+            } else {
+                assert_eq!(slot.is_none(), free_seen[i], "slot {i} live/dead vs free-list");
+            }
+        }
+    }
+
+    /// All `(payload, volume)` leaves, any order.
+    fn collect_leaves(tree: &DbvtTree) -> Vec<(usize, Aabb)> {
+        let mut out = Vec::new();
+        if tree.root != DbvtTree::NONE {
+            let mut stack = vec![tree.root];
+            while let Some(n) = stack.pop() {
+                let node = tree.nodes[n as usize].as_ref().unwrap();
+                match &node.kind {
+                    NodeKind::Leaf { proxy } => out.push((*proxy, node.volume)),
+                    NodeKind::Internal { children } => stack.extend(children),
+                }
+            }
+        }
+        out
+    }
+
+    /// Brute-force unordered overlapping-leaf-pair oracle over the stored
+    /// (fat) volumes, sorted.
+    fn brute_tree_pairs(tree: &DbvtTree) -> Vec<(usize, usize)> {
+        let leaves = collect_leaves(tree);
+        let mut out = Vec::new();
+        for i in 0..leaves.len() {
+            for j in i + 1..leaves.len() {
+                if leaves[i].1.overlaps(&leaves[j].1) {
+                    out.push(pair_key(leaves[i].0, leaves[j].0));
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// One interleaved state-machine step applied identically to both broad
+    /// phases; returns how many extra tick (compute_pairs) cycles to run
+    /// without movement afterwards.
+    fn random_step(
+        rng: &mut Rng,
+        dbvt: &mut DbvtBroadPhase,
+        brute: &mut super::super::BruteForceBroadPhase,
+        state: &mut [Option<Aabb>],
+        live: &mut Vec<usize>,
+    ) -> u32 {
+        let op = rng.below(100);
+        if live.is_empty() || (live.len() < state.len() && op < 20) {
+            let aabb = rng.aabb(300, 100);
+            let s = dbvt.create_proxy(aabb);
+            let b = brute.create_proxy(aabb);
+            assert_eq!(s, b);
+            state[s] = Some(aabb);
+            live.push(s);
+        } else if op < 55 {
+            // Small move: scales below and above DBVT_MARGIN (0.05), so the
+            // fat-containment skip, the margin growth and the teleport
+            // reinsert paths all get exercised.
+            let i = live[rng.below(live.len() as u64) as usize];
+            let cur = state[i].unwrap();
+            let scale = match rng.below(4) {
+                0 => 0.01,
+                1 => 0.04,
+                2 => 0.2,
+                _ => 2.0,
+            };
+            let d = Vector3::new(rng.range(-scale, scale), rng.range(-scale, scale), rng.range(-scale, scale));
+            let next = Aabb::new(cur.min + d, cur.max + d);
+            dbvt.set_aabb(i, next);
+            brute.set_aabb(i, next);
+            state[i] = Some(next);
+        } else if op < 68 {
+            // Teleport somewhere else in the volume.
+            let i = live[rng.below(live.len() as u64) as usize];
+            let cur = state[i].unwrap();
+            let center = Vector3::new(rng.range(0.0, 30.0), rng.range(0.0, 30.0), rng.range(0.0, 30.0));
+            let half = (cur.max - cur.min) * 0.5;
+            let next = Aabb::new(center - half, center + half);
+            dbvt.set_aabb(i, next);
+            brute.set_aabb(i, next);
+            state[i] = Some(next);
+        } else if op < 74 {
+            // Extra tick cycles with no movement (stage rotation and
+            // dynamic -> fixed migration run; movement comes back later).
+            return 2;
+        } else if live.len() > 4 {
+            let k = rng.below(live.len() as u64) as usize;
+            let i = live.swap_remove(k);
+            dbvt.destroy_proxy(i);
+            brute.destroy_proxy(i);
+            state[i] = None;
+        } else {
+            let aabb = rng.aabb(300, 100);
+            let s = dbvt.create_proxy(aabb);
+            let b = brute.create_proxy(aabb);
+            assert_eq!(s, b);
+            state[s] = Some(aabb);
+            live.push(s);
+        }
+        0
+    }
+
+    /// Thousands of interleaved create/move/teleport/destroy/tick operations
+    /// across several seeds; after every single operation the pair output
+    /// must match brute force exactly, and both trees must keep their
+    /// structural invariants (the empirical core of the superset-invariant
+    /// validation, including the dynamic/fixed migration path since every
+    /// op is followed by a tick).
+    #[test]
+    fn randomized_state_machine_matches_brute_force() {
+        const SEEDS: u64 = 4;
+        const OPS: usize = 2048;
+        const POOL: usize = 32;
+        for seed in 0..SEEDS {
+            let mut rng = Rng(0xdb4e_7f4a_7c15_0001 ^ seed.wrapping_mul(0x517c_c1b7_2722_0a95));
+            let mut dbvt = DbvtBroadPhase::new();
+            let mut brute = super::super::BruteForceBroadPhase::new();
+            let mut state = vec![None; POOL];
+            let mut live = Vec::new();
+            for op in 0..OPS {
+                let extra_ticks = random_step(&mut rng, &mut dbvt, &mut brute, &mut state, &mut live);
+                for _ in 0..=extra_ticks {
+                    assert_eq!(
+                        dbvt.compute_pairs(),
+                        brute.compute_pairs(),
+                        "seed {seed} diverged at op {op}"
+                    );
+                }
+                check_tree_invariants(&dbvt.dynamic);
+                check_tree_invariants(&dbvt.fixed);
+            }
+        }
+    }
+
+    /// Explicit fat-volume candidates: with fat volumes overlapping but
+    /// exact AABBs separated, the cached pair is present (create-time
+    /// collide) while compute_pairs filters it; moving one proxy within its
+    /// existing fat volume (no tree update at all) must surface the pair as
+    /// soon as the exact AABBs overlap, and drop it again on the way back.
+    #[test]
+    fn fat_volume_move_within_stays_exact() {
+        let mut bp = DbvtBroadPhase::new();
+        let a = bp.create_proxy(Aabb::new(Vector3::ZERO, Vector3::ONE));
+        // Grow a's fat volume, then shrink back inside it (tree untouched).
+        bp.set_aabb(a, Aabb::new(Vector3::ZERO, Vector3::new(1.1, 1.0, 1.0)));
+        bp.set_aabb(a, Aabb::new(Vector3::ZERO, Vector3::ONE));
+        // b's exact AABB is 0.03 away from a's: fat volumes overlap
+        // (margin 0.05), exact do not.
+        let b = bp.create_proxy(Aabb::new(Vector3::new(1.03, 0.0, 0.0), Vector3::new(2.03, 1.0, 1.0)));
+        assert!(bp.compute_pairs().is_empty(), "exact-separated pair must be filtered");
+        // Move a within its fat volume until the exact AABBs overlap.
+        bp.set_aabb(a, Aabb::new(Vector3::ZERO, Vector3::new(1.04, 1.0, 1.0)));
+        assert_eq!(bp.compute_pairs(), vec![(a, b)], "exact overlap must surface the cached pair");
+        // And back out again within the same fat volume.
+        bp.set_aabb(a, Aabb::new(Vector3::ZERO, Vector3::ONE));
+        assert!(bp.compute_pairs().is_empty());
+    }
+
+    /// Dynamic <-> fixed migration: resting proxies move to the fixed tree,
+    /// a moving partner wakes them back, and pairs across the trees are
+    /// formed both ways (dynamic-vs-fixed discovery through collide_leaf,
+    /// fixed-vs-fixed pairs carried over from the dynamic phase).
+    #[test]
+    fn dynamic_fixed_migration_round_trip() {
+        let mut bp = DbvtBroadPhase::new();
+        let home = |x: Real| Aabb::new(Vector3::new(x, 0.0, 0.0), Vector3::new(x + 1.0, 1.0, 1.0));
+        let a = bp.create_proxy(home(0.0));
+        let b = bp.create_proxy(home(0.5));
+        let c = bp.create_proxy(home(2.0));
+        let mut brute = super::super::BruteForceBroadPhase::new();
+        brute.create_proxy(home(0.0));
+        brute.create_proxy(home(0.5));
+        brute.create_proxy(home(2.0));
+        assert_eq!(bp.compute_pairs(), brute.compute_pairs());
+        // Two resting ticks: everything migrates into the fixed tree.
+        bp.compute_pairs();
+        bp.compute_pairs();
+        assert_eq!(bp.fixed.leaves, 3);
+        assert_eq!(bp.dynamic.leaves, 0);
+        assert_eq!(bp.compute_pairs(), brute.compute_pairs());
+        // b (fixed) wakes and slides towards a (still fixed): the collide
+        // on the dynamic side must discover a in the fixed tree.
+        bp.set_aabb(b, home(0.4));
+        brute.set_aabb(b, home(0.4));
+        assert_eq!(bp.fixed.leaves, 2);
+        assert_eq!(bp.dynamic.leaves, 1);
+        assert_eq!(bp.compute_pairs(), brute.compute_pairs());
+        // Move away, come back, settle again.
+        bp.set_aabb(b, home(2.0));
+        brute.set_aabb(b, home(2.0));
+        assert_eq!(bp.compute_pairs(), brute.compute_pairs());
+        bp.set_aabb(b, home(0.5));
+        brute.set_aabb(b, home(0.5));
+        assert_eq!(bp.compute_pairs(), brute.compute_pairs());
+        for _ in 0..3 {
+            bp.compute_pairs();
+        }
+        assert_eq!(bp.fixed.leaves, 3);
+        assert_eq!(bp.compute_pairs(), brute.compute_pairs());
+        // a wakes from fixed and moves: both back in the dynamic tree.
+        bp.set_aabb(a, home(0.25));
+        assert_eq!(bp.compute_pairs(), brute.compute_pairs());
+        // A brand-new proxy overlapping resting c pairs immediately.
+        let d = bp.create_proxy(home(2.25));
+        brute.create_proxy(home(2.25));
+        assert_eq!(bp.compute_pairs(), brute.compute_pairs());
+        assert!(bp.compute_pairs().contains(&pair_key(c, d)), "new proxy must pair with resting c");
+    }
+
+    /// Random insert/remove/exact-update/fat-update/rotation churn on a
+    /// bare tree, with structural invariants checked after every operation
+    /// and the overlap query plus same-tree pair traversal compared against
+    /// brute-force oracles (exactly once per unordered pair, no self-pairs).
+    #[test]
+    fn optimize_incremental_maintains_tree_invariants() {
+        let mut tree = DbvtTree::new();
+        let mut rng = Rng(0x0fdb_4e4f_0db4_0001);
+        let mut live: Vec<u32> = Vec::new();
+        let mut next_payload = 0usize;
+        for step in 0..600 {
+            let op = rng.below(100);
+            if live.len() < 48 && (op < 40 || live.is_empty()) {
+                let aabb = rng.aabb(200, 100);
+                live.push(tree.insert(aabb, next_payload));
+                next_payload += 1;
+            } else if op < 55 && !live.is_empty() {
+                let k = rng.below(live.len() as u64) as usize;
+                let leaf = live.swap_remove(k);
+                tree.remove(leaf);
+            } else if op < 75 && !live.is_empty() {
+                let leaf = live[rng.below(live.len() as u64) as usize];
+                tree.update_fat(leaf, rng.aabb(200, 100), Vector3::ZERO, DBVT_MARGIN);
+            } else if op < 85 && !live.is_empty() {
+                let leaf = live[rng.below(live.len() as u64) as usize];
+                tree.update_exact(leaf, rng.aabb(200, 100));
+            } else {
+                tree.optimize_incremental(1 + rng.below(4) as u32);
+            }
+            check_tree_invariants(&tree);
+            // Overlap query vs a linear scan of the stored leaf volumes.
+            let query = rng.aabb(200, 100);
+            let mut found = Vec::new();
+            tree.for_each_overlapping(&query, &mut found);
+            found.sort_unstable();
+            let expect = collect_leaves(&tree)
+                .into_iter()
+                .filter(|(_, v)| v.overlaps(&query))
+                .map(|(p, _)| p)
+                .collect::<Vec<_>>();
+            assert_eq!(found, expect, "step {step}");
+        }
+        // Same-tree pair traversal vs the unordered-pair oracle.
+        let mut pairs = Vec::new();
+        tree.for_each_overlapping_pair(&tree, &mut pairs);
+        let mut sorted = pairs.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), pairs.len(), "duplicate or self pairs reported");
+        assert!(pairs.iter().all(|&(a, b)| a != b), "self pair reported");
+        assert_eq!(sorted, brute_tree_pairs(&tree));
+    }
+
+    /// Degenerate shapes and sizes: few leaves, identical/nested/point/
+    /// thin/huge volumes, with insert/update/remove churn and oracle
+    /// comparisons — no corruption in any regime.
+    #[test]
+    fn degenerate_shapes_stay_consistent() {
+        let shapes = [
+            // identical
+            Aabb::new(Vector3::splat(0.0), Vector3::splat(1.0)),
+            // nested
+            Aabb::new(Vector3::splat(-1.0), Vector3::splat(2.0)),
+            // point
+            Aabb::new(Vector3::splat(0.5), Vector3::splat(0.5)),
+            // thin slab
+            Aabb::new(Vector3::new(0.0, 0.0, 0.4), Vector3::new(1.0, 1.0, 0.6)),
+            // huge
+            Aabb::new(Vector3::splat(-1e6), Vector3::splat(1e6)),
+        ];
+        let mut tree = DbvtTree::new();
+        let mut live = Vec::new();
+        for round in 0..3 {
+            for aabb in shapes {
+                live.push(tree.insert(aabb, live.len()));
+            }
+            check_tree_invariants(&tree);
+            assert_eq!(brute_tree_pairs(&tree), {
+                let mut p = Vec::new();
+                tree.for_each_overlapping_pair(&tree, &mut p);
+                p.sort_unstable();
+                p
+            });
+            // Update half, remove the other half.
+            for k in (0..live.len()).step_by(2) {
+                tree.update_fat(live[k], shapes[(k + round) % shapes.len()], Vector3::ZERO, DBVT_MARGIN);
+            }
+            check_tree_invariants(&tree);
+            for k in (1..live.len()).step_by(2) {
+                tree.remove(live[k]);
+            }
+            live.retain(|l| tree.nodes[*l as usize].is_some());
+            check_tree_invariants(&tree);
+            // Remove the rest; the tree must return to empty.
+            for l in live.drain(..) {
+                tree.remove(l);
+            }
+            assert!(tree.is_empty());
+            check_tree_invariants(&tree);
+        }
+    }
+
+    /// Exact contacts (face/edge/corner touching) and moves around the
+    /// margin boundary: touching counts as overlap (`overlaps` uses `<=`);
+    /// every step must reproduce the brute-force pair set across the
+    /// fat-skip, margin-growth and teleport paths.
+    #[test]
+    fn exact_contact_and_margin_boundary() {
+        let mut bp = DbvtBroadPhase::new();
+        let mut brute = super::super::BruteForceBroadPhase::new();
+        let a = Aabb::new(Vector3::ZERO, Vector3::ONE);
+        bp.create_proxy(a);
+        brute.create_proxy(a);
+        let b = bp.create_proxy(Aabb::new(Vector3::splat(3.0), Vector3::splat(4.0)));
+        brute.create_proxy(Aabb::new(Vector3::splat(3.0), Vector3::splat(4.0)));
+        assert!(bp.compute_pairs().is_empty());
+        // Face / edge / corner touching, then epsilon-separated variants.
+        let cases = [
+            (Vector3::new(1.0, 0.25, 0.25), true),    // face touch at x = 1
+            (Vector3::new(1.0 + 1e-6, 0.25, 0.25), false),
+            (Vector3::new(1.0 - 1e-6, 0.25, 0.25), true),
+            (Vector3::new(1.0, 1.0, 0.25), true),     // edge touch
+            (Vector3::new(1.0, 1.0, 1.0), true),      // corner touch
+            (Vector3::new(1.049, 1.0, 1.0), false),   // within a margin of touch, still exact-separated
+            (Vector3::new(1.051, 1.0, 1.0), false),   // beyond the margin: teleport path
+            (Vector3::new(0.999, 0.999, 0.999), true),
+            (Vector3::new(2.5, 2.5, 2.5), false),
+        ];
+        for (min, expect_pair) in cases {
+            let next = Aabb::new(min, min + Vector3::ONE);
+            bp.set_aabb(b, next);
+            brute.set_aabb(b, next);
+            let got = bp.compute_pairs();
+            assert_eq!(got, brute.compute_pairs(), "case min {min:?}");
+            assert_eq!(got.is_empty(), !expect_pair, "case min {min:?}");
+        }
+    }
+
+    /// Randomized queries over a mixed dynamic/fixed state: rays (including
+    /// zero-length, starting-inside, tangent and endpoint-on-box cases) and
+    /// AABB queries (zero-volume, huge, exact-touch, empty region) must
+    /// match the brute-force scans.
+    #[test]
+    fn random_queries_match_brute_force() {
+        let mut dbvt = DbvtBroadPhase::new();
+        let mut brute = super::super::BruteForceBroadPhase::new();
+        let mut rng = Rng(0x9001_d00d_cafe_f00d);
+        for _ in 0..48 {
+            let aabb = rng.aabb(400, 100);
+            dbvt.create_proxy(aabb);
+            brute.create_proxy(aabb);
+        }
+        // Settle some proxies into the fixed tree.
+        for _ in 0..3 {
+            dbvt.compute_pairs();
+            brute.compute_pairs();
+        }
+        // Shake a few back into the dynamic tree.
+        for i in (0..48).step_by(7) {
+            let aabb = rng.aabb(400, 100);
+            dbvt.set_aabb(i, aabb);
+            brute.set_aabb(i, aabb);
+        }
+        for _ in 0..60 {
+            let from = Vector3::new(rng.range(-10.0, 50.0), rng.range(-10.0, 50.0), rng.range(-10.0, 50.0));
+            let to = Vector3::new(rng.range(-10.0, 50.0), rng.range(-10.0, 50.0), rng.range(-10.0, 50.0));
+            assert_eq!(
+                dbvt.raycast_candidates(from, to),
+                brute.raycast_candidates(from, to),
+                "ray {from:?} -> {to:?}"
+            );
+        }
+        // Degenerate rays: zero length (inside a box / in empty space),
+        // tangent to a face plane, endpoint exactly on a box.
+        let special = [
+            (Vector3::new(1.5, 1.5, 1.5), Vector3::new(1.5, 1.5, 1.5)),
+            (Vector3::new(-50.0, -50.0, -50.0), Vector3::new(-50.0, -50.0, -50.0)),
+            (Vector3::new(-10.0, 1.0, 1.0), Vector3::new(50.0, 1.0, 1.0)),
+            (Vector3::new(-10.0, 2.5, 2.5), Vector3::new(2.5, 2.5, 2.5)),
+        ];
+        for (from, to) in special {
+            assert_eq!(
+                dbvt.raycast_candidates(from, to),
+                brute.raycast_candidates(from, to),
+                "special ray {from:?} -> {to:?}"
+            );
+        }
+        for _ in 0..40 {
+            let min = Vector3::new(rng.range(-5.0, 45.0), rng.range(-5.0, 45.0), rng.range(-5.0, 45.0));
+            let extent = Vector3::splat(rng.range(0.0, 10.0));
+            let q = Aabb::new(min, min + extent);
+            assert_eq!(dbvt.aabb_candidates(q), brute.aabb_candidates(q), "query {q:?}");
+        }
+        let special_queries = [
+            Aabb::new(Vector3::splat(1.5), Vector3::splat(1.5)),               // zero volume
+            Aabb::new(Vector3::splat(-1e4), Vector3::splat(1e4)),              // huge
+            Aabb::new(Vector3::new(1.0, 1.0, 1.0), Vector3::new(2.0, 2.0, 2.0)), // exact touch
+            Aabb::new(Vector3::splat(500.0), Vector3::splat(501.0)),           // empty region
+        ];
+        for q in special_queries {
+            assert_eq!(dbvt.aabb_candidates(q), brute.aabb_candidates(q), "query {q:?}");
+        }
+    }
+
+    /// Extreme finite magnitudes and plane-like infinite AABBs through the
+    /// full state machine (including fixed-tree migration ticks): no panic,
+    /// no NaN-driven corruption, brute-force-equivalent output.
+    #[test]
+    fn extreme_coordinates_match_brute_force() {
+        let inf = Real::INFINITY;
+        let ninf = Real::NEG_INFINITY;
+        let bases: [Real; 6] = [1e-6, 1.0, 1e6, 1e17, 1e30, 1e30];
+        for (bi, base) in bases.into_iter().enumerate() {
+            let ext = (base * 1e-9).max(1e-3);
+            let mut dbvt = DbvtBroadPhase::new();
+            let mut brute = super::super::BruteForceBroadPhase::new();
+            let p = |off: Real| {
+                Aabb::new(
+                    Vector3::new(base + off * ext, base, base),
+                    Vector3::new(base + (off + 1.0) * ext, base + ext, base + ext),
+                )
+            };
+            let a = dbvt.create_proxy(p(0.0));
+            let b = dbvt.create_proxy(p(0.5));
+            let c = dbvt.create_proxy(p(10.0));
+            brute.create_proxy(p(0.0));
+            brute.create_proxy(p(0.5));
+            brute.create_proxy(p(10.0));
+            assert_eq!(dbvt.compute_pairs(), brute.compute_pairs(), "base[{bi}]");
+            // Move b into and out of a, then settle everything into fixed.
+            dbvt.set_aabb(b, p(0.25));
+            brute.set_aabb(b, p(0.25));
+            assert_eq!(dbvt.compute_pairs(), brute.compute_pairs(), "base[{bi}] moved");
+            dbvt.set_aabb(b, p(20.0));
+            brute.set_aabb(b, p(20.0));
+            assert_eq!(dbvt.compute_pairs(), brute.compute_pairs(), "base[{bi}] away");
+            for _ in 0..3 {
+                dbvt.compute_pairs();
+                brute.compute_pairs();
+            }
+            assert_eq!(dbvt.compute_pairs(), brute.compute_pairs(), "base[{bi}] fixed");
+            // Wake b: the fixed -> dynamic migration at an extreme scale.
+            dbvt.set_aabb(b, p(0.25));
+            brute.set_aabb(b, p(0.25));
+            assert_eq!(dbvt.compute_pairs(), brute.compute_pairs(), "base[{bi}] woke");
+            let _ = (a, c);
+        }
+        // Plane-like fully unbounded proxies next to finite bodies.
+        let mut dbvt = DbvtBroadPhase::new();
+        let mut brute = super::super::BruteForceBroadPhase::new();
+        let plane = Aabb::new(Vector3::splat(ninf), Vector3::splat(inf));
+        dbvt.create_proxy(plane);
+        brute.create_proxy(plane);
+        for i in 0..8u32 {
+            let off = Vector3::new(1.0 + i as Real, 2.0, 3.0);
+            let body = Aabb::new(off, off + Vector3::ONE);
+            dbvt.create_proxy(body);
+            brute.create_proxy(body);
+        }
+        assert_eq!(dbvt.compute_pairs(), brute.compute_pairs());
+        for _ in 0..3 {
+            dbvt.compute_pairs();
+            brute.compute_pairs();
+        }
+        assert_eq!(dbvt.compute_pairs(), brute.compute_pairs());
     }
 }
