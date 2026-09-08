@@ -29,7 +29,7 @@ no one has done a dedicated source-level review of that subsystem yet.
 | World / step pipeline | 🟡 | 350 unit tests ×2; parity 8 scenes × f32/f64; stepping order documented in `docs/architecture.md` §7 | — |
 | RigidBody | 🟡 | unit tests; kinematic / motion-state / rolling-friction semantics documented | — |
 | Solver (sequential impulse) | 🟡 | parity stacks; solver-info defaults audited 2026-09-01 (deviations §1/§2) | — |
-| Persistent Manifold | 🔍 | parity-ledger classifications only | planned: `01-manifold.md` |
+| Persistent Manifold | 🟡 | audited 2026-09-08 (`01-manifold.md`): 18 decision points covered, 3 deviation rows recorded, 4 queued risks resolved, no reproduced candidate | `01-manifold.md` |
 | GJK | 🔍 | exercised by every parity/probe scene; no dedicated source review | planned: `02-gjk.md` |
 | EPA | 🔍 | `btGjkEpa2` line-by-line claim from the porting round; not re-audited | planned: `03-epa.md` |
 | Convex-Convex (dispatch + fast paths) | 🔍 | sphere/sphere, sphere/box, box/box SAT covered by scenes | planned: `04-convex-convex.md` |

@@ -7,9 +7,8 @@
 
 ## Current HEAD
 
-`64ab184` — *feat: motion states and multibody/soft-body collision-event
-sources* (2026-09-07). `origin/main` is at `259aa9c`; this commit is local,
-pending push.
+`9aebf38` — *fix: GJK strict-walk direction invariant* (2026-09-08).
+`origin/main` is in sync at `9aebf38`.
 
 ## Current Phase
 
@@ -61,8 +60,11 @@ Feature status at this HEAD (evidence for *tested* cases only):
 
 ## In Progress
 
-- Documentation alignment (this round): docs updated to HEAD `64ab184`,
-  audit framework created.
+- Independent source audit of the correctness-critical subsystems. Manifold
+  done (2026-09-08, [`01-manifold.md`](01-manifold.md)): 18 reference
+  decision points covered, 3 deviation rows added to
+  `docs/bullet-deviations.md` §1, all four queued manifold risks resolved
+  with no reproduced candidate; GJK is next.
 
 ## Known Deviations
 
@@ -80,17 +82,17 @@ motion-state interpolation blend, kinematic-driven motion states. These are
 Items that **need independent verification** (none is currently a confirmed
 bug — see the audit policy in [`README.md`](README.md)):
 
-- Persistent-manifold rotation-drift semantics — needs independent
-  verification (the f64 friction-row noise class in the `rolling` ledger is
-  the visible symptom class).
-- Quaternion `q` / `-q` double-cover handling across joints and manifolds —
-  needs independent verification.
-- Contact-point matching robustness under fast rotation (matching radius,
-  refresh guards) — needs independent verification.
-- Manifold reduction behavior vs Bullet beyond the tested scenes — needs
-  independent verification.
 - EPA degenerate-polytope paths (`INSIDE_EPS` / `FALLBACK` not ported,
   deviations §2) — needs independent verification on adversarial inputs.
+
+Resolved by the manifold audit (2026-09-08, [`01-manifold.md`](01-manifold.md)):
+persistent-manifold rotation-drift semantics (self-authored refresh-guard
+mechanism, now fully documented incl. the 0.01 rad rotation gate), quaternion
+q/−q double cover (no correctness issue; at most one spurious re-detection),
+contact-point matching robustness (two policy differences recorded as the
+point-matching deviation row), manifold reduction beyond tested scenes
+(population-policy deviation row recorded; adversarial inputs deferred to the
+dedicated adversarial-testing phase).
 
 ## 1.0 Required
 
@@ -140,9 +142,9 @@ exists:
 
 ## Current Priority
 
-1. Documentation alignment (this round — done).
-2. Independent source audit: manifold (`01-manifold.md`).
-3. Independent source audit: GJK.
+1. Documentation alignment (done, 2026-09-07).
+2. Independent source audit: manifold (`01-manifold.md` — done 2026-09-08).
+3. Independent source audit: GJK (next).
 4. Independent source audit: EPA.
 5. Independent source audit: convex-convex.
 6. Independent source audit: broadphase (AxisSweep3 + DBVT).

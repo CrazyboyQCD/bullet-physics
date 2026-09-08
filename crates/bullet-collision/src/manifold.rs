@@ -291,14 +291,18 @@ impl PersistentManifold {
         rotation_angle(rot_a) + rotation_angle(rot_b) > REDRIFT_ANGLE
     }
 
-    /// Merge a freshly detected manifold into the cached points (Bullet's
-    /// `addManifoldPoint`): a detection point matching a cached one (local
-    /// anchor within the breaking threshold, compatible normal) replaces it
-    /// in place and inherits the accumulated normal impulse; an unmatched
-    /// point is appended; cached points with no detection counterpart are
-    /// KEPT — they die only in `refresh` (separated or drifted past the
-    /// threshold) or when the capacity overflows, in which case the deepest
-    /// four survive (Bullet's `sortCachedPoints`). This accumulation is what
+    /// Merge a freshly detected manifold into the cached points (the
+    /// merge-half of Bullet's `addManifoldPoint` / `replaceContactPoint`):
+    /// a detection point matching a cached one (local anchor within the
+    /// breaking threshold, compatible normal) replaces it in place and
+    /// inherits the accumulated normal impulse; an unmatched point is
+    /// appended; cached points with no detection counterpart are KEPT —
+    /// they die only in `refresh` (separated or drifted past the
+    /// threshold) or when the capacity overflows, in which case the cache
+    /// is sorted deepest-first and truncated to four (Bullet instead lets
+    /// the new point always enter, evicting the slot that maximizes the
+    /// surviving hull area — see `docs/bullet-deviations.md` §1
+    /// "Persistent manifold: overflow policy"). This accumulation is what
     /// grows a resting flat box from its single first-touch point to the
     /// full four-corner support set: `btConvexPlaneCollisionAlgorithm`
     /// reports one point per frame and relies on exactly this merge.
@@ -345,7 +349,7 @@ impl PersistentManifold {
             }
         }
         // Capacity: keep the deepest points when the manifold overflows
-        // (Bullet's `sortCachedPoints`).
+        // (Bullet evicts by surviving-hull-area instead — deviations §1).
         if self.points.len() > MANIFOLD_CACHE_SIZE {
             self.points
                 .sort_by(|a, b| b.penetration.total_cmp(&a.penetration));
