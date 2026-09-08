@@ -147,6 +147,7 @@ fn penetration_inner(
         return (EpaStatus::DegenerateExpansion, Vector3::ZERO, 0.0);
     }
 
+    let mut status = EpaStatus::IterationLimit;
     for d in [
         Vector3::X,
         Vector3::NEG_X,
@@ -163,11 +164,13 @@ fn penetration_inner(
         let point = support(d);
         vertices.push(point);
         if !expand(faces, vertices, boundary, point, idx) {
+            // Report the seeding failure explicitly (Bullet's `InvalidHull`);
+            // without this the status variable below would still hold its
+            // default and misreport the run as an iteration-budget exit.
+            status = EpaStatus::DegenerateExpansion;
             break;
         }
     }
-
-    let mut status = EpaStatus::IterationLimit;
     for _ in 0..MAX_ITERATIONS {
         let (_, best_normal, best_dist) = find_best(faces);
 

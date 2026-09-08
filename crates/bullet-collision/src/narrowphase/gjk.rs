@@ -309,6 +309,16 @@ fn enclosing_walk(
     let mut dir = -simplex.points()[0];
 
     for _ in 0..MAX_ITERATIONS {
+        // Strict-walk invariant: `dir` is finite and non-zero at the support
+        // query. The simplex reductions can still hand back a zero direction
+        // (a vertex/face collapsed onto the origin), so enforce it here —
+        // a perpendicular of the latest support point is a valid restart
+        // direction, and a fully zero Minkowski difference (coincident point
+        // cores) deterministically falls back to an axis.
+        let dir2 = dir.length_squared();
+        if dir2 <= 0.0 || dir2.is_nan() {
+            dir = perpendicular(simplex.points()[0]);
+        }
         let a = support(dir);
         if a.dot(dir) < 0.0 {
             return None;
@@ -644,10 +654,29 @@ fn solve_segment(simplex: &mut Simplex, dir: &mut Vector3) -> bool {
     false
 }
 
-/// An arbitrary unit vector perpendicular to `v`.
+/// An arbitrary unit vector perpendicular to `v`. The helper axis choice
+/// above is kept as-is (successful paths are bit-identical), but the
+/// primitive now guarantees a finite, non-zero result: the old
+/// `v.cross(helper).normalize()` produced a NaN whenever `v` was (near-)
+/// parallel to the helper — the absolute `0.9` test misses short
+/// axis-aligned vectors like `(0.5, 0, 0)`, which discrete support mappings
+/// do produce for duplicate simplex vertices. If the cross product
+/// collapses, the other axis is tried (a non-zero finite `v` cannot be
+/// parallel to both); a zero or non-finite `v` (whose comparisons all read
+/// as false) falls back to a deterministic axis, because the strict walk
+/// must never hand a zero/NaN direction to a support query.
 fn perpendicular(v: Vector3) -> Vector3 {
     let helper = if v.x.abs() < 0.9 { Vector3::X } else { Vector3::Y };
-    v.cross(helper).normalize()
+    let perp = v.cross(helper);
+    if perp.length_squared() > 0.0 {
+        return perp.normalize();
+    }
+    let alt_helper = if v.x.abs() < 0.9 { Vector3::Y } else { Vector3::X };
+    let perp = v.cross(alt_helper);
+    if perp.length_squared() > 0.0 {
+        return perp.normalize();
+    }
+    Vector3::Z
 }
 
 /// Triangle case, using the barycentric-region test from Ericson's
@@ -1900,5 +1929,165 @@ mod tests {
             contact(&rod, Vector3::ZERO, &b, Vector3::new(0.0, 2.5, 0.0), threshold),
             GjkOutcome::Separated
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // Strict-walk degeneracy suite: the enclosing walk must never hand a
+    // zero or non-finite search direction to the support query, however the
+    // simplex reductions collapse (duplicate vertices, vertices on the
+    // origin, collinear triangles). The invariant is enforced once, at the
+    // top of the `enclosing_walk` loop; `perpendicular` is the always-safe
+    // primitive it leans on.
+    // -----------------------------------------------------------------
+
+    /// `perpendicular` always returns a finite unit-length vector, and a
+    /// true perpendicular for finite non-zero input. `(0.5, 0, 0)` is the
+    /// regression case: the old helper test normalized a zero cross product
+    /// into NaN for short axis-aligned inputs.
+    #[test]
+    fn perpendicular_always_finite_and_orthogonal() {
+        for v in [
+            Vector3::new(0.5, 0.0, 0.0),
+            Vector3::X,
+            Vector3::NEG_X,
+            Vector3::Y,
+            Vector3::NEG_Y,
+            Vector3::Z,
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(2.0, 1.0, 1.0),
+            Vector3::new(1e-4, 0.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+            Vector3::new(-0.2, -0.2, -0.2),
+            Vector3::ZERO,
+        ] {
+            let p = perpendicular(v);
+            assert_finite(p, "perpendicular result");
+            assert!(
+                p.length_squared() > 0.5 && p.length_squared() < 1.5,
+                "not unit: {p:?}"
+            );
+            if v.length_squared() > 0.0 {
+                assert!(p.dot(v).abs() < 1e-5, "not orthogonal: {p:?} vs {v:?}");
+            }
+        }
+        // Non-finite input must not propagate NaN.
+        let p = perpendicular(Vector3::new(Real::NAN, 0.0, 0.0));
+        assert_finite(p, "NaN input");
+    }
+
+    /// Reduction-level contract: `solve` returns a *finite* direction even
+    /// for duplicate segments and collinear triangles. Zero is tolerated at
+    /// this layer (the walk's loop head repairs it); NaN never is.
+    #[test]
+    fn solve_reductions_produce_finite_directions() {
+        // Duplicate segment vertices (discrete supports repeat).
+        let mut s = Simplex::new(Vector3::new(2.0, 0.0, 0.0));
+        s.add(Vector3::new(2.0, 0.0, 0.0));
+        let mut dir = Vector3::ZERO;
+        assert!(!solve(&mut s, &mut dir));
+        assert_finite(dir, "duplicate segment");
+
+        // Collinear triangle: the degenerate branch hands back the (zero)
+        // face normal after the closest point collapses onto the origin.
+        let mut s = Simplex::new(Vector3::new(3.0, 0.0, 0.0));
+        s.add(Vector3::new(1.0, 0.0, 0.0));
+        s.add(Vector3::new(-2.0, 0.0, 0.0));
+        let mut dir = Vector3::ZERO;
+        assert!(!solve(&mut s, &mut dir));
+        assert_finite(dir, "collinear triangle");
+    }
+
+    /// The enclosing walk's loop-head invariant, observed end to end: a
+    /// support closure that collapses onto the origin (producing zero
+    /// directions from the segment/triangle reductions) is never queried
+    /// with a zero or NaN direction.
+    #[test]
+    fn enclosing_walk_never_queries_with_zero_direction() {
+        use core::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let queried: RefCell<Vec<Vector3>> = RefCell::new(Vec::new());
+        let outcome = enclosing_walk(
+            |d: Vector3| {
+                queried.borrow_mut().push(d);
+                let n = calls.get();
+                calls.set(n + 1);
+                // Duplicate support first, then collapse to the origin: the
+                // segment reduction hands back `dir = 0` once a vertex sits
+                // on the origin, and the triangle reduction returns its zero
+                // face normal for the resulting collinear simplex.
+                if n < 1 { Vector3::new(2.0, 0.0, 0.0) } else { Vector3::ZERO }
+            },
+            Vector3::X,
+            None,
+        );
+        // A point-like Minkowski difference cannot enclose the origin.
+        assert!(outcome.is_none());
+        assert!(
+            queried
+                .borrow()
+                .iter()
+                .all(|d| d.length_squared() > 0.0 && d.x.is_finite()),
+            "zero/NaN direction handed to support: {:?}",
+            queried.borrow()
+        );
+    }
+
+    /// Duplicate supports on real shapes: axis-aligned box pairs across the
+    /// exact-touch boundary and hull pairs whose supports repeat along the
+    /// contact axis keep their classification with finite simplices.
+    #[test]
+    fn strict_walk_duplicate_supports_stay_classified() {
+        let b = CollisionShape::box_shape(Vector3::splat(0.5));
+        // Overlapping and separated box pairs, with the exact-touch case in
+        // between: at touch the Minkowski difference is a box with the origin
+        // at the *center* of a face, and the discrete corner supports cannot
+        // assemble an enclosing tetrahedron within the iteration budget, so
+        // the strict walk reports no intersection. That is the documented
+        // touching boundary of GJK on shapes with discrete supports — the
+        // contact pipeline covers it through the band semantics (touch
+        // distance 0 < threshold), and the classification is stable either
+        // way. The assertions pin the actual behavior; finite simplices are
+        // the hard requirement.
+        for (offset, expect_hit) in [(0.98, true), (1.0, false), (1.05, false)] {
+            let hit = gjk_intersect(
+                &b,
+                Vector3::ZERO,
+                Quaternion::IDENTITY,
+                &b,
+                Vector3::new(offset, 0.0, 0.0),
+                Quaternion::IDENTITY,
+            );
+            assert_eq!(hit.is_some(), expect_hit, "box offset {offset}");
+            if let Some(simplex) = hit {
+                for p in simplex.points() {
+                    assert_finite(*p, "box touch simplex");
+                }
+            }
+        }
+
+        // Cube hulls across the same boundary: supports are the same
+        // discrete corners, so the walk sees duplicated vertices there too.
+        let e = 0.5;
+        let hull = CollisionShape::convex_hull(vec![
+            Vector3::new(-e, -e, -e),
+            Vector3::new(e, -e, -e),
+            Vector3::new(-e, e, -e),
+            Vector3::new(e, e, -e),
+            Vector3::new(-e, -e, e),
+            Vector3::new(e, -e, e),
+            Vector3::new(-e, e, e),
+            Vector3::new(e, e, e),
+        ]);
+        for (offset, expect_hit) in [(0.98, true), (1.0, false), (1.05, false)] {
+            let hit = gjk_intersect(
+                &hull,
+                Vector3::ZERO,
+                Quaternion::IDENTITY,
+                &hull,
+                Vector3::new(offset, 0.0, 0.0),
+                Quaternion::IDENTITY,
+            );
+            assert_eq!(hit.is_some(), expect_hit, "hull offset {offset}");
+        }
     }
 }

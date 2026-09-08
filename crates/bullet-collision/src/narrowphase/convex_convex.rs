@@ -7,7 +7,12 @@
 //! overlapping within the margin shell are resolved by the walk exactly,
 //! and only deep overlap seeds EPA from the enclosing simplex of the cores
 //! for the penetration normal and depth (with the margins added back). The
-//! contact point is the witness on B in all cases.
+//! deep-overlap contact point follows Bullet's A-witness-then-depth
+//! construction: it lies on B's support plane under the A→B normal
+//! convention and coincides with the true B witness whenever the facing
+//! support points are tangentially aligned (spheres, parallel faces);
+//! generic convex pairs carry a bounded tangential offset instead
+//! (recorded deviation, see `docs/bullet-deviations.md`).
 
 use crate::manifold::{ContactManifold, ContactPoint};
 #[cfg(not(feature = "std"))]
