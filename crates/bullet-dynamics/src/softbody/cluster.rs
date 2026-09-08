@@ -450,13 +450,13 @@ impl SoftBody {
             if ndamping > 0.0 {
                 let com = self.clusters[c].com;
                 let (lv, av) = (self.clusters[c].lv, self.clusters[c].av);
-                let nodes = self.clusters[c].nodes.clone();
+                let nodes = &self.clusters[c].nodes;
                 for ni in nodes {
-                    if self.nodes[ni].im > 0.0 {
-                        let vx = lv + av.cross(self.nodes[ni].q - com);
-                        let v = self.nodes[ni].v;
+                    if self.nodes[*ni].im > 0.0 {
+                        let vx = lv + av.cross(self.nodes[*ni].q - com);
+                        let v = self.nodes[*ni].v;
                         if vx.length_squared() <= v.length_squared() {
-                            self.nodes[ni].v = v + (vx - v) * ndamping;
+                            self.nodes[*ni].v = v + (vx - v) * ndamping;
                         }
                     }
                 }
