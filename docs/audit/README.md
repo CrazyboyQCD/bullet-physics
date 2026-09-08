@@ -34,7 +34,7 @@ no one has done a dedicated source-level review of that subsystem yet.
 | EPA | 🔍 | `btGjkEpa2` line-by-line claim from the porting round; not re-audited | planned: `03-epa.md` |
 | Convex-Convex (dispatch + fast paths) | 🔍 | sphere/sphere, sphere/box, box/box SAT covered by scenes | planned: `04-convex-convex.md` |
 | AxisSweep3 | 🔍 | default broad phase; perf parity | planned: `05-axis-sweep3.md` |
-| DBVT (tree + broadphase) | 🔍 | full-port claim from the porting round; soft-body trees reuse it | planned: `06-dbvt.md` |
+| DBVT (tree + broadphase) | 🟡 | **audit-complete** 2026-09-08 (`06-dbvt.md`): one reproduced bug fixed during the audit round — pair-cache cleanup now uses the fat leaf-volume test like Bullet's cleanup pass (`ef25fa9`); adversarial suite (randomized state machine × per-op tree-invariant checks, brute-force oracles) pins the superset invariant; tree-shape heuristics documented as accepted engineering choices | `06-dbvt.md` |
 | Multibody | 🟡 | 24 mb-probe scenes × f32/f64; islands documented | — |
 | SoftBody | 🟡 | soft-body probes; structural offsets quantified (deviations §1) | — |
 | API surface | 🟢 | consumer backlog shipped through batch 2 (`docs/api-gaps.md`) | — |

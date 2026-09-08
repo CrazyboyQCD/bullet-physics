@@ -285,7 +285,10 @@ impl DbvtTree {
 
     /// Bullet's `update(leaf, volume)`: detach, rewrite the volume, reinsert.
     /// `lookahead < 0` reinserts from the tree root; otherwise from `lookahead`
-    /// levels above the shrink-test stop (`optimizeIncremental` uses 2).
+    /// levels above the shrink-test stop. Bullet's `optimizeIncremental`
+    /// reinserts from the root (its single-argument `update` has
+    /// `lookahead = -1`); our reinsertion two levels up is a local choice
+    /// (see the audit doc, deviation table).
     fn update(&mut self, leaf: u32, volume: Aabb, lookahead: i32) {
         let mut root = self.remove_leaf(leaf);
         if root != NONE {
@@ -385,7 +388,11 @@ impl DbvtTree {
     }
 
     /// Bullet's `optimizeIncremental`: walk a pseudo-random path to a leaf,
-    /// rotating on the way, and reinsert that leaf two levels up.
+    /// rotating on the way (`sort`, slab-index order standing in for
+    /// Bullet's pointer order), then reinsert that leaf. Bullet reinserts
+    /// from the tree root (`update(node)` with `lookahead = -1`); we
+    /// reinsert two levels above the shrink-test stop — a local-tree-shape
+    /// choice, output-neutral (the oracle tests pin the tree invariants).
     pub fn optimize_incremental(&mut self, passes: u32) {
         if self.root == NONE || passes == 0 {
             return;
