@@ -7,8 +7,8 @@
 
 ## Current HEAD
 
-`817e552` — *docs(audit): DBVT independent source audit record* (2026-09-08).
-`origin/main` is behind by 4 commits (push pending).
+`aafdb08` — *fix(dynamics): close four external-audit findings* (2026-09-08).
+`origin/main` is behind by 1 commit (push pending).
 
 ## Current Phase
 
@@ -70,6 +70,27 @@ adversarial rounds; no re-audit was performed. GJK/EPA hardening alone
 collected 3 reproduced bugs (fixed), the DBVT round 1 (pair-cache cleanup
 criterion), all pinned by adversarial suites.
 
+**External-audit fix round (2026-09-08, `aafdb08`)**: an external review
+confirmed four findings, all fixed and pinned by ten in-domain regression
+tests — (1) island unions consumed unfiltered broad-phase pairs (a
+group/mask-excluded or sensor overlap could pin a resting island awake
+forever); unions now gate on collision eligibility (pair-cache +
+`mergesSimulationIslands` semantics) and the kinematic wake rides the same
+gate, with a per-proxy eligibility byte keeping the all-default common case
+cost-free; (2) `DisableSimulation` bodies merge islands again (Bullet's tag
+pass only skips static/kinematic), bridging neighbors, with their own state
+guarded in `go_to_sleep`; (3) `remove_soft_body` resolved its ended-pair
+event metadata against the post-removal list — panic on last-slot removal,
+silent Stopped loss on middle removals — now resolved pre-shift, with
+cross-body soft joints renumbering; (4) `no_collision_pairs` is re-derived
+per step instead of incrementally maintained, so runtime
+`set_disable_collisions` flips take effect (the `set_enabled` doc claimed
+disabled constraints stop suppressing — they do not, matching Bullet).
+Verified: tests ×2, clippy ×2, check.py, parity 8/8 bit-identical, no_std,
+perf in band (the first island-gating cut cost +20% on stack_1000; fixed by
+a per-proxy eligibility fast path, `docs/bullet-perf.md`). Residual
+semantic note recorded as deviations §1 "Islands: gating & kinematic wake".
+
 **Next stage: broadphase integration** (planned slot
 [`07-broadphase-integration.md`](07-broadphase-integration.md)) — the
 world-level dispatch over both broad phases and their interaction with the
@@ -105,7 +126,9 @@ issue; at most one spurious re-detection), contact-point matching
 robustness (two policy differences recorded as the point-matching
 deviation row), manifold reduction beyond tested scenes (population-policy
 deviation row recorded; adversarial inputs deferred to the dedicated
-adversarial-testing phase).
+adversarial-testing phase); external-audit round (`aafdb08`): island-union
+gating, soft-body removal event indexing, and constraint-suppression cache
+coherence (all fixed and test-pinned, see In Progress above).
 
 ## 1.0 Required
 
