@@ -505,21 +505,15 @@ impl BroadPhase for AxisSweep3 {
     }
 
     fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize> {
-        aabb_raycast_candidates(&self.live_aabbs(), ray_from, ray_to)
+        aabb_raycast_candidates(&self.aabbs, ray_from, ray_to)
     }
 
     fn aabb_candidates(&self, query: Aabb) -> Vec<usize> {
-        self.live_aabbs()
+        self.aabbs
             .iter()
             .enumerate()
             .filter_map(|(i, a)| a.filter(|aabb| aabb.overlaps(&query)).map(|_| i))
             .collect()
-    }
-}
-
-impl AxisSweep3 {
-    fn live_aabbs(&self) -> Vec<Option<Aabb>> {
-        self.aabbs.clone()
     }
 }
 
