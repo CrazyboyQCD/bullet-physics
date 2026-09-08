@@ -128,14 +128,13 @@ impl SoftBody {
         if !self.clusters.is_empty() {
             // Initialize: split the nodes deterministically and center every
             // cluster on the body's centroid.
-            let mut centers = vec![Vector3::ZERO; nk];
             let mut cog = Vector3::ZERO;
             for (i, n) in self.nodes.iter().enumerate() {
                 cog += n.x;
                 self.clusters[(i * 29873) % nk].nodes.push(i);
             }
             cog /= self.nodes.len() as Real;
-            centers.fill(cog);
+            let mut centers = vec![cog; nk];
             // Iterate: recompute centers with over-relaxation, reassign.
             let slope: Real = 16.0;
             let mut changed = true;
