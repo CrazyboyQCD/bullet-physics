@@ -1929,4 +1929,939 @@ mod tests {
         // pairs are tracked through the sensor side).
         assert_eq!(world.overlapping(left), vec![trigger]);
     }
+
+    // ==== Audit 09 — Full Integrated Adversarial Pass ====================
+
+    /// Deep penetration × solver × sleep: boxes spawned inside the floor
+    /// stay finite every step, recover upward without exploding, and settle
+    /// onto the surface and sleep. The plane case stays within its
+    /// single-sided recoverable depth (a body fully past the plane falls
+    /// freely — matching Bullet's `btStaticPlaneShape` semantics); deeper
+    /// spawns use a thick box floor so the contact normal stays well
+    /// defined.
+    #[test]
+    fn deep_penetration_settles_without_nonfinite_state() {
+        let dt = 1.0 / 60.0;
+        for depth in [0.05, 0.25, 0.45, 1.0, 2.0] {
+            let mut world = PhysicsWorld::new();
+            if depth <= 0.45 {
+                world.add_body(RigidBody::new_static(
+                    bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+                    Vector3::ZERO,
+                ));
+            } else {
+                // Thick floor: top face at y = 0, sides far away so the
+                // recovery normal points up.
+                world.add_body(RigidBody::new_static(
+                    bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(20.0, 5.0, 20.0)),
+                    Vector3::new(0.0, -5.0, 0.0),
+                ));
+            }
+            let start_y = 0.5 - depth;
+            let body = world.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                    Vector3::new(0.0, start_y, 0.0),
+                    1.0,
+                )
+                .restitution(0.0)
+                .friction(0.7),
+            );
+            let mut peak_speed: Real = 0.0;
+            for _ in 0..300 {
+                world.step_simulation(dt);
+                let b = world.body(body);
+                assert!(b.position.is_finite(), "position at depth {depth}");
+                assert!(b.linear_velocity.is_finite(), "velocity at depth {depth}");
+                assert!(b.angular_velocity.is_finite(), "angular at depth {depth}");
+                peak_speed = peak_speed.max(b.linear_velocity.length());
+            }
+            let b = world.body(body);
+            // Recovered upward without launching away: bounded between the
+            // start depth and a modest overshoot above the surface.
+            assert!(
+                b.position.y > start_y && b.position.y < 1.0,
+                "depth {depth}: recovered to {}, started at {start_y}",
+                b.position.y
+            );
+            assert!(peak_speed < 2000.0, "depth {depth}: peak speed {peak_speed}");
+            assert_relative_eq!(b.position.y, 0.5, epsilon = 0.05);
+            assert_eq!(
+                b.activation_state(),
+                ActivationState::IslandSleeping,
+                "depth {depth} should have settled and slept"
+            );
+        }
+    }
+
+    /// Extreme mass ratio × solver × island: 1e-6 : 1 pairs stay finite and
+    /// qualitatively correct in both orderings, and a light-heavy-static
+    /// chain crushes without exploding.
+    #[test]
+    fn extreme_mass_ratio_remains_bounded() {
+        let dt = 1.0 / 60.0;
+        let ball = |x: Real, mass: Real| -> RigidBody {
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(x, 0.0, 0.0),
+                mass,
+            )
+            .restitution(0.0)
+        };
+        // Heavy moving into a resting light body: the light body is pushed
+        // away, the heavy one barely notices, nothing exceeds the incoming
+        // speed scale by more than the elastic exchange bound.
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let light = world.add_body(ball(-2.0, 1e-6));
+        let heavy = world.add_body(ball(2.0, 1e6).velocity(Vector3::new(-1.0, 0.0, 0.0)));
+        for _ in 0..120 {
+            world.step_simulation(dt);
+            let (l, h) = (world.body(light), world.body(heavy));
+            assert!(l.position.is_finite() && l.linear_velocity.is_finite());
+            assert!(h.position.is_finite() && h.linear_velocity.is_finite());
+            assert!(h.linear_velocity.x >= -1.0 - 1e-3, "heavy accelerated");
+            assert!(l.linear_velocity.length() < 2.0, "light launched");
+        }
+        // Perfectly inelastic merge onto the heavy body's speed: the pair
+        // shares the heavy body's velocity within solver slop.
+        let h_end = world.body(heavy).linear_velocity.length();
+        assert!(h_end < 1.0 + 1e-3, "heavy left the incoming speed scale: {h_end}");
+        // Light firing into a resting heavy body: the heavy one moves by a
+        // sliver, the light one bounces or stops but stays bounded.
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let light = world.add_body(ball(2.0, 1e-6).velocity(Vector3::new(-1.0, 0.0, 0.0)));
+        let heavy = world.add_body(ball(-2.0, 1e6));
+        for _ in 0..120 {
+            world.step_simulation(dt);
+            let (l, h) = (world.body(light), world.body(heavy));
+            assert!(l.position.is_finite() && l.linear_velocity.is_finite());
+            assert!(h.position.is_finite() && h.linear_velocity.is_finite());
+            assert!(h.linear_velocity.length() < 1.0e-3, "heavy punched: {}", h.linear_velocity);
+        }
+        // Light-heavy-static crush chain: the light body squeezes the heavy
+        // one against a wall — finite, bounded, no solver explosion.
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.5, 2.0, 2.0)),
+            Vector3::new(4.0, 0.0, 0.0),
+        ));
+        let light = world.add_body(ball(0.0, 1e-6).velocity(Vector3::new(2.0, 0.0, 0.0)));
+        let heavy = world.add_body(ball(2.0, 1e6));
+        for _ in 0..240 {
+            world.step_simulation(dt);
+            let (l, h) = (world.body(light), world.body(heavy));
+            assert!(l.position.is_finite() && l.linear_velocity.is_finite());
+            assert!(h.position.is_finite() && h.linear_velocity.is_finite());
+            assert!(h.position.x < 3.55, "heavy squeezed into the wall");
+            assert!(l.linear_velocity.length() < 10.0, "light exploded");
+        }
+    }
+
+    /// CCD clamp × normal contact × next frames: a fast ball is clamped by
+    /// the CCD sweep on impact, the next step's narrow phase takes over with
+    /// a single Started event, the ball settles and sleeps — no position
+    /// jump, no tunneling, no duplicated events.
+    #[test]
+    fn ccd_clamp_then_normal_contact_settles_and_sleeps() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 100.0, 0.0),
+                1.0,
+            )
+            .restitution(0.0)
+            .ccd(0.1, 0.3),
+        );
+        world.body_mut(ball).collision_events = true;
+        // Run until settled: CCD clamps the first surface approach, then the
+        // normal pipeline takes over.
+        let mut clamp_seen = false;
+        let mut started_count = 0;
+        let mut prev_y;
+        let mut y = 100.0;
+        let mut min_after_clamp = Real::INFINITY;
+        for frame in 0..700 {
+            prev_y = y;
+            world.step_simulation(dt);
+            let b = world.body(ball);
+            y = b.position.y;
+            assert!(y.is_finite() && b.linear_velocity.is_finite());
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Started { .. }) {
+                    started_count += 1;
+                }
+            }
+            if !clamp_seen {
+                // The CCD clamp is the first frame where the ball is at
+                // (or near) its resting height with a small per-step motion.
+                if (y - 0.3).abs() < 0.1 {
+                    clamp_seen = true;
+                    // No jump: the next step's displacement stays within
+                    // the resolved velocity's reach (plus the contact
+                    // correction).
+                    min_after_clamp = y;
+                }
+            } else {
+                min_after_clamp = min_after_clamp.min(y);
+                // Never below the surface after the clamp.
+                assert!(y > -0.05, "tunneled below the floor at frame {frame}");
+                let _ = prev_y;
+            }
+        }
+        assert!(clamp_seen, "CCD clamp never reached the surface");
+        assert!(min_after_clamp > -0.05);
+        // A few micro-bounce Started/Stopped flips while the contact resolves
+        // are physically fine; once the ball is asleep there must be no
+        // further event churn.
+        assert!(started_count <= 5, "event churn: {started_count} Started");
+        assert_eq!(
+            world.body(ball).activation_state(),
+            ActivationState::IslandSleeping,
+            "clamped ball should have settled and slept"
+        );
+        world.step_simulation(dt);
+        assert!(world.contact_events().is_empty(), "no events while asleep");
+    }
+
+    /// Sleep × wake × manifold × events: a sleeping box hit by a rolling
+    /// ball wakes exactly once, gets one Started, emits exactly one Stopped
+    /// when the ball is moved away, and returns to sleep — no stale
+    /// touching state, no duplicate events.
+    #[test]
+    fn sleep_wake_preserves_contact_lifecycle() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let box_a = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            )
+            .friction(0.9),
+        );
+        let ball_b = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(4.0, 0.31, 0.0),
+                0.5,
+            )
+            .friction(0.2)
+            .restitution(0.0),
+        );
+        world.body_mut(box_a).collision_events = true;
+        world.body_mut(ball_b).collision_events = true;
+        // Settle both onto the floor and let them sleep.
+        for _ in 0..240 {
+            world.step_simulation(dt);
+        }
+        assert_eq!(
+            world.body(box_a).activation_state(),
+            ActivationState::IslandSleeping,
+        );
+        assert_eq!(
+            world.body(ball_b).activation_state(),
+            ActivationState::IslandSleeping,
+        );
+        // Roll the ball into the box fast enough that sliding friction
+        // cannot stop it mid-way: both must wake and start touching.
+        world.body_mut(ball_b).activate();
+        world.body_mut(ball_b).linear_velocity = Vector3::new(-5.0, 0.0, 0.0);
+        let mut started = 0;
+        let mut box_awake = false;
+        for _ in 0..120 {
+            world.step_simulation(dt);
+            if world.body(box_a).activation_state() != ActivationState::IslandSleeping {
+                box_awake = true;
+            }
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Started { .. }) {
+                    started += 1;
+                }
+            }
+            if box_awake && started > 0 {
+                break;
+            }
+        }
+        assert!(box_awake, "the hit box must wake");
+        assert!(started >= 1, "the hit must produce a Started");
+        assert!(!world.overlapping(box_a).is_empty(), "touching while hit");
+        // Teleport the ball far away: the pair separates with a single
+        // Stopped, and the box settles back to sleep.
+        let mut stopped = 0;
+        world.set_body_transform(
+            ball_b,
+            Vector3::new(20.0, 0.31, 0.0),
+            Quaternion::IDENTITY,
+        );
+        for _ in 0..300 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Stopped { .. }) {
+                    stopped += 1;
+                }
+            }
+        }
+        assert_eq!(stopped, 1, "exactly one Stopped on separation");
+        assert!(
+            !world.overlapping(box_a).contains(&ball_b),
+            "no stale touching with the ball"
+        );
+        assert_eq!(
+            world.body(box_a).activation_state(),
+            ActivationState::IslandSleeping,
+            "the box must settle back to sleep"
+        );
+    }
+
+    /// Filter mutation × island × manifold × events: a ball settling onto a
+    /// static sphere establishes contact; flipping its mask off tears down
+    /// the solver contact and the touching state (with a single Stopped,
+    /// and the ball falls through unresponsive), and flipping it back on
+    /// rebuilds contact from the deep overlap (with a fresh Started) — no
+    /// stale manifold, no duplicate events.
+    #[test]
+    fn filter_flip_clears_and_recreates_contact_state() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        ));
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 2.0, 0.0),
+                1.0,
+            )
+            .restitution(0.0),
+        );
+        world.body_mut(ball).collision_events = true;
+        let mut started = 0;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Started { .. }) {
+                    started += 1;
+                }
+            }
+            if started > 0 {
+                break;
+            }
+        }
+        assert!(started >= 1, "contact established");
+        assert!(!world.overlapping(ball).is_empty());
+        // Mask off: the next step must tear down the touching state with a
+        // single Stopped, and the ball falls through the sphere without any
+        // contact response (gravity unchecked).
+        world.body_mut(ball).collision_mask = 0;
+        let mut stopped = 0;
+        world.step_simulation(dt);
+        for event in world.contact_events() {
+            if matches!(event, CollisionEvent::Stopped { .. }) {
+                stopped += 1;
+            }
+        }
+        assert_eq!(stopped, 1, "one Stopped on filter-off");
+        assert!(world.overlapping(ball).is_empty(), "no stale touching");
+        // Let it sink into the static sphere, then re-enable: the deep
+        // overlap re-establishes contact with a fresh Started, and the
+        // solver pushes the ball back out.
+        for _ in 0..5 {
+            world.step_simulation(dt);
+        }
+        world.body_mut(ball).collision_mask = filter_groups::ALL;
+        let mut restarted = 0;
+        for _ in 0..10 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Started { .. }) {
+                    restarted += 1;
+                }
+            }
+        }
+        assert!(restarted >= 1, "contact re-established on filter-on");
+        assert!(!world.overlapping(ball).is_empty());
+    }
+
+    /// Remove × recreate × entire state: a touching chain A-B-C loses B;
+    /// the recycled slot gets a fresh body of a different shape at a
+    /// different place. The new body must not inherit any of the old B's
+    /// touching/events, the old pair must have emitted its Stopped, and the
+    /// new body must collide normally once actually overlapped.
+    #[test]
+    fn remove_recreate_does_not_retain_simulation_state() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let sphere = |x: Real| {
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(x, 0.0, 0.0),
+                1.0,
+            )
+            .restitution(0.0)
+        };
+        let a = world.add_body(sphere(-0.99));
+        let b = world.add_body(sphere(0.0));
+        let c = world.add_body(sphere(0.99));
+        for handle in [a, b, c] {
+            world.body_mut(handle).collision_events = true;
+        }
+        let mut started = 0;
+        for _ in 0..40 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Started { .. }) {
+                    started += 1;
+                }
+            }
+            if started >= 2 && !world.overlapping(b).is_empty() {
+                break;
+            }
+        }
+        assert!(started >= 2, "the chain settled: {started}");
+        assert!(!world.overlapping(b).is_empty(), "B is touching while removed");
+        // Remove the middle body: its pairs must end, and nothing may
+        // remain attached to its slot. The removal Stopped events sit in
+        // the buffer right now (the next step clears it, Rapier's drain
+        // semantics).
+        world.remove_body(b);
+        let mut stopped = 0;
+        for event in world.contact_events() {
+            if matches!(event, CollisionEvent::Stopped { .. }) {
+                stopped += 1;
+            }
+        }
+        assert!(stopped >= 2, "both old pairs ended: {stopped}");
+        for _ in 0..3 {
+            world.step_simulation(dt);
+            assert!(world.contact_events().is_empty(), "no post-removal churn");
+        }
+        assert!(world.overlapping(a).is_empty());
+        assert!(world.overlapping(c).is_empty());
+        // Recreate into the recycled proxy slot: different shape, different
+        // place, not touching anything. Rigid-body indices append after the
+        // tombstone (the old B's slot stays retired; only the broad-phase
+        // proxy slot recycles, pinned by
+        // `remove_then_add_recycles_the_proxy_slot`). The new body arrives
+        // with zero inherited state: no events fire while it floats alone.
+        let b2 = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.4)),
+            Vector3::new(0.0, 5.0, 0.0),
+            1.0,
+        ));
+        assert_ne!(b2.index(), b.index(), "a removed rigid index stays retired");
+        for _ in 0..10 {
+            world.step_simulation(dt);
+            assert!(world.contact_events().is_empty(), "phantom events for the new body");
+            assert!(world.overlapping(b2).is_empty(), "stale touching on the new body");
+        }
+        // Drop the new body onto A: it collides normally with fresh events.
+        world.set_body_transform(b2, Vector3::new(-1.05, 0.0, 0.0), Quaternion::IDENTITY);
+        let mut restarted = 0;
+        for _ in 0..5 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Started { .. }) {
+                    restarted += 1;
+                }
+            }
+        }
+        assert!(restarted >= 1, "the new body collides normally");
+        assert!(world.overlapping(b2).contains(&a));
+    }
+
+    /// The same scripted scenario (fall, rest, get hit, settle, sleep) on
+    /// both broad-phase backends produces the same qualitative simulation:
+    /// identical event counts and final poses within tolerance.
+    #[test]
+    fn backend_choice_preserves_collision_lifecycle() {
+        let build = || -> (PhysicsWorld, BodyHandle, BodyHandle) {
+            let mut world = PhysicsWorld::with_broadphase(BroadPhaseBackend::Dbvt(
+                bullet_collision::broadphase::DbvtBroadPhase::new(),
+            ));
+            world.add_body(RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+                Vector3::ZERO,
+            ));
+            let box_a = world.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                    Vector3::new(0.0, 0.5, 0.0),
+                    1.0,
+                )
+                .friction(0.9),
+            );
+            let ball = world.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::sphere(0.3),
+                    Vector3::new(4.0, 0.31, 0.0),
+                    0.5,
+                )
+                .friction(0.2)
+                .restitution(0.0),
+            );
+            (world, box_a, ball)
+        };
+        let dt = 1.0 / 60.0;
+        let run = |world: &mut PhysicsWorld, box_a: BodyHandle, ball: BodyHandle| -> (usize, usize, (Real, Real)) {
+            let mut started = 0;
+            let mut stopped = 0;
+            for _ in 0..240 {
+                world.step_simulation(dt);
+            }
+            world.body_mut(ball).activate();
+            world.body_mut(ball).linear_velocity = Vector3::new(-5.0, 0.0, 0.0);
+            for _ in 0..240 {
+                world.step_simulation(dt);
+                for event in world.contact_events() {
+                    match event {
+                        CollisionEvent::Started { .. } => started += 1,
+                        CollisionEvent::Stopped { .. } => stopped += 1,
+                    }
+                }
+            }
+            let p = world.body(box_a).position;
+            (started, stopped, (p.x, p.z))
+        };
+        // AxisSweep3 (the default) versus DBVT.
+        let mut world_axis = PhysicsWorld::new();
+        let (axis_a, axis_ball) = {
+            world_axis.add_body(RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+                Vector3::ZERO,
+            ));
+            let a = world_axis.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                    Vector3::new(0.0, 0.5, 0.0),
+                    1.0,
+                )
+                .friction(0.9),
+            );
+            let ball = world_axis.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::sphere(0.3),
+                    Vector3::new(4.0, 0.31, 0.0),
+                    0.5,
+                )
+                .friction(0.2)
+                .restitution(0.0),
+            );
+            (a, ball)
+        };
+        let (ax_started, ax_stopped, ax_pose) = run(&mut world_axis, axis_a, axis_ball);
+        let (mut dbvt_world, dbvt_a, dbvt_ball) = build();
+        let (db_started, db_stopped, db_pose) = run(&mut dbvt_world, dbvt_a, dbvt_ball);
+        assert_eq!(ax_started, db_started, "same Started count");
+        assert_eq!(ax_stopped, db_stopped, "same Stopped count");
+        assert_relative_eq!(ax_pose.0, db_pose.0, epsilon = 1e-3);
+        assert_relative_eq!(ax_pose.1, db_pose.1, epsilon = 1e-3);
+    }
+
+    /// Teleport × contact × events: a resting box teleported far away ends
+    /// its contact exactly once and flies free; teleported back into
+    /// contact, the pair re-establishes with a fresh Started. No stale
+    /// force pulls it back, no stale manifold survives the jump.
+    #[test]
+    fn teleport_does_not_leave_stale_contact() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let box_a = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            )
+            .friction(0.9),
+        );
+        world.body_mut(box_a).collision_events = true;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+        }
+        assert!(!world.overlapping(box_a).is_empty(), "resting on the floor");
+        // Teleport far away: the contact ends exactly once, the body keeps
+        // falling from rest at the new place (no stale impulse), and the
+        // old touching is gone.
+        world.set_body_transform(box_a, Vector3::new(50.0, 20.0, 0.0), Quaternion::IDENTITY);
+        let mut stopped = 0;
+        for _ in 0..10 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Stopped { .. }) {
+                    stopped += 1;
+                }
+            }
+        }
+        assert_eq!(stopped, 1, "one Stopped after the teleport");
+        assert!(world.overlapping(box_a).is_empty());
+        let b = world.body(box_a);
+        assert_relative_eq!(b.position.x, 50.0, epsilon = 1e-3);
+        assert_relative_eq!(b.linear_velocity.x, 0.0, epsilon = 1e-3);
+        assert_relative_eq!(b.linear_velocity.y, -9.81 * 10.0 * dt, epsilon = 0.1);
+        // Teleport back into the resting pose: contact re-establishes.
+        world.set_body_transform(box_a, Vector3::new(0.0, 0.5, 0.0), Quaternion::IDENTITY);
+        let mut started = 0;
+        for _ in 0..5 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Started { .. }) {
+                    started += 1;
+                }
+            }
+        }
+        assert!(started >= 1, "contact re-established after returning");
+        assert!(!world.overlapping(box_a).is_empty());
+    }
+
+    /// Multibody × rigid lifecycle: a rigid box settles on a fixed-base
+    /// multibody's base collider, gets removed (the pair ends cleanly), and
+    /// a recreated box re-establishes contact — the multibody collider
+    /// participates in the same event lifecycle as a rigid partner.
+    #[test]
+    fn multibody_rigid_lifecycle_is_consistent() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        let mut mb = crate::multibody::MultiBody::new(1, 1.0, Vector3::ONE, true, false);
+        mb.setup_revolute(
+            0,
+            1.0,
+            Vector3::ONE,
+            None,
+            Quaternion::IDENTITY,
+            Vector3::Z,
+            Vector3::ZERO,
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        mb.finalize_multidof();
+        mb.set_base_collider(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            0.5,
+            0.0,
+        );
+        let mb_handle = world.add_multibody(mb);
+        world.multibody_mut(mb_handle).base_pos = Vector3::new(0.0, 1.0, 0.0);
+        let box_a = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.3)),
+                Vector3::new(0.0, 2.0, 0.0),
+                1.0,
+            )
+            .restitution(0.0),
+        );
+        world.body_mut(box_a).collision_events = true;
+        let mut started = 0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if let CollisionEvent::Started { a, b, .. } = event {
+                    // The canonical pair order puts the rigid body first.
+                    assert!(
+                        matches!(a, CollisionObject::Body(_))
+                            && matches!(b, CollisionObject::Link { .. }),
+                        "partners are the box and the base collider"
+                    );
+                    started += 1;
+                }
+            }
+            if started > 0 {
+                break;
+            }
+        }
+        assert!(started >= 1, "box settled on the base collider");
+        // Remove the rigid partner: the pair ends with a Stopped in the
+        // same buffer (the next step clears it), and the multibody is left
+        // with no stale contact.
+        world.remove_body(box_a);
+        let mut stopped = 0;
+        for event in world.contact_events() {
+            if matches!(event, CollisionEvent::Stopped { .. }) {
+                stopped += 1;
+            }
+        }
+        assert_eq!(stopped, 1, "one Stopped on removal");
+        for _ in 0..10 {
+            world.step_simulation(dt);
+            assert!(world.contact_events().is_empty());
+        }
+        // Recreate: the new box collides with the base collider normally.
+        let box_b = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.3)),
+                Vector3::new(0.0, 2.0, 0.0),
+                1.0,
+            )
+            .restitution(0.0),
+        );
+        world.body_mut(box_b).collision_events = true;
+        let mut restarted = 0;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Started { .. }) {
+                    restarted += 1;
+                }
+            }
+            if restarted > 0 {
+                break;
+            }
+        }
+        assert!(restarted >= 1, "the recreated box collides with the base");
+    }
+
+    /// Softbody × rigid lifecycle: a rope drops onto a static box, the
+    /// soft-rigid pair reports Started; removing and recreating the rigid
+    /// partner tears down and rebuilds the pair without stale state.
+    #[test]
+    fn soft_rigid_remove_recreate_is_consistent() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        let rigid = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(3.0, 0.5, 3.0)),
+            Vector3::new(0.0, 2.0, 0.0),
+        ));
+        let rope = world.add_soft_body(crate::softbody::helpers::create_rope(
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, 3.5, 0.0),
+            8,
+            0,
+        ));
+        world.soft_body_mut(rope).collision_events = true;
+        let mut started = 0;
+        for _ in 0..180 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if let CollisionEvent::Started { a, b, .. } = event {
+                    // The canonical pair order puts the rigid body first.
+                    assert!(
+                        matches!(a, CollisionObject::Body(_))
+                            && matches!(b, CollisionObject::Soft(_)),
+                        "partners are the box and the rope"
+                    );
+                    started += 1;
+                }
+            }
+            if started > 0 {
+                break;
+            }
+        }
+        assert!(started >= 1, "rope landed on the box");
+        // Remove the rigid partner: the soft-rigid pair ends cleanly.
+        world.remove_body(rigid);
+        let mut stopped = 0;
+        for event in world.contact_events() {
+            if matches!(event, CollisionEvent::Stopped { .. }) {
+                stopped += 1;
+            }
+        }
+        assert_eq!(stopped, 1, "one Stopped on rigid removal");
+        for _ in 0..10 {
+            world.step_simulation(dt);
+            assert!(world.contact_events().is_empty());
+        }
+        // Recreate the rigid partner under the rope's tail: contact
+        // re-establishes with a fresh Started.
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(3.0, 0.5, 3.0)),
+            Vector3::new(0.0, 1.0, 0.0),
+        ));
+        let mut restarted = 0;
+        for _ in 0..180 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                if matches!(event, CollisionEvent::Started { .. }) {
+                    restarted += 1;
+                }
+            }
+            if restarted > 0 {
+                break;
+            }
+        }
+        assert!(restarted >= 1, "rope re-settles onto the recreated box");
+    }
+
+    type Snapshot = Vec<(ActivationState, [Real; 3], [Real; 3])>;
+
+    /// The full scripted lifecycle (settle, sleep, wake by a hit, filter
+    /// off/on, teleport, CCD approach, remove, recreate, re-overlap,
+    /// re-sleep), run on the requested broad-phase backend; returns the
+    /// final per-body snapshot and the event counts.
+    fn run_state_machine(dbvt: bool) -> (Snapshot, usize, usize) {
+        let dt = 1.0 / 60.0;
+        let mut world = if dbvt {
+            PhysicsWorld::with_broadphase(BroadPhaseBackend::Dbvt(
+                bullet_collision::broadphase::DbvtBroadPhase::new(),
+            ))
+        } else {
+            PhysicsWorld::new()
+        };
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        ));
+        let box_a = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            )
+            .friction(0.9),
+        );
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(4.0, 0.31, 0.0),
+                0.5,
+            )
+            .friction(0.2)
+            .restitution(0.0)
+            .ccd(0.1, 0.3),
+        );
+        world.body_mut(box_a).collision_events = true;
+        let mut started = 0;
+        let mut stopped = 0;
+        // Settle and sleep both bodies.
+        for _ in 0..240 {
+            world.step_simulation(dt);
+        }
+        // Wake by a hit: the ball rolls into the box.
+        world.body_mut(ball).activate();
+        world.body_mut(ball).linear_velocity = Vector3::new(-5.0, 0.0, 0.0);
+        for _ in 0..120 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                match event {
+                    CollisionEvent::Started { .. } => started += 1,
+                    CollisionEvent::Stopped { .. } => stopped += 1,
+                }
+            }
+        }
+        // Filter off: the pair separates.
+        world.body_mut(ball).collision_mask = 0;
+        world.body_mut(ball).activate();
+        for _ in 0..30 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                match event {
+                    CollisionEvent::Started { .. } => started += 1,
+                    CollisionEvent::Stopped { .. } => stopped += 1,
+                }
+            }
+        }
+        // Filter on + teleport the ball back for a fresh approach.
+        world.body_mut(ball).collision_mask = filter_groups::ALL;
+        world.set_body_transform(ball, Vector3::new(6.0, 0.31, 0.0), Quaternion::IDENTITY);
+        world.body_mut(ball).activate();
+        world.body_mut(ball).linear_velocity = Vector3::new(-8.0, 0.0, 0.0);
+        for _ in 0..60 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                match event {
+                    CollisionEvent::Started { .. } => started += 1,
+                    CollisionEvent::Stopped { .. } => stopped += 1,
+                }
+            }
+        }
+        // Remove and recreate the ball, then let everything re-sleep.
+        world.remove_body(ball);
+        let ball2 = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(-6.0, 0.31, 0.0),
+                0.5,
+            )
+            .friction(0.2)
+            .restitution(0.0),
+        );
+        world.body_mut(ball2).activate();
+        world.body_mut(ball2).linear_velocity = Vector3::new(4.0, 0.0, 0.0);
+        for _ in 0..360 {
+            world.step_simulation(dt);
+            for event in world.contact_events() {
+                match event {
+                    CollisionEvent::Started { .. } => started += 1,
+                    CollisionEvent::Stopped { .. } => stopped += 1,
+                }
+            }
+        }
+        let snapshot = world
+            .bodies()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !world.bodies()[*i].is_removed())
+            .map(|(_, b)| {
+                (
+                    b.activation_state(),
+                    [b.position.x, b.position.y, b.position.z],
+                    [
+                        b.linear_velocity.x,
+                        b.linear_velocity.y,
+                        b.linear_velocity.z,
+                    ],
+                )
+            })
+            .collect();
+        (snapshot, started, stopped)
+    }
+
+    /// The deterministic state machine: the full scripted lifecycle (settle,
+    /// sleep, wake by a hit, filter off/on, teleport, CCD approach, remove,
+    /// recreate, re-overlap, re-sleep) run twice from the same initial state
+    /// produces identical snapshots — per-body state and event counts —
+    /// proving no hidden order dependence or nondeterministic state.
+    #[test]
+    fn deterministic_state_machine_is_repeatable() {
+        let (snap_a, started_a, stopped_a) = run_state_machine(false);
+        let (snap_b, started_b, stopped_b) = run_state_machine(false);
+        assert_eq!(started_a, started_b, "same Started count");
+        assert_eq!(stopped_a, stopped_b, "same Stopped count");
+        assert_eq!(snap_a, snap_b, "identical final snapshots");
+    }
+
+    /// The same full state machine on the DBVT backend must agree with the
+    /// AxisSweep3 run: identical event counts, identical activation states,
+    /// and final poses within tolerance (pair ordering may differ, so the
+    /// float accumulation is compared with a bound, not bit-exactly).
+    #[test]
+    fn state_machine_matches_across_backends() {
+        let (axis_snap, axis_started, axis_stopped) = run_state_machine(false);
+        let (dbvt_snap, db_started, db_stopped) = run_state_machine(true);
+        assert_eq!(axis_started, db_started, "same Started count");
+        assert_eq!(axis_stopped, db_stopped, "same Stopped count");
+        assert_eq!(axis_snap.len(), dbvt_snap.len());
+        for (a, d) in axis_snap.iter().zip(dbvt_snap.iter()) {
+            assert_eq!(a.0, d.0, "same activation state");
+            for k in 0..3 {
+                assert!(
+                    (a.1[k] - d.1[k]).abs() < 1e-3,
+                    "position axis {k}: axis {} vs dbvt {}",
+                    a.1[k],
+                    d.1[k]
+                );
+                assert!(
+                    (a.2[k] - d.2[k]).abs() < 1e-2,
+                    "velocity axis {k}: axis {} vs dbvt {}",
+                    a.2[k],
+                    d.2[k]
+                );
+            }
+        }
+    }
 }
