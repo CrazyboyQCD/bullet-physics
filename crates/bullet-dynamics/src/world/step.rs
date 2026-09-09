@@ -564,7 +564,7 @@ impl PhysicsWorld {
                     .min(b.shape.contact_breaking_threshold());
                 cache.capture(&manifold, pa, a.orientation, pb, b.orientation, threshold);
                 cache.refresh(pa, a.orientation, pb, b.orientation, &mut self.refresh_out);
-                if !no_response {
+                                if !no_response {
                     for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
                         cp.normal_impulse *= WARM_STARTING_FACTOR;
                         let mut row = ContactConstraint::prepare(i, j, &cp, a, b, k as u32);
@@ -719,7 +719,7 @@ impl PhysicsWorld {
                 bucket.retain(|e| e.manifold.paired_at(stamp));
             }
         }
-        self.contact_rows = contact_rows;
+                self.contact_rows = contact_rows;
         self.joint_rows = joint_rows;
 
         // 6bm. Multibody internal constraints: in the mixed path they were
@@ -777,6 +777,15 @@ impl PhysicsWorld {
                     // Removed bodies are gone from every collision path,
                     // including the CCD sweeps (their proxy is destroyed).
                     if other.is_removed() {
+                        continue;
+                    }
+                    // Sensor targets carry no contact response; Bullet's CCD
+                    // callback ignores them too (`addSingleResult` rejects
+                    // `hasContactResponse() == false` objects).
+                    if other
+                        .collision_flags
+                        .contains(CollisionFlags::NO_CONTACT_RESPONSE)
+                    {
                         continue;
                     }
                     // Joint-linked pairs with suppressed collisions skip the
@@ -1804,6 +1813,302 @@ mod tests {
         // unsuppressed control is `ccd_clamps_fast_bodies_at_the_impact`).
         world.step_simulation(1.0 / 60.0);
         assert!(world.body(BodyHandle::from_index(1)).position.y < -0.5);
+    }
+
+    /// Bullet's CCD callback ignores targets without contact response
+    /// (`btClosestNotMeConvexResultCallback::addSingleResult` rejects objects
+    /// where `hasContactResponse()` is false): a sensor (`NO_CONTACT_RESPONSE`)
+    /// wall never clamps a fast body — it flies straight through.
+    #[test]
+    fn ccd_ignores_no_contact_response_targets() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let mut wall = RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        );
+        wall.collision_flags = CollisionFlags::NO_CONTACT_RESPONSE;
+        world.add_body(wall);
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        world.step_simulation(1.0 / 60.0);
+        assert!(
+            world.body(BodyHandle::from_index(1)).position.y < -0.5,
+            "a sensor wall must not clamp the CCD ball"
+        );
+    }
+
+    /// The motion threshold is exclusive (Bullet:
+    /// `ccdSquareMotionThreshold() < squareMotion`): per-step motion exactly
+    /// equal to the threshold does not sweep, motion above it does. The wall
+    /// is thin enough that a 1.5-unit step clears it entirely (the predicted
+    /// narrow phase cannot catch it either), so the CCD gate is the only
+    /// thing deciding between passing through and clamping. Values are
+    /// binary-exact so f32 and f64 agree.
+    #[test]
+    fn ccd_threshold_boundary_is_exclusive() {
+        let dt: Real = 0.25;
+        let ball_at = |velocity: Real, threshold: Real| -> PhysicsWorld {
+            let mut world = PhysicsWorld::new();
+            world.set_gravity(Vector3::ZERO);
+            world.add_body(RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+                Vector3::new(0.0, 3.0, 0.0),
+            ));
+            world.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::sphere(0.3),
+                    Vector3::new(0.0, 4.0, 0.0),
+                    1.0,
+                )
+                .velocity(Vector3::new(0.0, velocity, 0.0))
+                .ccd(threshold, 0.3),
+            );
+            world
+        };
+        // Exactly at the threshold (1.5 == 6.0 * 0.25): no sweep, plain
+        // integration to y = 2.5 — fully past the wall ([2.9, 3.1]) and its
+        // inflated top (3.4), where a sweep would have clamped instead.
+        let mut world = ball_at(-6.0, 1.5);
+        world.step_simulation(dt);
+        assert_relative_eq!(
+            world.body(BodyHandle::from_index(1)).position.y,
+            2.5,
+            epsilon = 1e-5
+        );
+        // Slightly above: the sweep runs and clamps at the inflated top.
+        let mut world = ball_at(-6.4, 1.5);
+        world.step_simulation(dt);
+        assert_relative_eq!(
+            world.body(BodyHandle::from_index(1)).position.y,
+            3.4,
+            epsilon = 0.02
+        );
+    }
+
+    /// With two walls in the sweep path the clamp lands on the nearest hit;
+    /// once the near wall is group/mask-excluded the far wall takes over.
+    #[test]
+    fn ccd_selects_nearest_of_multiple_targets() {
+        let dt: Real = 1.0 / 60.0;
+        let build = |near_group: u16, near_mask: u16| -> PhysicsWorld {
+            let mut world = PhysicsWorld::new();
+            world.set_gravity(Vector3::ZERO);
+            let mut near = RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.05, 1.0, 1.0)),
+                Vector3::new(2.0, 0.0, 0.0),
+            );
+            near.collision_group = near_group;
+            near.collision_mask = near_mask;
+            world.add_body(near);
+            world.add_body(RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(0.05, 1.0, 1.0)),
+                Vector3::new(6.0, 0.0, 0.0),
+            ));
+            world.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::sphere(0.3),
+                    Vector3::ZERO,
+                    1.0,
+                )
+                .velocity(Vector3::new(420.0, 0.0, 0.0))
+                .ccd(0.1, 0.3),
+            );
+            world
+        };
+        // Both walls visible: the ball clamps on the near wall (face 1.95 −
+        // sphere 0.3 = 1.65 sphere-center entry).
+        let mut world = build(filter_groups::DEFAULT, filter_groups::ALL);
+        world.step_simulation(dt);
+        let x = world.body(BodyHandle::from_index(2)).position.x;
+        assert!((1.5..1.8).contains(&x), "clamped on the near wall, got {x}");
+        // Near wall excluded (its mask rejects the ball's group): the far
+        // wall's hit wins instead.
+        let mut world = build(2, 0);
+        world.step_simulation(dt);
+        let x = world.body(BodyHandle::from_index(2)).position.x;
+        assert!((5.5..5.8).contains(&x), "clamped on the far wall, got {x}");
+    }
+
+    /// Sweep speed sweep: from 120 to 120 000 units/s the clamp keeps the
+    /// ball at the wall's inflated top, and every quantity stays finite.
+    #[test]
+    fn ccd_speed_sweep_stays_finite() {
+        let dt: Real = 1.0 / 60.0;
+        for k in [1.0, 10.0, 100.0, 1000.0] {
+            let mut world = PhysicsWorld::new();
+            world.set_gravity(Vector3::ZERO);
+            world.add_body(RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+                Vector3::new(10_000.0, 0.5, 0.0),
+            ));
+            world.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::sphere(0.3),
+                    Vector3::new(10_000.0, 1.0, 0.0),
+                    1.0,
+                )
+                .velocity(Vector3::new(0.0, -120.0 * k, 0.0))
+                .ccd(0.1, 0.3),
+            );
+            world.step_simulation(dt);
+            let b = world.body(BodyHandle::from_index(1));
+            assert!(b.position.is_finite(), "position at {k}x");
+            assert!(b.linear_velocity.is_finite(), "velocity at {k}x");
+            assert!(b.orientation.is_finite(), "orientation at {k}x");
+            assert_relative_eq!(b.position.y, 0.9, epsilon = 0.05);
+            assert_relative_eq!(b.position.x, 10_000.0, epsilon = 1.0);
+        }
+    }
+
+    /// A fast spinning body is clamped by the sweep and every integrated
+    /// quantity stays finite and normalized (the position-only rewind leaves
+    /// the orientation integrating the full step — the documented deviation —
+    /// but nothing may blow up).
+    #[test]
+    fn ccd_high_spin_stays_finite() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        world.body_mut(BodyHandle::from_index(1)).angular_velocity = Vector3::new(0.0, 3000.0, 0.0);
+        world.step_simulation(1.0 / 60.0);
+        let b = world.body(BodyHandle::from_index(1));
+        assert!(b.position.is_finite());
+        assert!(b.angular_velocity.is_finite());
+        assert!(b.orientation.is_finite());
+        assert_relative_eq!(b.orientation.length_squared(), 1.0, epsilon = 1e-3);
+        assert_relative_eq!(b.position.y, 0.9, epsilon = 0.05);
+    }
+
+    /// A CCD body starting inside the target reports the fraction-0 clamp:
+    /// the body stays put (no backward teleport, no explosive correction)
+    /// and every quantity stays finite.
+    #[test]
+    fn ccd_starting_inside_is_finite() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        world.step_simulation(1.0 / 60.0);
+        let b = world.body(BodyHandle::from_index(1));
+        assert!(b.position.is_finite());
+        assert_relative_eq!(b.position.y, 0.5, epsilon = 1e-4);
+    }
+
+    /// Extreme timesteps stay finite: a tiny step never triggers the sweep
+    /// (plain integration), a huge step clamps at the wall.
+    #[test]
+    fn ccd_extreme_timestep_stays_finite() {
+        let build = || -> PhysicsWorld {
+            let mut world = PhysicsWorld::new();
+            world.set_gravity(Vector3::ZERO);
+            world.add_body(RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+                Vector3::new(0.0, 0.5, 0.0),
+            ));
+            world.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::sphere(0.3),
+                    Vector3::new(0.0, 1.0, 0.0),
+                    1.0,
+                )
+                .velocity(Vector3::new(0.0, -120.0, 0.0))
+                .ccd(0.1, 0.3),
+            );
+            world
+        };
+        // dt = 1e-4: motion 0.012 < threshold 0.1, plain integration.
+        let mut world = build();
+        world.step_simulation(1e-4);
+        let b = world.body(BodyHandle::from_index(1));
+        assert!(b.position.is_finite());
+        assert_relative_eq!(b.position.y, 1.0 - 120.0 * 1e-4, epsilon = 1e-5);
+        // dt = 0.5: motion 60, the sweep clamps at the wall.
+        let mut world = build();
+        world.step_simulation(0.5);
+        let b = world.body(BodyHandle::from_index(1));
+        assert!(b.position.is_finite());
+        assert_relative_eq!(b.position.y, 0.9, epsilon = 0.05);
+    }
+
+    /// Runtime suppression flips gate the sweep from the next step on
+    /// (the per-step `no_collision_pairs` re-derivation): an enabled pair
+    /// sweeps and clamps, disabling it lets the body through, and
+    /// re-enabling it clamps on the next wall down.
+    #[test]
+    fn ccd_suppression_flip_gates_the_sweep() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, -2.5, 0.0),
+        ));
+        world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 3.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        let mut joint = Constraint::point2point(
+            BodyHandle::from_index(0),
+            BodyHandle::from_index(2),
+            Vector3::new(0.0, 0.5, 0.0),
+            Vector3::new(0.0, 2.5, 0.0),
+        );
+        joint.point2point_mut().set_impulse_clamp(0.001);
+        world.add_constraint(joint);
+        let dt: Real = 1.0 / 60.0;
+        // Step 1 falls from 3 to 1: no contact yet, joint impulse clamped.
+        world.step_simulation(dt);
+        // Disabled: step 2 sweeps nothing and crosses the wall (to y = -1).
+        world.constraint_mut(0).set_disable_collisions(true);
+        world.step_simulation(dt);
+        assert!(
+            world.body(BodyHandle::from_index(2)).position.y < -0.5,
+            "suppressed pair must not clamp"
+        );
+        // Re-enabled: step 3 clamps on the second wall (top -2.4 + 0.3).
+        world.constraint_mut(0).set_disable_collisions(false);
+        world.step_simulation(dt);
+        let y = world.body(BodyHandle::from_index(2)).position.y;
+        assert_relative_eq!(y, -2.1, epsilon = 0.05);
     }
 
     // ---- dynamic triangle-mesh bodies (the GImpact use case) ----------

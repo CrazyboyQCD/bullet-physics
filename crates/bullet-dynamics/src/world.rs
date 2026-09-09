@@ -1634,6 +1634,39 @@ mod tests {
         );
     }
 
+    /// After removing a CCD target and creating a new body (the freed proxy
+    /// slot gets recycled with a new owner), the sweep resolves the new
+    /// proxy's owner and AABB — no stale hit at the old wall's height.
+    #[test]
+    fn removed_ccd_target_proxy_recreate_is_not_stale() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        // Thin wall spanning y in [0.4, 0.6]; the sweep would clamp at 0.9.
+        let wall = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.5, 0.0),
+        ));
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.3),
+                Vector3::new(0.0, 1.0, 0.0),
+                1.0,
+            )
+            .velocity(Vector3::new(0.0, -120.0, 0.0))
+            .ccd(0.1, 0.3),
+        );
+        world.remove_body(wall);
+        // The replacement wall sits lower ([0.2, 0.4]): its inflated top
+        // clamps at 0.7. A stale slot would still report the old AABB (0.9).
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(1.0, 0.1, 1.0)),
+            Vector3::new(0.0, 0.3, 0.0),
+        ));
+        world.step_simulation(1.0 / 60.0);
+        let y = world.body(ball).position.y;
+        assert_relative_eq!(y, 0.7, epsilon = 0.05);
+    }
+
     /// The remaining bodies keep their indices and simulate normally after
     /// a removal (no renumbering, no swap).
     #[test]
