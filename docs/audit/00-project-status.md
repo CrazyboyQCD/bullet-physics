@@ -91,11 +91,14 @@ perf in band (the first island-gating cut cost +20% on stack_1000; fixed by
 a per-proxy eligibility fast path, `docs/bullet-perf.md`). Residual
 semantic note recorded as deviations §1 "Islands: gating & kinematic wake".
 
-**Next stage: broadphase integration** (planned slot
-[`07-broadphase-integration.md`](07-broadphase-integration.md)) — the
-world-level dispatch over both broad phases and their interaction with the
-step pipeline — followed by a full integrated adversarial pass, then the
-remaining 1.0 items.
+**Stage: audits 01–09 complete.** The broadphase integration audit landed as
+[`07-broadphase-integration.md`](07-broadphase-integration.md), the CCD audit
+as [`08-ccd.md`](08-ccd.md) (one confirmed sensor-target bug fixed), and the
+full integrated adversarial pass as
+[`09-integrated-adversarial.md`](09-integrated-adversarial.md) (one P3
+zero-link fixed-base multibody panic fixed; 11 cross-system adversarial
+tests; deterministic state machine bit-repeatable). The remaining 1.0 items
+are the minimal debug draw and the API freeze review.
 
 ## Known Deviations
 
@@ -133,11 +136,11 @@ coherence (all fixed and test-pinned, see In Progress above).
 ## 1.0 Required
 
 - Independent source audits of the correctness-critical subsystems —
-  **done** for manifold, GJK, EPA, convex-convex, AxisSweep3 and DBVT
-  (records 01–06); broadphase integration is the next stage.
+  **done** for manifold, GJK, EPA, convex-convex, AxisSweep3, DBVT
+  (records 01–06), broadphase integration (07) and CCD (08).
 - Adversarial correctness testing (deep penetration, extreme mass ratios,
-  high spin, degenerate shapes) — partially covered per-subsystem by the
-  audit suites; the integrated pass remains.
+  high spin, degenerate shapes) — **done**: per-subsystem adversarial
+  suites from the audit rounds plus the full integrated pass (09).
 - Minimal debug draw (`docs/api-gaps.md` P3).
 - API freeze review: naming, docs, breaking-change surface settled
   (typed handles were the last planned breaking change).

@@ -42,7 +42,7 @@ no one has done a dedicated source-level review of that subsystem yet.
 | API surface | 🟢 | consumer backlog shipped through batch 2 (`docs/api-gaps.md`) | — |
 | Parity harness | 🟢 | 8 scenes × f32/f64, ledger current | `docs/parity-harness.md` |
 | Performance | 🟢 | perf ledger current (2026-09-04 rerun) | `docs/bullet-perf.md` |
-| Adversarial testing | 🔵 | not started | planned |
+| Adversarial testing | 🟡 | **integrated pass complete** 2026-09-09 (`09-integrated-adversarial.md`): ten cross-system scenario groups + the deterministic state machine (settle/sleep/wake/filter/teleport/CCD/remove/recreate run twice, bit-identical snapshots; the full machine also matches across both broad-phase backends); one P3 finding fixed (zero-link fixed-base multibody panic); 12 new adversarial tests (448 total × f32/f64); parity 8/8 at ledger | `09-integrated-adversarial.md` |
 | Parallel solver (IslandWork) | 🔵 | deliberately deferred (no rayon; on-demand decision 2026-09-03) | — |
 
 Interpretation rules:
