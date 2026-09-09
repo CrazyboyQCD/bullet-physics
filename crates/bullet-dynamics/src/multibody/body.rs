@@ -545,13 +545,21 @@ impl MultiBody {
         self.base_pos
     }
 
-    /// Base linear velocity, world frame.
+    /// Base linear velocity, world frame. Always zero for a fixed base
+    /// (which has no base degrees of freedom, so the generalized-velocity
+    /// vector may not even carry base components).
     pub fn base_vel(&self) -> Vector3 {
+        if self.fixed_base {
+            return Vector3::ZERO;
+        }
         Vector3::new(self.velocities[3], self.velocities[4], self.velocities[5])
     }
 
-    /// Base angular velocity, world frame.
+    /// Base angular velocity, world frame. Always zero for a fixed base.
     pub fn base_omega(&self) -> Vector3 {
+        if self.fixed_base {
+            return Vector3::ZERO;
+        }
         Vector3::new(self.velocities[0], self.velocities[1], self.velocities[2])
     }
 
