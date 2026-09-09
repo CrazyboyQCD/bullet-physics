@@ -46,15 +46,18 @@ gap. Behavior semantics are out of scope here — see
   applies `v *= pow(1 - damping, dt)` before gravity/forces, matching
   `btRigidBody::applyDamping` in `predictUnconstraintMotion`. The opt-in
   "additional damping" block is not ported (`bullet-deviations.md` §3).
-- **P3 — minimal debug draw** (medium): a debug-primitives output —
-  `world.debug_primitives(&mut impl FnMut(DebugPrim))` — emitting AABBs,
-  contact points, manifold normals and wheel rays, with a category mask
-  mirroring Bullet's `DBG_*` flags. This is the *producer* role of
-  Bullet's `btIDebugDraw`; the consumer stays caller-side, so a Bevy
-  user bridges it to `Gizmos` (the immediate-mode line buffer) in a few
-  lines while any other renderer implements the same closure. Bullet's
-  OpenGL debug visualization is a big part of its tuning workflow;
-  today we only have dumps and prints.
+- **P3 — minimal debug draw** (done 2026-09-09, design in
+  `docs/design/debug-draw.md`): a debug-primitives output —
+  `world.debug_primitives(DebugDrawFlags, &mut impl FnMut(DebugPrim))` —
+  emitting shapes, stored proxy AABBs, cached manifold contacts (normal
+  and load included), joint anchors and per-body activation states,
+  gated by a domain mask (`SHAPES` / `AABBS` / `CONTACTS` /
+  `CONSTRAINTS` / `SLEEPING`). This is the *producer* role of Bullet's
+  `btIDebugDraw`; the consumer stays caller-side, so a Bevy user bridges
+  it to `Gizmos` (the immediate-mode line buffer) in a few lines while
+  any other renderer implements the same closure. Bullet's OpenGL debug
+  visualization is a big part of its tuning workflow; the emit path is
+  read-only and zero-allocation, so it is safe to leave enabled.
 - **P4 — callbacks** (core done 2026-09-02; sides generalized 2026-09-07):
   the Rapier event model, not Bullet's process-global function pointers —
   `world.contact_events()` drains `CollisionEvent::Started/Stopped { a, b,
@@ -107,6 +110,7 @@ gap. Behavior semantics are out of scope here — see
 | collision groups / masks | `body.collision_group` / `.collision_mask` | symmetric `group & mask` pair test |
 | trigger volume / sensor | `body.no_contact_response(true)` + `.collision_events(true)` | `world.contact_events()` drain |
 | `btGhostObject` overlap list | `world.overlapping(handle)` | persistent touch list; narrow-phase level (Bullet's is AABB level) |
+| `btIDebugDraw` (producer role) | `world.debug_primitives(flags, &mut \|prim\| ...)` | domain-masked read-only primitives; rendering stays caller-side (`docs/design/debug-draw.md`) |
 | `body->setRollingFriction(x)` | `body.rolling_friction = x` | torsional rows per contact; combined `rf_a·μ_b + rf_b·μ_a` (Bullet quirk) |
 | `rayTest` (closest) | `world.raycast_closest(...)` | |
 | `rayTest` (all hits) | `world.raycast_all(...)` / `raycast_all_filtered(...)` | filter = the ray's own group/mask |

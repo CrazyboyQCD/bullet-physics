@@ -3,9 +3,9 @@
 > Design specification for the minimal debug-draw API (`docs/api-gaps.md` P3,
 > the last feature item before the 1.0 API freeze).
 >
-> Status: **DESIGN — NOT YET IMPLEMENTED**. This document strictly separates
-> **current** (verified against the source at commit `10ac469`, 2026-09-09),
-> **decision** (what this document fixes for the implementation),
+> Status: **IMPLEMENTED** (design fixed at `10ac469`; implementation landed
+> 2026-09-09). This document strictly separates **current** (verified
+> against the source), **decision** (what this document fixes),
 > **implementation** (work the implementer must do), and **deferred**
 > (deliberately out of 1.0).
 >
@@ -191,7 +191,7 @@ pub enum DebugPrim<'a> {
     Contact {
         a: CollisionObject,
         b: CollisionObject,
-        position: Vector3,      // A-side projected anchor (see §15)
+        position: Vector3,      // B-side projected anchor (see §15)
         normal: Vector3,        // unit, A -> B
         penetration: Real,      // > 0 = penetrating
         normal_impulse: Real,   // last solve's accumulated normal impulse
@@ -445,7 +445,7 @@ existing `points()` accessor), one `Contact` prim:
 | Field | Semantics (decision, pinned to current conventions) |
 |---|---|
 | `a`, `b` | the two sides of the cached pair, as `CollisionObject::Body`; the prim reports the same A/B the manifold uses, consistent with its normal direction |
-| `position` | the A-side projected anchor: `wa = pos_a + ori_a * local_a` — the same projection formula the manifold refresh path uses; the implementation must reuse that path's quantities so draw and solve can never disagree |
+| `position` | the B-side projected anchor: `wb = pos_b + ori_b * local_b` at the body's current pose — the same quantity the manifold refresh path hands the solver as the contact position (`ContactPoint::new(wb, ...)`), so draw and solve can never disagree. (Implementation correction 2026-09-09: the design draft said the A-side anchor `wa`; reading the refresh source showed the solver's contact position is the B-side anchor, so the design follows the solver.) |
 | `normal` | the stored unit normal, **A → B** (this project's manifold convention; the sign flip of Bullet's `m_normalWorldOnB`, which points B → A) |
 | `penetration` | stored signed separation, **positive = penetrating** (the sign flip of Bullet's `m_distance1`); values in `(−threshold, 0]` are margin-band contacts |
 | `normal_impulse` | the accumulated normal impulse from the last solve (warm-start value) — the load signal for diagnostics |

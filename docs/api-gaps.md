@@ -21,20 +21,34 @@ S/M/L · **See** = existing notes.
 
 ## Near term (non-breaking)
 
-- **P3 — minimal debug draw** (next up): `world.debug_primitives(...)`
-  emitting AABBs, contact points, manifold normals and wheel rays with a
-  `DBG_*`-style category mask. Producer side only; the consumer stays
-  caller-side (e.g. a Bevy `Gizmos` bridge).
-  - Impl: `DebugPrim` enum (`Aabb`, `ContactPoint`, `Normal`,
-    `Ray`) + a flags bitmask; `PhysicsWorld::debug_primitives(mask, &mut
-    impl FnMut(DebugPrim))` walks live bodies' world AABBs
-    (`BroadPhase::proxy_aabb` exists), the pair manifold cache's cached
-    points/normals, and `RaycastVehicle` wheel rays.
-  - Files: `bullet-dynamics` (new `debug.rs` or world.rs methods),
-    facade re-export, `vehicle.rs` (wheel-ray source).
-  - Risk: decide what a "contact point" is — solver rows or cached
-    manifold points (the two diverge between steps); per-category gating
-    so quiet masks cost nothing.
+- **P3 — minimal debug draw** ✅ (2026-09-09): `world.debug_primitives(...)`
+  emitting kind-tagged physics facts with a category mask. Producer side
+  only; the consumer stays caller-side (e.g. a Bevy `Gizmos` bridge).
+  Design baseline: `docs/design/debug-draw.md` (Bullet coverage checklist,
+  Rapier producer/consumer split, Avian-style domains — none of their APIs).
+  - Shipped: `DebugDrawFlags` (`SHAPES` / `AABBS` / `CONTACTS` /
+    `CONSTRAINTS` / `SLEEPING`; empty mask early-outs) and a `#[non_exhaustive]`
+    `DebugPrim<'a>` enum (`Shape` borrowing the body's `CollisionShape`,
+    `Aabb` from `BroadPhase::proxy_aabb` for every live proxy incl. mb
+    link colliders and soft bodies, `Contact` mirroring the persistent
+    manifold's cached points with the B-side re-projected anchor, cached
+    A→B normal and last-solve normal impulse, `Constraint` carrying both
+    world-projected joint anchors plus a `ConstraintTag`, `Activation`
+    reporting `activation_state()`), all pushed through one callback:
+    `PhysicsWorld::debug_primitives(flags, &mut impl FnMut(DebugPrim<'_>))`
+    (`&self` only; no new world state; zero allocation; the emission is
+    order-unspecified).
+  - Deviations from the original sketch (design-doc decisions): wheel
+    rays stay consumer-side (vehicles are caller-owned; `WheelInfo` is
+    public), normals ride on the `Contact` prim instead of a separate
+    flag, and islands/CCD/mb-soft contacts are deferred because their
+    state is step-transient.
+  - Files: `bullet-dynamics/src/world/debug.rs` (new; types + emit pass
+    + 8 in-domain tests incl. the draw-vs-no-draw bit-identical
+    invariance contract), `world.rs` (mod wiring), facade prelude.
+  - Risk resolved: a "contact point" is a cached persistent-manifold
+    point (what the solver warm-starts from), not a solver row; per-
+    domain gating keeps quiet masks free.
   - Size: S. See: `api-usability.md` §2 (P3 rationale).
 
 - **P4 — callbacks**: `Started/Stopped` events, per-body opt-in and

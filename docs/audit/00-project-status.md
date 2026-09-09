@@ -7,8 +7,9 @@
 
 ## Current HEAD
 
-`aafdb08` — *fix(dynamics): close four external-audit findings* (2026-09-08).
-`origin/main` is behind by 1 commit (push pending).
+`7a20273` — *docs(design): debug draw design specification* (2026-09-09),
+followed by the debug-draw implementation commit (same day).
+`origin/main` is behind by 2 commits (push pending).
 
 ## Current Phase
 
@@ -97,8 +98,10 @@ as [`08-ccd.md`](08-ccd.md) (one confirmed sensor-target bug fixed), and the
 full integrated adversarial pass as
 [`09-integrated-adversarial.md`](09-integrated-adversarial.md) (one P3
 zero-link fixed-base multibody panic fixed; 11 cross-system adversarial
-tests; deterministic state machine bit-repeatable). The remaining 1.0 items
-are the minimal debug draw and the API freeze review.
+tests; deterministic state machine bit-repeatable). The minimal debug
+draw — the last feature item — shipped on 2026-09-09 per
+`docs/design/debug-draw.md` (five read-only domains, invariance contract
+test-pinned). The remaining 1.0 item is the API freeze review.
 
 ## Known Deviations
 
@@ -141,7 +144,8 @@ coherence (all fixed and test-pinned, see In Progress above).
 - Adversarial correctness testing (deep penetration, extreme mass ratios,
   high spin, degenerate shapes) — **done**: per-subsystem adversarial
   suites from the audit rounds plus the full integrated pass (09).
-- Minimal debug draw (`docs/api-gaps.md` P3).
+- Minimal debug draw (`docs/api-gaps.md` P3) — **done** (2026-09-09,
+  `docs/design/debug-draw.md`).
 - API freeze review: naming, docs, breaking-change surface settled
   (typed handles were the last planned breaking change).
 
@@ -188,9 +192,9 @@ exists:
 4. Independent source audit: EPA.
 5. Independent source audit: convex-convex.
 6. Independent source audit: broadphase (AxisSweep3 + DBVT).
-7. Adversarial correctness testing.
-8. Minimal debug draw.
-9. 1.0 API freeze.
+7. Adversarial correctness testing (done).
+8. Minimal debug draw (done, 2026-09-09).
+9. 1.0 API freeze (next).
 10. IslandWork / parallel island solver.
 11. Further performance optimization.
 

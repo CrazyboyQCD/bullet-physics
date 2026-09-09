@@ -1127,11 +1127,14 @@ impl PhysicsWorld {
     }
 
 }
+mod debug;
 mod islands;
 mod multibody_pass;
 mod query;
 mod softbody_pass;
 mod step;
+
+pub use debug::{ConstraintTag, DebugDrawFlags, DebugPrim};
 
 #[cfg(test)]
 mod tests {
