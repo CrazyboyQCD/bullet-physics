@@ -54,9 +54,9 @@ Feature status at this HEAD (evidence for *tested* cases only):
   (std default bit-identical; libm scalar backend; injectable step clock).
 - **Tooling**: parity harness (8 scenes × f32/f64, ledger current),
   multibody/softbody/GImpact probes (24 mb scenes × f32/f64), perf ledger
-  (2026-09-04 rerun, rust ahead 0.15–0.62× on tracked scenes), memory-trend
-  harness, flamegraph workflow.
-- **Quality gates**: 350 unit tests × f32/f64 green, 14 demos, clippy clean
+  (2026-09-09 re-check: wall clock in band, memory sections re-recorded),
+  memory-trend harness, flamegraph workflow.
+- **Quality gates**: 456 unit tests × f32/f64 green, 14 demos, clippy clean
   on both features.
 
 ## In Progress

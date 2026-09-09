@@ -16,7 +16,7 @@
 | **Rolling friction** | ★★★☆ | S–M | **Done** | Physical-correctness gap for resting balls/cylinders (pool / wheel scenes); damping hacks are unphysical. Shipped 2026-09-07 (`body.rolling_friction`, parity scene `rolling` — rf rows exceed-0 exact). |
 | **Motion states** | ★★★ | S–M | **Done** | Render interpolation is an advanced need; revisit depending on whether the kinematic driving API wants them early. Shipped 2026-09-07 (`MotionState` trait, `add_body` pose read + step-tail synchronize; the interpolation blend and the kinematic drive stay unported — deviations). |
 | **mb/soft event sources** | ★★☆ | S–M | **Done** | Robot-arm perception and similar composite scenes exist; extend the event-source dispatch. Shipped 2026-09-07 (`CollisionObject` sides on `CollisionEvent`, `LinkCollider`/`SoftBody` opt-in, pair-level soft events). |
-| **Persistent-manifold extras** | ★★☆ | S | Merge | Do together with the P3 debug draw (contact-point iteration is a debug-draw prerequisite). |
+| **Persistent-manifold extras** | ★★☆ | S | On demand | The merge rationale is gone: the debug-draw prerequisite (contact-point iteration) shipped via the existing `PersistentManifold::points()` accessor (2026-09-09), and no consumer asked for the extras themselves (point lifetime counters, friction anchors, contact-processed callbacks). |
 | **btShapeHull** | ★★☆ | S | On demand | quickhull already exists (soft clusters use it); a wrapper away; debugging / simplification use. |
 | **Character directional jump** | ★★ | S | On demand | Industry practice is user-written character controllers; the built-in character has a narrow audience. |
 | **Serialize** | ★★ | L | Defer | Savegames work with handwritten pose snapshots (bodies are all plain data); bit-exact round-trip has no consumer ecosystem — post-release. |
@@ -30,10 +30,13 @@
 ## Suggested order
 
 ~~kinematic → compound child transforms (same round) → ghost list → rolling
-friction~~ — all four shipped (2026-09-04 / 2026-09-07). ~~Next: minimal
-debug draw~~ — motion states and mb/soft event sources (batch 2) shipped
-first on user request (2026-09-07). Next: **minimal debug draw** (P3) with
-persistent-manifold extras folded in (see "Merge" verdict).
+friction~~ — all four shipped (2026-09-04 / 2026-09-07). ~~motion states and
+mb/soft event sources (batch 2)~~ shipped 2026-09-07. ~~Minimal debug draw
+(P3)~~ — shipped 2026-09-09 per `docs/design/debug-draw.md` (the extras
+merge folded out to on-demand, see the table). Nothing left in the
+near-term queue: the next project milestone is the **1.0 API freeze
+review**; everything else in the table is on-demand or post-1.0 by its
+verdict.
 
 ## Key observation
 
