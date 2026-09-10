@@ -11,18 +11,54 @@ the analysis text below each report is hand-written).
 > cloth_wind/softbody_*/kinematic_pusher at their ratios); the sweep tier
 > reproduces 0.18–0.39×. The wall-clock sections were **not** re-recorded
 > (no semantic change, no churn). Memory: the `--mem` sections **were**
-> re-recorded (rust-side drift since the 2026-09-04 recording, e.g.
-> stack_1000 live 4.061 → 4.522 MB). A commit-level bisect over the
-> worktree builds attributed the drift precisely: **+0.320 MB at
-> `cead978`** (the solver B1 rel-advance optimization: each contact row
-> grew three pre-folded coupling vectors `kn/kt1/kt2`, and the row pool
-> keeps its cross-step capacity), **+0.125 MB at `6af1123`** (A2: bias
-> invariants hoisted into prepare), the remaining ~0.016 MB spread over
-> 09-05..09-09 — **none of it from the debug-draw API** (adds no world
-> fields, never called by the perf harness, allocation-free emit). The
-> row growth is the direct memory price of the 09-04 solver speedups
-> (stack_1000 1.286 → 0.892 ms on the same round). Bullet-side numbers
-> reproduced bit-for-bit.
+> re-recorded (rust-side drift since the 2026-09-04 recording) — see the
+> attribution section below for the commit-level bisect. Bullet-side
+> numbers reproduced bit-for-bit.
+
+## Memory drift attribution (2026-09-09 bisect — decision notes)
+
+The `--mem` re-record moved the rust-side stack_1000 curve off the
+2026-09-04 numbers (live 4.061 → 4.522 MB, peak 5.006 → 5.774). A
+commit-level bisect over worktree builds (`perf_scenes --mem` on
+stack_1000, sampling identical to the ledger) pinned every byte:
+
+| Commit | Content | live / peak MB | Δ live |
+|---|---|---|---|
+| `d8123ec` (09-04, ledger base) | /MT unification + --mem anchoring | 4.061 / 5.006 | — |
+| `7184aad` (solver A1) | effective-mass pre-folded angular components | 4.061 / 5.006 | 0 |
+| `6af1123` (solver A2) | iteration-invariant bias terms hoisted into prepare | 4.186 / 5.193 | **+0.125** |
+| `406a68d` (solver A3) | static/kinematic-side impulse skip | 4.186 / 5.193 | 0 |
+| `cead978` (solver B1) | rel advance through pre-folded couplings | 4.506 / 5.757 | **+0.320** |
+| `10ac469` → 09-09 (all rounds) | adversarial/audit/debug-draw rounds | 4.522 / 5.774 | +0.016 |
+
+**Mechanism.** A2 and B1 grow the per-contact-row struct with
+pre-computed solver quantities (B1 adds three coupling vectors
+`kn`/`kt1`/`kt2`, ≈ 36 B/row). The `contact_rows` pool keeps its
+capacity across steps, and stack_1000 holds ≈ 8 k contact rows in
+steady state — each row growth multiplies into a permanent resident
+cost (0.32 MB ≈ 8 k rows × 36 B × alignment + capacity-doubling
+slack). Small scenes scale by row count (kinematic_pusher, 22 bodies:
+0.078 → 0.086 MB). bullet-side numbers reproduced bit-for-bit at the
+same bisect points.
+
+**Decision notes for a future memory-budget pass:**
+
+- This is a **priced trade, not a leak**: the same commits took
+  stack_1000 from 1.286 → 0.892 ms (the 0.95× → 0.62× headline).
+  Reclaiming the rows' memory means re-computing those quantities in
+  the solve loop — handing back most of that win.
+- Re-closure options if a memory budget ever demands it (all post-1.0,
+  all perf-negative):
+  1. shrink the row pool after the solve peak every N steps — cheap
+     code, realloc churn on growth frames;
+  2. demote B1's `kn`/`kt1`/`kt2` to solve-time recomputation —
+     recovers ≈ 0.32 MB on row-heavy scenes at the cost of the
+     largest slice of B1's speedup;
+  3. an explicit opt-in `shrink_pools()`-style call — zero cost for
+     everyone else, releases pools on demand.
+- **Re-examine when**: targeting a memory-capped platform, or scenes
+  at 10× stack_1000's body count (the ratio holds at ≈ 450 B of
+  solver-row growth per stacked body; ≈ 10 MB resident at 10 k bodies).
 
 ## Methodology
 
