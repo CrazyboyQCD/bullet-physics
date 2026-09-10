@@ -20,8 +20,8 @@
 | **btShapeHull** | ★★☆ | S | **Done** | Shipped 2026-09-10 (`ShapeHull::build`, lowres 42-direction table); quickhull moved to `bullet-math` (LinearMath mapping). Highres/penetration extras stay unported (deviations §1). |
 | **Character directional jump** | ★★ | S | **Done** | Shipped 2026-09-10: `jump_direction(v)` + `set_jump_axis` with the `m_SetjumpSpeed` overwrite/restore semantics. `setInterpolateUp` / `setMaxJumpHeight` stay unexposed (deviations §3). |
 | **Serialize** | ★★ | L | Defer | Savegames work with handwritten pose snapshots (bodies are all plain data); bit-exact round-trip has no consumer ecosystem — post-release. |
-| **Anisotropic friction** | ★★ | M | Defer | Rare; conveyor-belt cases are better served by surface velocity. |
-| **Contact stiffness/damping** | ★★ | M | Defer | Soft contacts are niche; record in deviations, pull on demand. |
+| **Anisotropic friction** | ★★ | M | **Done** | Shipped 2026-09-10: `RigidBody::anisotropic_friction` (pub field, Bullet's unity gate) applied to both pair sides per tangent axis in `ContactConstraint::prepare`; parity scene `anisotropic_friction` — box_z/box_iso exceed = 0, box_x classifies the pre-existing fixed-basis vs velocity-dependent friction-direction gap (deviations §1). Multibody contacts ignore the field (same scope cut as the friction anchor). |
+| **Contact stiffness/damping** | ★★ | M | **Done** | Shipped 2026-09-10: `set_contact_stiffness_and_damping` + `CollisionFlags::HAS_CONTACT_STIFFNESS_DAMPING` (0x80); the pair's normal row swaps its ERP and adds the compliance CFM (combined damping sums, stiffness in series — Bullet verbatim). Parity scene `contact_soft` — ball_soft/ball_hard exceed = 0, ball_soft_heavy classifies the deterministic 2.4 cm equilibrium drift (deviations §1). Multibody contacts ignore the parameters. |
 | **Additional damping** | ★☆ | S | Defer | A humanoid-stack tuning safety valve; scenario-specific. |
 | **Multi-part triangle meshes** | ★★ | M | Defer | Vertex/index concatenation is a workaround with no runtime benefit. |
 | **Soft cluster core (CLinks)** | ★☆ | S | Defer | Clusters are niche; completeness-only. |
@@ -34,9 +34,11 @@ friction~~ — all four shipped (2026-09-04 / 2026-09-07). ~~motion states and
 mb/soft event sources (batch 2)~~ shipped 2026-09-07. ~~Minimal debug draw
 (P3)~~ — shipped 2026-09-09 per `docs/design/debug-draw.md`. ~~Persistent-
 manifold extras, btShapeHull, character directional jump~~ — shipped
-2026-09-10 (the whole on-demand batch closed out together). Nothing left
-in the table: the next project milestone is the **1.0 API freeze
-review**; every remaining row is a Defer or Won't-do verdict.
+2026-09-10 (the whole on-demand batch closed out together). ~~Anisotropic
+friction, contact stiffness/damping~~ — shipped 2026-09-10 (second on-demand
+batch, parity scenes `anisotropic_friction` / `contact_soft`). Remaining
+rows are a Defer or Won't-do verdict; the project milestone is the **1.0 API
+freeze review**.
 
 ## Key observation
 
