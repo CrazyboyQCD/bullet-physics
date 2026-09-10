@@ -113,6 +113,9 @@ def gen_c(scenes):
         "  btScalar params[6];",
         "  btScalar pos[3];",
         "  btScalar mass, friction, restitution, rolling_friction;",
+        "  btScalar anisotropic_friction[3];",
+        "  btScalar contact_stiffness, contact_damping;",
+        "  int contact_stiffness_set;  // setContactStiffnessAndDamping opt-in",
         "  int is_static;",
         "  btScalar velocity[3];",
         "  btScalar angular_velocity[3];",
@@ -169,6 +172,12 @@ def gen_c(scenes):
             pos = ", ".join(f"btScalar({fmt(x)})" for x in b["position"])
             mass = fmt(b.get("mass", 0.0))
             rf = fmt(b.get("rolling_friction", 0.0))
+            aniso = b.get("anisotropic_friction", [1.0, 1.0, 1.0])
+            aniso_s = ", ".join(f"btScalar({fmt(x)})" for x in aniso)
+            cks = b.get("contact_stiffness")
+            ckd = fmt(b.get("contact_damping", 0.1))
+            cks_s = fmt(cks if cks is not None else 0.0)
+            cks_set = 1 if cks is not None else 0
             if b.get("mass", 0.0) == 0:
                 fr, re = "0.5", "0.0"
             else:
@@ -191,7 +200,8 @@ def gen_c(scenes):
             grp = b.get("group", 1)
             msk = b.get("mask", -1)
             lines.append(f"  {{\"{b['name']}\", {SHAPE_ENUM[t]}, {{{p}}}, {{{pos}}}, "
-                         f"btScalar({mass}), btScalar({fr}), btScalar({re}), btScalar({rf}), {st}, "
+                         f"btScalar({mass}), btScalar({fr}), btScalar({re}), btScalar({rf}), "
+                         f"{{{aniso_s}}}, btScalar({cks_s}), btScalar({ckd}), {cks_set}, {st}, "
                          f"{{{vel_s}}}, {{{ang_s}}}, {ccd_on}, btScalar({fmt(ccd_mt)}), "
                          f"btScalar({fmt(ccd_sr)}), {{{bg_s}}}, {dwg}, {ncr}, {grp}, {msk}, "
                          f"{mesh_ref}}},")
@@ -259,6 +269,10 @@ def gen_rs(scenes):
         "    pub friction: f32,",
         "    pub restitution: f32,",
         "    pub rolling_friction: f32,",
+        "    pub anisotropic_friction: [f32; 3],",
+        "    pub contact_stiffness: f32,",
+        "    pub contact_damping: f32,",
+        "    pub contact_stiffness_set: bool,",
         "    pub is_static: bool,",
         "    pub velocity: [f32; 3],",
         "    pub angular_velocity: [f32; 3],",
@@ -323,6 +337,12 @@ def gen_rs(scenes):
                 fr, re = fmt(b.get("friction", 0.5)), fmt(b.get("restitution", 0.0))
                 st = "false"
             rf = fmt(b.get("rolling_friction", 0.0))
+            aniso = b.get("anisotropic_friction", [1.0, 1.0, 1.0])
+            aniso_s = ", ".join(fmt(x) for x in aniso)
+            cks = b.get("contact_stiffness")
+            ckd = fmt(b.get("contact_damping", 0.1))
+            cks_s = fmt(cks if cks is not None else 0.0)
+            cks_set = "true" if cks is not None else "false"
             vel = b.get("velocity", [0.0, 0.0, 0.0])
             vel_s = ", ".join(fmt(x) for x in vel)
             ang = b.get("angular_velocity", [0.0, 0.0, 0.0])
@@ -339,7 +359,9 @@ def gen_rs(scenes):
             msk = b.get("mask", -1) & 0xFFFF
             lines.append(f"            BodySpec {{ name: \"{b['name']}\", shape: {shape}, "
                          f"position: {pos}, mass: {mass}, friction: {fr}, restitution: {re}, "
-                         f"rolling_friction: {rf}, "
+                         f"rolling_friction: {rf}, anisotropic_friction: [{aniso_s}], "
+                         f"contact_stiffness: {cks_s}, contact_damping: {ckd}, "
+                         f"contact_stiffness_set: {cks_set}, "
                          f"is_static: {st}, velocity: [{vel_s}], angular_velocity: [{ang_s}], ccd_on: {ccd_on}, "
                          f"ccd_motion_threshold: {fmt(ccd_mt)}, "
                          f"ccd_swept_sphere_radius: {fmt(ccd_sr)}, "

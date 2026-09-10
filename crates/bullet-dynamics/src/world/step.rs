@@ -532,8 +532,9 @@ impl PhysicsWorld {
                                 let cached = &cache.points()[k];
                                 pa + a.orientation * cached.local_a - cp.position
                             });
-                            let mut row =
-                                ContactConstraint::prepare(i, j, &cp, a, b, k as u32, anchor_disp);
+                            let mut row = ContactConstraint::prepare(
+                                i, j, &cp, a, b, k as u32, anchor_disp, inv_dt,
+                            );
                             row.attach_rolling(a, b, &mut self.rolling_rows);
                             self.contact_rows.push(row);
                         }
@@ -599,8 +600,9 @@ impl PhysicsWorld {
                             let cached = &cache.points()[k];
                             pa + a.orientation * cached.local_a - cp.position
                         });
-                        let mut row =
-                            ContactConstraint::prepare(i, j, &cp, a, b, k as u32, anchor_disp);
+                        let mut row = ContactConstraint::prepare(
+                            i, j, &cp, a, b, k as u32, anchor_disp, inv_dt,
+                        );
                         row.attach_rolling(a, b, &mut self.rolling_rows);
                         self.contact_rows.push(row);
                     }
@@ -2541,6 +2543,121 @@ mod tests {
             w.z.abs() < 0.1,
             "the spin should be drained: wz = {}",
             w.z
+        );
+    }
+
+    // ---- anisotropic friction (Bullet's `m_anisotropicFriction`)
+
+    /// Direction-dependent friction: a box with zero friction scaling along
+    /// its local Z axis slides much farther along Z than along X, while the
+    /// same box without the field slides equally far in both directions.
+    #[test]
+    fn anisotropic_friction_makes_sliding_direction_dependent() {
+        let build = |aniso: Vector3, dir: Vector3| {
+            let mut world = PhysicsWorld::new();
+            let mut ground = RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(
+                    50.0, 0.5, 50.0,
+                )),
+                Vector3::new(0.0, -0.5, 0.0),
+            );
+            ground.friction = 1.0;
+            world.add_body(ground);
+            let mut box_body = RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            );
+            box_body.friction = 1.0;
+            box_body.anisotropic_friction = aniso;
+            box_body.linear_velocity = dir * 2.0;
+            let handle = world.add_body(box_body);
+            (world, handle)
+        };
+
+        // With (1, 1, 0) the Z direction is nearly frictionless: it slides
+        // far past the X slide.
+        let (mut world, body) = build(Vector3::new(1.0, 1.0, 0.0), Vector3::Z);
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        let z_slide = world.body(body).position.z;
+        let (mut world, body) = build(Vector3::new(1.0, 1.0, 0.0), Vector3::X);
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        let x_slide = world.body(body).position.x;
+        assert!(
+            z_slide > x_slide * 4.0,
+            "low-friction Z should slide much farther: z = {z_slide}, x = {x_slide}"
+        );
+
+        // Sanity: the isotropic control slides the same distance both ways.
+        let (mut world, body) = build(Vector3::new(1.0, 1.0, 1.0), Vector3::Z);
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        let iso_z = world.body(body).position.z;
+        let (mut world, body) = build(Vector3::new(1.0, 1.0, 1.0), Vector3::X);
+        for _ in 0..120 {
+            world.step_simulation(1.0 / 60.0);
+        }
+        let iso_x = world.body(body).position.x;
+        assert!(
+            (iso_z - iso_x.abs()).abs() < 0.05,
+            "isotropic control should slide equally: z = {iso_z}, x = {iso_x}"
+        );
+    }
+
+    // ---- contact stiffness/damping (Bullet's
+    // `setContactStiffnessAndDamping`)
+
+    /// A soft-contact pair (stiffness flag set) rests with a deeper steady
+    /// penetration than the same ball with the hard default contact: the
+    /// compliance CFM makes the normal row a damped spring, which balances
+    /// gravity at `mg/k` compression instead of the slop-scale Baumgarte
+    /// dead zone.
+    #[test]
+    fn soft_contact_rests_deeper_than_the_default() {
+        let build = |stiffness: Option<(Real, Real)>| {
+            let mut world = PhysicsWorld::new();
+            world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+            let ground = RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(20.0, 0.5, 20.0)),
+                Vector3::new(0.0, -0.5, 0.0),
+            );
+            world.add_body(ground);
+            let mut ball = RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 2.0, 0.0),
+                1.0,
+            );
+            if let Some((k, d)) = stiffness {
+                ball.set_contact_stiffness_and_damping(k, d);
+            }
+            let handle = world.add_body(ball);
+            (world, handle)
+        };
+
+        // Steady-state height after the ball has settled (4 s).
+        let settle = |stiffness: Option<(Real, Real)>| {
+            let (mut world, ball) = build(stiffness);
+            for _ in 0..240 {
+                world.step_simulation(1.0 / 60.0);
+            }
+            world.body(ball).position.y
+        };
+
+        let hard = settle(None);
+        let soft = settle(Some((500.0, 5.0)));
+        // The spring balance: mg/k = 10/500 = 0.02 m below the surface.
+        assert!(
+            soft < hard - 0.01,
+            "the soft-contact ball should rest deeper: soft = {soft}, hard = {hard}"
+        );
+        assert!(
+            soft > 0.4 && hard > 0.4,
+            "both should still rest on the ground: soft = {soft}, hard = {hard}"
         );
     }
 

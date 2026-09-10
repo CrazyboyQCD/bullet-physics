@@ -7,6 +7,14 @@ use alloc::boxed::Box;
 /// (Bullet's hard-coded `m_deactivationTime > btScalar(2.)` check).
 pub const DEACTIVATION_TIME: Real = 2.0;
 
+/// Bullet's `BT_LARGE_FLOAT` (btScalar.h) — precision-dependent: `1e18`
+/// for f32 (kept so `BT_LARGE_FLOAT * BT_LARGE_FLOAT` stays finite),
+/// `1e30` for f64.
+#[cfg(not(feature = "f64"))]
+const BT_LARGE_FLOAT: Real = 1e18;
+#[cfg(feature = "f64")]
+const BT_LARGE_FLOAT: Real = 1e30;
+
 /// A user callback bridging the simulation pose and the render side
 /// (Bullet's `btMotionState`): the world reads the start pose from it once
 /// when the body is added (`getWorldTransform`) and pushes the final pose
@@ -153,6 +161,14 @@ impl CollisionFlags {
     /// today (deviations §1).
     pub const HAS_FRICTION_ANCHOR: Self = Self(0x0200);
 
+    /// The body's contacts use explicit stiffness/damping soft-constraint
+    /// parameters (Bullet's `CF_HAS_CONTACT_STIFFNESS_DAMPING`): the pair's
+    /// normal row swaps its Baumgarte factor and adds a compliance CFM
+    /// derived from the combined contact stiffness/damping (see
+    /// [`RigidBody::set_contact_stiffness_and_damping`]). Set by that
+    /// setter; the flag itself is never cleared (Bullet does not either).
+    pub const HAS_CONTACT_STIFFNESS_DAMPING: Self = Self(0x0080);
+
     /// Whether every bit of `other` is set.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -189,6 +205,16 @@ pub struct RigidBody {
     inv_inertia_local: Vector3,
     pub friction: Real,
     pub restitution: Real,
+    /// Direction-dependent friction scaling in the body's local axes
+    /// (Bullet's `m_anisotropicFriction`, default `(1, 1, 1)` = isotropic):
+    /// each friction row's tangent direction is rotated into the body's
+    /// local frame, scaled component-wise, and rotated back
+    /// (`btSequentialImpulseConstraintSolver::applyAnisotropicFriction`),
+    /// for both sides of the pair. Assign directly; a non-unity component
+    /// (Bullet's unity gate) switches the effect on, matching
+    /// `setAnisotropicFriction`'s `CF_ANISOTROPIC_FRICTION` mode. Multibody
+    /// contacts ignore the field today (deviations §1).
+    pub anisotropic_friction: Vector3,
     /// Torsional friction orthogonal to the contact normal (Bullet's
     /// `m_rollingFriction`, default 0): a rolling body touching a surface
     /// with a positive pair value is slowed by angular-friction rows until
@@ -196,6 +222,15 @@ pub struct RigidBody {
     /// combined value (`rf_a · friction_b + rf_b · friction_a`, Bullet's
     /// `calculateCombinedRollingFriction` quirk) exceeds zero.
     pub rolling_friction: Real,
+    /// Soft-constraint parameters of this body's contacts (Bullet's
+    /// `m_contactStiffness` / `m_contactDamping`, defaults `BT_LARGE_FLOAT`
+    /// / `0.1`): only read when either side of a pair carries
+    /// [`CollisionFlags::HAS_CONTACT_STIFFNESS_DAMPING`]. Written through
+    /// [`RigidBody::set_contact_stiffness_and_damping`] (which clamps the
+    /// stiffness away from zero like Bullet and sets the flag), read via
+    /// [`RigidBody::contact_stiffness`] / [`RigidBody::contact_damping`].
+    contact_stiffness: Real,
+    contact_damping: Real,
     /// Per-body gravity acceleration (Bullet's `m_gravity_acceleration`):
     /// synced from the world at `add_body` time and by
     /// `PhysicsWorld::set_gravity` propagation unless the
@@ -265,7 +300,10 @@ impl RigidBody {
             inv_inertia_local: inv_inertia,
             friction: 0.5,
             restitution: 0.0,
+            anisotropic_friction: Vector3::ONE,
             rolling_friction: 0.0,
+            contact_stiffness: BT_LARGE_FLOAT,
+            contact_damping: 0.1,
             collision_group: filter_groups::DEFAULT,
             collision_mask: filter_groups::ALL,
             collision_flags: CollisionFlags::default(),
@@ -321,7 +359,10 @@ impl RigidBody {
             inv_inertia_local: Vector3::ZERO,
             friction: 0.5,
             restitution: 0.0,
+            anisotropic_friction: Vector3::ONE,
             rolling_friction: 0.0,
+            contact_stiffness: BT_LARGE_FLOAT,
+            contact_damping: 0.1,
             collision_group: filter_groups::DEFAULT,
             collision_mask: filter_groups::ALL,
             collision_flags: CollisionFlags::default(),
@@ -565,6 +606,20 @@ impl RigidBody {
         self
     }
 
+    /// Builder: set the direction-dependent friction scaling
+    /// ([`RigidBody::anisotropic_friction`]).
+    pub fn anisotropic_friction(mut self, scaling: Vector3) -> Self {
+        self.anisotropic_friction = scaling;
+        self
+    }
+
+    /// Builder: set the contacts' soft-constraint parameters (see
+    /// [`RigidBody::set_contact_stiffness_and_damping`]).
+    pub fn contact_stiffness_and_damping(mut self, stiffness: Real, damping: Real) -> Self {
+        self.set_contact_stiffness_and_damping(stiffness, damping);
+        self
+    }
+
     /// Builder: set the collision filter group and mask (Bullet's
     /// `setCollisionGroup` / `setCollisionMask`).
     pub fn collision_filter(mut self, group: u16, mask: u16) -> Self {
@@ -734,6 +789,42 @@ impl RigidBody {
     pub fn set_damping(&mut self, linear: Real, angular: Real) {
         self.linear_damping = linear.clamp(0.0, 1.0);
         self.angular_damping = angular.clamp(0.0, 1.0);
+    }
+
+    /// Soft-constraint parameters for this body's contacts (Bullet's
+    /// `setContactStiffnessAndDamping`): every contact pair involving this
+    /// body replaces its Baumgarte factor and adds a compliance CFM derived
+    /// from the pair's combined stiffness/damping (damping adds, stiffness
+    /// combines like springs in series), turning the rigid contact into a
+    /// damped spring along the normal. The stiffness is clamped away from
+    /// zero like Bullet (below `SIMD_EPSILON` → `SIMD_EPSILON`) and the
+    /// [`CollisionFlags::HAS_CONTACT_STIFFNESS_DAMPING`] flag is set —
+    /// Bullet never clears it. Multibody contacts ignore the parameters
+    /// today (deviations §1).
+    pub fn set_contact_stiffness_and_damping(&mut self, stiffness: Real, damping: Real) {
+        self.contact_stiffness = stiffness;
+        self.contact_damping = damping;
+        self.collision_flags.0 |= CollisionFlags::HAS_CONTACT_STIFFNESS_DAMPING.0;
+        // "avoid divisions by zero..." (btCollisionObject.h).
+        if self.contact_stiffness < Real::EPSILON {
+            self.contact_stiffness = Real::EPSILON;
+        }
+    }
+
+    /// The soft-constraint stiffness of this body's contacts (Bullet's
+    /// `getContactStiffness`; see
+    /// [`RigidBody::set_contact_stiffness_and_damping`]).
+    #[inline]
+    pub fn contact_stiffness(&self) -> Real {
+        self.contact_stiffness
+    }
+
+    /// The soft-constraint damping of this body's contacts (Bullet's
+    /// `getContactDamping`; see
+    /// [`RigidBody::set_contact_stiffness_and_damping`]).
+    #[inline]
+    pub fn contact_damping(&self) -> Real {
+        self.contact_damping
     }
 
     /// Move/rotate a child shape of a compound body in the compound's

@@ -893,6 +893,207 @@
         "ball_plain",
         "ball_spin"
       ]
+    },
+    "anisotropic_friction": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 240,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -10,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              40,
+              0.5,
+              20
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "box_z",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            -6,
+            0.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 1,
+          "velocity": [
+            2,
+            0,
+            0
+          ],
+          "anisotropic_friction": [
+            1,
+            1,
+            0.05
+          ]
+        },
+        {
+          "name": "box_x",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            -6,
+            0.5,
+            4
+          ],
+          "mass": 1,
+          "friction": 1,
+          "velocity": [
+            2,
+            0,
+            0
+          ],
+          "anisotropic_friction": [
+            0.05,
+            1,
+            1
+          ]
+        },
+        {
+          "name": "box_iso",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            -6,
+            0.5,
+            -4
+          ],
+          "mass": 1,
+          "friction": 1,
+          "velocity": [
+            2,
+            0,
+            0
+          ],
+          "anisotropic_friction": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "record": [
+        "box_z",
+        "box_x",
+        "box_iso"
+      ]
+    },
+    "contact_soft": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 240,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -10,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              40,
+              0.5,
+              20
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "ball_soft",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            -4,
+            0.52,
+            0
+          ],
+          "mass": 1,
+          "contact_stiffness": 2000,
+          "contact_damping": 5
+        },
+        {
+          "name": "ball_hard",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            4,
+            0.52,
+            0
+          ],
+          "mass": 1
+        },
+        {
+          "name": "ball_soft_heavy",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            0,
+            0.52,
+            -4
+          ],
+          "mass": 5,
+          "contact_stiffness": 2000,
+          "contact_damping": 5
+        }
+      ],
+      "record": [
+        "ball_soft",
+        "ball_hard",
+        "ball_soft_heavy"
+      ]
     }
   }
 }

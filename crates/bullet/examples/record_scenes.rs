@@ -118,6 +118,17 @@ fn main() {
                 ))
         };
         body.rolling_friction = b.rolling_friction as Real;
+        body.anisotropic_friction = Vector3::new(
+            b.anisotropic_friction[0] as Real,
+            b.anisotropic_friction[1] as Real,
+            b.anisotropic_friction[2] as Real,
+        );
+        if b.contact_stiffness_set {
+            body.set_contact_stiffness_and_damping(
+                b.contact_stiffness as Real,
+                b.contact_damping as Real,
+            );
+        }
         if !b.is_static {
             body.angular_velocity = Vector3::new(
                 b.angular_velocity[0] as Real,

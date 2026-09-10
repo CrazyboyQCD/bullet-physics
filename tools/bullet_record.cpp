@@ -164,6 +164,12 @@ int main(int argc, char** argv) {
     body->setFriction(b.friction);
     body->setRestitution(b.restitution);
     body->setRollingFriction(b.rolling_friction);
+    body->setAnisotropicFriction(btVector3(b.anisotropic_friction[0],
+                                           b.anisotropic_friction[1],
+                                           b.anisotropic_friction[2]));
+    if (b.contact_stiffness_set) {
+      body->setContactStiffnessAndDamping(b.contact_stiffness, b.contact_damping);
+    }
     if (b.no_contact_response) {
       body->setCollisionFlags(body->getCollisionFlags() |
                               btCollisionObject::CF_NO_CONTACT_RESPONSE);

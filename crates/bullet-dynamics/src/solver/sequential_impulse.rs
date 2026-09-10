@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use bullet_collision::manifold::ContactPoint;
 use crate::body::RigidBody;
+use crate::CollisionFlags;
 use bullet_math::{math, FRAC_1_SQRT_2, Matrix3, Real, Vector3};
 
 /// Allowed penetration slop before the Baumgarte term kicks in.
@@ -21,14 +22,15 @@ pub(crate) const RESTITUTION_THRESHOLD: Real = 1.0;
 /// sign-flipped to our positive-penetration convention). Deeper contacts are
 /// corrected by the split pass only; shallower ones keep the Baumgarte bias.
 const SPLIT_IMPULSE_PENETRATION_THRESHOLD: Real = 0.04;
-/// Split-impulse positional correction factor (Bullet's `m_erp2`).
-const SPLIT_ERP2: Real = 0.2;
 /// Positional error reduction of the friction-anchor bias (Bullet's
 /// `m_frictionERP`, `btContactSolverInfo` default 0.2).
 const FRICTION_ERP: Real = 0.2;
 /// Orientation scaling for the split-impulse turn velocity (Bullet's
 /// `m_splitImpulseTurnErp`, applied in `writebackVelocityAndTransform`).
 pub(crate) const SPLIT_TURN_ERP: Real = 0.1;
+/// Bullet's `SIMD_EPSILON` — precision-dependent (`f32::EPSILON` /
+/// `f64::EPSILON`, exactly FLT/DBL_EPSILON).
+const SIMD_EPSILON: Real = Real::EPSILON;
 
 /// A pre-built contact constraint between two bodies.
 pub struct ContactConstraint {
@@ -118,6 +120,18 @@ pub struct ContactConstraint {
     /// target leaves the friction row exactly as before (`vt - 0.0 == vt`
     /// bit-for-bit).
     anchor: [Real; 2],
+    /// Soft-contact channel of the normal row (Bullet's
+    /// `setupContactConstraint` `BT_CONTACT_FLAG_CONTACT_STIFFNESS_DAMPING`
+    /// branch). `erp` is the position-error factor: [`BAUMGARTE`] (Bullet's
+    /// `m_erp2` default) unless a pair side carries
+    /// [`CollisionFlags::HAS_CONTACT_STIFFNESS_DAMPING`], then the
+    /// combined-stiffness/damping `m_contactERP2` swap. `normal_cfm` is the
+    /// compliance term (`m_cfm * m_jacDiagABInv`) that pulls the impulse
+    /// delta back proportionally to the accumulated impulse. The defaults
+    /// leave the solve bit-for-bit unchanged (`0.0 · x == +0.0` for the
+    /// non-negative impulses).
+    erp: Real,
+    normal_cfm: Real,
 }
 
 /// The two torsional-friction rows of one contact point (Bullet's
@@ -291,6 +305,7 @@ impl ContactConstraint {
     /// steps, because the basis rotates with the point set and stale
     /// tangential impulses made resting bodies oscillate (the persistent-
     /// manifold cache only stores the normal impulse — see `world.rs`).
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         body_a: usize,
         body_b: usize,
@@ -299,9 +314,22 @@ impl ContactConstraint {
         b: &RigidBody,
         point_index: u32,
         anchor_disp: Option<Vector3>,
+        inv_dt: Real,
     ) -> Self {
         let normal = cp.normal;
-        let (tangent1, tangent2) = tangent_basis(normal);
+        let (mut tangent1, mut tangent2) = tangent_basis(normal);
+        // Anisotropic friction (Bullet's `applyAnisotropicFriction`, applied
+        // by `convertContact` to both sides after the friction directions
+        // are fixed): rotate the tangent into the body's local frame, scale
+        // it component-wise, rotate it back. Each side applies to each axis,
+        // matching the `btPlaneSpace1` branch (this engine's friction basis
+        // is fixed, so there is no velocity-dependent branch to mirror).
+        if is_anisotropic(a) || is_anisotropic(b) {
+            tangent1 = apply_anisotropic_friction(tangent1, a);
+            tangent1 = apply_anisotropic_friction(tangent1, b);
+            tangent2 = apply_anisotropic_friction(tangent2, a);
+            tangent2 = apply_anisotropic_friction(tangent2, b);
+        }
         let r_a = cp.position - a.position;
         let r_b = cp.position - b.position;
         let inv_inertia_a = a.inv_inertia_world();
@@ -318,7 +346,7 @@ impl ContactConstraint {
         let ang_tangent2_a = inv_inertia_a * (r_a.cross(tangent2));
         let ang_tangent2_b = inv_inertia_b * (r_b.cross(tangent2));
 
-        let normal_mass =
+        let mut normal_mass =
             effective_mass(inv_mass_a, inv_mass_b, ang_normal_a, ang_normal_b, r_a, r_b, normal);
         let tangent1_mass = effective_mass(
             inv_mass_a,
@@ -357,6 +385,39 @@ impl ContactConstraint {
         // coefficients (verified against refs/bullet3 on 2026-08-14).
         let friction = a.friction * b.friction;
         let restitution = a.restitution * b.restitution;
+
+        // Soft-contact channel (Bullet's `setupContactConstraint`
+        // `BT_CONTACT_FLAG_CONTACT_STIFFNESS_DAMPING` branch, reached when
+        // either pair side carries the flag): the combined parameters
+        // (Bullet's `calculateCombinedContactDamping` = sum,
+        // `calculateCombinedContactStiffness` = springs in series) turn
+        // `cfm = 1/(dt·k + d)` and `erp = dt·k/(dt·k + d)` into a
+        // damped-spring normal row. `cfm` also enters the effective mass
+        // (`m_jacDiagABInv = relaxation/(denom + cfm)`, relaxation 1) and is
+        // scaled by `invTimeStep` exactly like Bullet does.
+        let mut erp = BAUMGARTE;
+        let mut normal_cfm = 0.0;
+        if a.collision_flags.contains(CollisionFlags::HAS_CONTACT_STIFFNESS_DAMPING)
+            || b.collision_flags.contains(CollisionFlags::HAS_CONTACT_STIFFNESS_DAMPING)
+        {
+            let combined_damping = a.contact_damping() + b.contact_damping();
+            let combined_stiffness =
+                1.0 / (1.0 / a.contact_stiffness() + 1.0 / b.contact_stiffness());
+            let dt = inv_dt.recip();
+            let denom_raw = dt * combined_stiffness + combined_damping;
+            let denom = if denom_raw < SIMD_EPSILON {
+                SIMD_EPSILON
+            } else {
+                denom_raw
+            };
+            let cfm = (1.0 / denom) * inv_dt;
+            erp = (dt * combined_stiffness) / denom;
+            // The row's `k` (inverse of `normal_mass`) gains the compliance:
+            // `m_jacDiagABInv = 1/(k + cfm)`.
+            let k = if normal_mass > 0.0 { 1.0 / normal_mass } else { 0.0 };
+            normal_mass = if k + cfm > 0.0 { 1.0 / (k + cfm) } else { 0.0 };
+            normal_cfm = cfm * normal_mass;
+        }
 
         // Friction-anchor targets (Bullet's `setupFrictionConstraint`
         // `BT_CONTACT_FLAG_FRICTION_ANCHOR` branch): the cached world
@@ -424,6 +485,8 @@ impl ContactConstraint {
             kt2,
             rolling: None,
             anchor,
+            erp,
+            normal_cfm,
         }
     }
 
@@ -495,6 +558,24 @@ fn tangent_basis(n: Vector3) -> (Vector3, Vector3) {
     let t1 = c * c.length_recip();
     let t2 = n.cross(t1);
     (t1, t2)
+}
+
+/// Whether the body's friction rows get direction-dependent scaling
+/// (Bullet's `setAnisotropicFriction` unity gate: any component other
+/// than 1 switches the effect on).
+fn is_anisotropic(body: &RigidBody) -> bool {
+    let s = body.anisotropic_friction;
+    s.x != 1.0 || s.y != 1.0 || s.z != 1.0
+}
+
+/// Bullet's `applyAnisotropicFriction`: rotate the friction direction into
+/// the body's local frame (`basisᵀ · dir`, the conjugate quaternion),
+/// scale it component-wise by `anisotropic_friction`, and rotate it back
+/// (`basis · dir`). The quaternion path differs from Bullet's matrix product
+/// in the last ulp only; parity scenes treat that as tolerance noise.
+fn apply_anisotropic_friction(dir: Vector3, body: &RigidBody) -> Vector3 {
+    let local = (body.orientation.conjugate() * dir) * body.anisotropic_friction;
+    body.orientation * local
 }
 
 /// Inverse effective mass along a direction for a pair of bodies. The
@@ -595,7 +676,9 @@ pub(crate) fn split_impulse_pass(
 ) {
     let split_rhs = |c: &mut ContactConstraint| {
         if c.split_active {
-            c.rhs_penetration = c.penetration * SPLIT_ERP2 * inv_dt * c.normal_mass;
+            // The split pass shares the row's position-error factor (Bullet
+            // uses the same `erp` for `penetrationImpulse` in both branches).
+            c.rhs_penetration = c.penetration * c.erp * inv_dt * c.normal_mass;
         }
     };
     for c in constraints.iter_mut() {
@@ -612,10 +695,15 @@ pub(crate) fn split_impulse_pass(
             let push_va = a.push_linear + a.push_angular.cross(c.r_a);
             let push_vb = b.push_linear + b.push_angular.cross(c.r_b);
             let push_vn = (push_vb - push_va).dot(c.normal);
-            // `delta = rhs - push_vn * mass` matches Bullet's
+            // `delta = rhs - push_vn * mass - cfm * push` matches Bullet's
             // `gResolveSplitPenetrationImpulse_scalar_reference` with our
-            // normal convention (A -> B) and zero CFM.
-            let delta = c.rhs_penetration - push_vn * c.normal_mass;
+            // normal convention (A -> B); the compliance branch is only
+            // taken with the stiffness flag set.
+            let delta = if c.normal_cfm != 0.0 {
+                c.rhs_penetration - push_vn * c.normal_mass - c.normal_cfm * c.push_impulse
+            } else {
+                c.rhs_penetration - push_vn * c.normal_mass
+            };
             let old = c.push_impulse;
             c.push_impulse = (old + delta).max(0.0);
             let j = c.push_impulse - old;
@@ -650,6 +738,9 @@ fn solve_contact(
     // One split serves the whole solve (the ten-iteration hot path used to
     // re-split for every tangent block — pure control-flow overhead).
     let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
+    // The soft-contact channel is opt-in; the branch keeps the default path
+    // on the original instruction sequence (no extra loads or multiplies).
+    let soft = c.normal_cfm != 0.0;
 
     let va = a.linear_velocity + a.angular_velocity.cross(c.r_a);
     let vb = b.linear_velocity + b.angular_velocity.cross(c.r_b);
@@ -667,7 +758,11 @@ fn solve_contact(
         bias = -c.restitution * vn;
     }
     if !c.split_active {
-        bias += BAUMGARTE * inv_dt * c.baumgarte_span;
+        bias += if soft {
+            c.erp * inv_dt * c.baumgarte_span
+        } else {
+            BAUMGARTE * inv_dt * c.baumgarte_span
+        };
     }
     // Separated (margin-band) contacts: Bullet's solver subtracts the
     // separation rate from the velocity error (`velocityError -= penetration
@@ -680,8 +775,15 @@ fn solve_contact(
         bias += c.separation * inv_dt;
     }
 
-    // Normal impulse, clamped to be non-negative.
-    let lambda = c.normal_mass * (bias - vn);
+    // Normal impulse, clamped to be non-negative. The compliance term is
+    // Bullet's `- m_appliedImpulse * m_cfm` (`resolveSingleConstraint`
+    // family); the branch is only taken when a pair side carries
+    // `CollisionFlags::HAS_CONTACT_STIFFNESS_DAMPING`.
+    let lambda = if soft {
+        c.normal_mass * (bias - vn) - c.normal_cfm * c.normal_impulse
+    } else {
+        c.normal_mass * (bias - vn)
+    };
     let old = c.normal_impulse;
     c.normal_impulse = (old + lambda).max(0.0);
     let jn = c.normal_impulse - old;
@@ -843,7 +945,7 @@ mod tests {
             Vector3::Y,                           // normal A -> B (box -> plane)
             penetration,
         );
-        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &cube, u32::MAX, None);
+        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &cube, u32::MAX, None, 60.0);
         (vec![ground, cube], vec![c])
     }
 
@@ -882,6 +984,7 @@ mod tests {
             &make_cube(),
             u32::MAX,
             Some(Vector3::new(d, 0.0, 0.0)),
+            60.0,
         );
         let mut bodies = vec![ground, make_cube()];
         // Approach speed along the normal: the first iteration builds a
@@ -899,7 +1002,7 @@ mod tests {
         // Without the anchor displacement the plain friction row only
         // zeroes the tangential slip (which is zero here) — no drive.
         let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
-        let plain = ContactConstraint::prepare(0, 1, &cp, &ground, &make_cube(), u32::MAX, None);
+        let plain = ContactConstraint::prepare(0, 1, &cp, &ground, &make_cube(), u32::MAX, None, 60.0);
         let mut bodies = vec![ground, make_cube()];
         bodies[1].linear_velocity = Vector3::new(0.0, -1.0, 0.0);
         let mut constraints = vec![plain];
@@ -976,7 +1079,7 @@ mod tests {
                 Vector3::Y,
                 0.01,
             );
-            let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None);
+            let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0);
             let mut pool: Vec<RollingFriction> = Vec::new();
             c.attach_rolling(&ground, &sphere, &mut pool);
             (vec![ground, sphere], vec![c], pool)
@@ -1026,7 +1129,7 @@ mod tests {
             Vector3::Y,
             0.01,
         );
-        let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None);
+        let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0);
         let mut pool: Vec<RollingFriction> = Vec::new();
         c.attach_rolling(&ground, &sphere, &mut pool);
         let mut bodies = vec![ground, sphere];
@@ -1034,6 +1137,105 @@ mod tests {
         // |ΔL| per row ≤ combined (0.005); I = 0.1 → |Δω| ≤ 0.05.
         let dw = (100.0 - bodies[1].angular_velocity.z).abs();
         assert!(dw <= 0.06, "clamp should cap the change: Δω = {}", dw);
+    }
+
+    /// The soft-contact channel (Bullet's
+    /// `BT_CONTACT_FLAG_CONTACT_STIFFNESS_DAMPING` branch): a flagged side
+    /// swaps the row's position-error factor to `dt·k/(dt·k + d)` of the
+    /// combined parameters and adds the compliance CFM (into the effective
+    /// mass and as `- m_cfm · appliedImpulse`), while an unflagged pair
+    /// keeps the Baumgarte defaults bit-for-bit.
+    #[test]
+    fn contact_stiffness_swaps_erp_and_adds_compliance() {
+        let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
+        let cp = bullet_collision::manifold::ContactPoint::new(Vector3::ZERO, Vector3::Y, 0.0);
+
+        let mut sphere =
+            RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::new(0.0, 0.5, 0.0), 1.0);
+        sphere.set_contact_stiffness_and_damping(1000.0, 10.0);
+        let soft = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0);
+        // dt = 1/60, k = 1000; the flagged sphere's damping 10 *adds* the
+        // plane's default 0.1 (Bullet's `calculateCombinedContactDamping`),
+        // and the plane's `BT_LARGE_FLOAT` stiffness contributes ~nothing to
+        // the series combination. The plane side contributes nothing to the
+        // row's k either, so it stays the sphere's inv_mass 1.
+        let denom = 1000.0 / 60.0 + 10.1;
+        let cfm = (1.0 / denom) * 60.0;
+        assert_relative_eq!(soft.erp, (1000.0 / 60.0) / denom, epsilon = 1e-12);
+        assert_relative_eq!(soft.normal_mass, 1.0 / (1.0 + cfm), epsilon = 1e-12);
+        assert_relative_eq!(soft.normal_cfm, cfm * soft.normal_mass, epsilon = 1e-12);
+
+        // An unflagged pair keeps the defaults: erp = Baumgarte, no
+        // compliance.
+        let plain_sphere = RigidBody::new_dynamic(
+            CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.5, 0.0),
+            1.0,
+        );
+        let plain =
+            ContactConstraint::prepare(0, 1, &cp, &ground, &plain_sphere, u32::MAX, None, 60.0);
+        assert_relative_eq!(plain.erp, 0.2, epsilon = 1e-12);
+        assert_relative_eq!(plain.normal_cfm, 0.0, epsilon = 1e-12);
+    }
+
+    /// Bullet's `applyAnisotropicFriction`: the pair's tangent axes are
+    /// rotated into each body's local frame, scaled component-wise, and
+    /// rotated back. With the identity rotation the local scaling *is* the
+    /// world scaling (a zero local-Z axis collapses the -Z tangent);
+    /// a rotated body scales its local axes, not the world's.
+    #[test]
+    fn anisotropic_friction_rescales_the_tangent_axes() {
+        let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
+        let cp = bullet_collision::manifold::ContactPoint::new(Vector3::ZERO, Vector3::Y, 0.0);
+        let make_cube = || {
+            RigidBody::new_dynamic(
+                CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            )
+        };
+
+        // Isotropic default: the tangent basis is untouched.
+        let plain = ContactConstraint::prepare(
+            0,
+            1,
+            &cp,
+            &ground,
+            &make_cube(),
+            u32::MAX,
+            None,
+            60.0,
+        );
+        let (t1, t2) = tangent_basis(Vector3::Y);
+        assert!((plain.tangent1 - t1).length() < 1e-12);
+        assert!((plain.tangent2 - t2).length() < 1e-12);
+
+        // Zero local-Z scaling: t1 runs along -Z and collapses; t2 keeps
+        // its length.
+        let mut aniso = make_cube();
+        aniso.anisotropic_friction = Vector3::new(1.0, 1.0, 0.0);
+        let scaled = ContactConstraint::prepare(0, 1, &cp, &ground, &aniso, u32::MAX, None, 60.0);
+        assert_relative_eq!(scaled.tangent1.length(), 0.0, epsilon = 1e-12);
+        assert_relative_eq!(scaled.tangent2.length(), 1.0, epsilon = 1e-12);
+
+        // A 45° yaw mixes the scaling into both axes: each tangent keeps
+        // only its projection onto the unscaled local plane.
+        let mut rotated = make_cube();
+        rotated.orientation = bullet_math::Quaternion::from_rotation_y(bullet_math::FRAC_PI_2 * 0.5);
+        rotated.anisotropic_friction = Vector3::new(1.0, 1.0, 0.0);
+        let turned = ContactConstraint::prepare(0, 1, &cp, &ground, &rotated, u32::MAX, None, 60.0);
+        let expected_t1 = Vector3::new(0.5, 0.0, -0.5);
+        let expected_t2 = Vector3::new(-0.5, 0.0, 0.5);
+        assert!(
+            (turned.tangent1 - expected_t1).length() < 1e-5,
+            "t1 = {}",
+            turned.tangent1
+        );
+        assert!(
+            (turned.tangent2 - expected_t2).length() < 1e-5,
+            "t2 = {}",
+            turned.tangent2
+        );
     }
 }
 
