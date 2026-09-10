@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command performance comparison against Bullet (docs/bullet-perf.md).
+"""One-command performance comparison against Bullet (docs/perf/speed.md).
 
 Orchestrates the perf pipeline for one scene (or all):
   1. Regenerate the perf scene tables from tools/perf_scenes.json if stale
@@ -18,7 +18,8 @@ Orchestrates the perf pipeline for one scene (or all):
      (one fresh-world run per engine, sampled every 50 frames; both runners
      report requested bytes, so the curves share one unit).
   6. --update-ledger replaces the numeric section of the scene's entry in
-     docs/bullet-perf.md (same discipline as tools/parity.py's ledger).
+     docs/perf/speed.md (wall clock, sweeps) or docs/perf/memory.md (--mem;
+     same discipline as tools/parity.py's ledger).
 
 Exit code: 0 = measurement completed, 2 = pipeline failure. There is no
 tolerance verdict: perf numbers are recorded, not gated.
@@ -40,7 +41,8 @@ import build_recorder
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS = os.path.join(ROOT, "tools")
 TARGET = os.path.join(ROOT, "target")
-LEDGER = os.path.join(ROOT, "docs", "bullet-perf.md")
+SPEED_LEDGER = os.path.join(ROOT, "docs", "perf", "speed.md")
+MEMORY_LEDGER = os.path.join(ROOT, "docs", "perf", "memory.md")
 SCENES_JSON = os.path.join(TOOLS, "perf_scenes.json")
 C_HEADER = os.path.join(TOOLS, "bullet_perf_scenes.h")
 RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "perf_scenes_table.rs")
@@ -254,18 +256,20 @@ def build_report(scene, bullet, rust, stages):
     return "\n".join(lines) + "\n"
 
 
-def update_ledger_section(header, marker, report_md, append_on_missing=False):
+def update_ledger_section(
+    ledger, header, marker, report_md, append_on_missing=False
+):
     """Replace the '<marker> ...' section under '<header>' in the ledger; a
     missing marker inserts the section at the end of the scene's block when
     append_on_missing is set (first --mem run on a scene that already has a
     wall-clock section); otherwise it skips. A missing scene header always
     skips (sweep tiers have no '## Scene:' blocks by design)."""
-    if not os.path.exists(LEDGER):
-        print(f"note: ledger {LEDGER} not found; skipping --update-ledger", file=sys.stderr)
+    if not os.path.exists(ledger):
+        print(f"note: ledger {ledger} not found; skipping --update-ledger", file=sys.stderr)
         return
     with open(report_md, "r", encoding="utf-8") as f:
         new_section = f.read().rstrip("\n")
-    with open(LEDGER, "r", encoding="utf-8") as f:
+    with open(ledger, "r", encoding="utf-8") as f:
         text = f.read()
 
     scene_pos = text.find(header)
@@ -291,9 +295,9 @@ def update_ledger_section(header, marker, report_md, append_on_missing=False):
         rest = text[insert_pos + 1:] if insert_pos < len(text) else ""
         updated = (text[:insert_pos].rstrip("\n") + "\n\n" + new_section + "\n\n"
                    + rest)
-        with open(LEDGER, "w", encoding="utf-8") as f:
+        with open(ledger, "w", encoding="utf-8") as f:
             f.write(updated)
-        print(f"ledger updated: {LEDGER} ({header}, appended {marker})")
+        print(f"ledger updated: {ledger} ({header}, appended {marker})")
         return
     sec_start = scene_pos + rep_pos
     # The generated report ends at the next hand-written analysis
@@ -306,13 +310,15 @@ def update_ledger_section(header, marker, report_md, append_on_missing=False):
                    if 0 <= pos <= end]
     next_heading = min(candidates) if candidates else end
     updated = text[:sec_start] + new_section + "\n\n" + text[next_heading + 1:]
-    with open(LEDGER, "w", encoding="utf-8") as f:
+    with open(ledger, "w", encoding="utf-8") as f:
         f.write(updated)
-    print(f"ledger updated: {LEDGER} ({header})")
+    print(f"ledger updated: {ledger} ({header})")
 
 
 def update_ledger(scene, report_md):
-    update_ledger_section(f"## Scene: {scene}", "### Generated report", report_md)
+    update_ledger_section(
+        SPEED_LEDGER, f"## Scene: {scene}", "### Generated report", report_md
+    )
 
 
 def scene_names():
@@ -398,7 +404,7 @@ def main():
                          "(one fresh-world run per engine, sampled every 50 frames; "
                          "ignores --repeats; mutually exclusive with --sweep)")
     ap.add_argument("--update-ledger", action="store_true",
-                    help="replace the scene's numeric report section in docs/bullet-perf.md")
+                    help="replace the scene's numeric report section in docs/perf/speed.md (or memory.md for --mem)")
     ap.add_argument("--no-build", action="store_true",
                     help="skip table/lib/exe/build self-checks")
     args = ap.parse_args()
@@ -452,7 +458,8 @@ def main():
                 report_md = os.path.join(TARGET, f"mem_{scene}_report.md")
                 with open(report_md, "w", encoding="utf-8") as f:
                     f.write(report)
-                update_ledger_section(f"## Scene: {scene}", "### Memory trend",
+                update_ledger_section(MEMORY_LEDGER, f"## Scene: {scene}",
+                                      "### Memory trend",
                                       report_md, append_on_missing=True)
         return 0
 
@@ -502,8 +509,8 @@ def main():
             report_md = os.path.join(TARGET, f"sweep_{args.sweep}_report.md")
             with open(report_md, "w", encoding="utf-8") as f:
                 f.write(report)
-            update_ledger_section(f"## Sweep: {args.sweep}", "### Generated sweep table",
-                                  report_md)
+            update_ledger_section(SPEED_LEDGER, f"## Sweep: {args.sweep}",
+                                  "### Generated sweep table", report_md)
     return 0
 
 

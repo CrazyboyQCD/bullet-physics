@@ -1,5 +1,5 @@
 //! Rust-side performance runner for the Bullet wall-clock comparison
-//! (docs/bullet-perf.md).
+//! (docs/perf/speed.md).
 //!
 //! Reads the perf scene tables generated from tools/perf_scenes.json
 //! (perf_scenes_table.rs), builds one scene, runs `warmup` untimed frames

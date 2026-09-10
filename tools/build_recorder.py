@@ -35,7 +35,7 @@ OBJS = {"f32": os.path.join(TOOLS, "bullet_record.obj"),
         "f64": os.path.join(TOOLS, "bullet_record_f64.obj")}
 
 # Perf runner (tools/bullet_perf.cpp vs tools/bullet_perf_scenes.h); f64-only
-# by design — performance targets the default f32 build (docs/bullet-perf.md).
+# by design — performance targets the default f32 build (docs/perf/speed.md).
 PERF_SRC = os.path.join(TOOLS, "bullet_perf.cpp")
 PERF_EXE = os.path.join(TOOLS, "bullet_perf.exe")
 

@@ -1,5 +1,5 @@
 // bullet_perf.cpp - C++ performance runner for the Rust vs Bullet wall-clock
-// comparison (docs/bullet-perf.md).
+// comparison (docs/perf/speed.md).
 //
 // Reads the perf scene tables generated from tools/perf_scenes.json
 // (bullet_perf_scenes.h), builds one scene, runs `warmup` untimed frames then
@@ -22,7 +22,7 @@
 // tracking stays off for the timed-repeats protocol, which then runs the
 // stock allocators unchanged.
 //
-// Fairness notes (documented in docs/bullet-perf.md):
+// Fairness notes (documented in docs/perf/speed.md):
 //   - the broad phase follows the scene spec: btAxisSweep3 (matching this
 //     crate's default AxisSweep3, scoped with the broadphase_aabb hint) or
 //     btDbvtBroadphase (matching DbvtBroadPhase) for the dbvt_* scenes;

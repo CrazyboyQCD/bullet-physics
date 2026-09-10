@@ -12,53 +12,8 @@ the analysis text below each report is hand-written).
 > reproduces 0.18–0.39×. The wall-clock sections were **not** re-recorded
 > (no semantic change, no churn). Memory: the `--mem` sections **were**
 > re-recorded (rust-side drift since the 2026-09-04 recording) — see the
-> attribution section below for the commit-level bisect. Bullet-side
+> memory ledger's attribution section (`perf/memory.md`). Bullet-side
 > numbers reproduced bit-for-bit.
-
-## Memory drift attribution (2026-09-09 bisect — decision notes)
-
-The `--mem` re-record moved the rust-side stack_1000 curve off the
-2026-09-04 numbers (live 4.061 → 4.522 MB, peak 5.006 → 5.774). A
-commit-level bisect over worktree builds (`perf_scenes --mem` on
-stack_1000, sampling identical to the ledger) pinned every byte:
-
-| Commit | Content | live / peak MB | Δ live |
-|---|---|---|---|
-| `d8123ec` (09-04, ledger base) | /MT unification + --mem anchoring | 4.061 / 5.006 | — |
-| `7184aad` (solver A1) | effective-mass pre-folded angular components | 4.061 / 5.006 | 0 |
-| `6af1123` (solver A2) | iteration-invariant bias terms hoisted into prepare | 4.186 / 5.193 | **+0.125** |
-| `406a68d` (solver A3) | static/kinematic-side impulse skip | 4.186 / 5.193 | 0 |
-| `cead978` (solver B1) | rel advance through pre-folded couplings | 4.506 / 5.757 | **+0.320** |
-| `10ac469` → 09-09 (all rounds) | adversarial/audit/debug-draw rounds | 4.522 / 5.774 | +0.016 |
-
-**Mechanism.** A2 and B1 grow the per-contact-row struct with
-pre-computed solver quantities (B1 adds three coupling vectors
-`kn`/`kt1`/`kt2`, ≈ 36 B/row). The `contact_rows` pool keeps its
-capacity across steps, and stack_1000 holds ≈ 8 k contact rows in
-steady state — each row growth multiplies into a permanent resident
-cost (0.32 MB ≈ 8 k rows × 36 B × alignment + capacity-doubling
-slack). Small scenes scale by row count (kinematic_pusher, 22 bodies:
-0.078 → 0.086 MB). bullet-side numbers reproduced bit-for-bit at the
-same bisect points.
-
-**Decision notes for a future memory-budget pass:**
-
-- This is a **priced trade, not a leak**: the same commits took
-  stack_1000 from 1.286 → 0.892 ms (the 0.95× → 0.62× headline).
-  Reclaiming the rows' memory means re-computing those quantities in
-  the solve loop — handing back most of that win.
-- Re-closure options if a memory budget ever demands it (all post-1.0,
-  all perf-negative):
-  1. shrink the row pool after the solve peak every N steps — cheap
-     code, realloc churn on growth frames;
-  2. demote B1's `kn`/`kt1`/`kt2` to solve-time recomputation —
-     recovers ≈ 0.32 MB on row-heavy scenes at the cost of the
-     largest slice of B1's speedup;
-  3. an explicit opt-in `shrink_pools()`-style call — zero cost for
-     everyone else, releases pools on demand.
-- **Re-examine when**: targeting a memory-capped platform, or scenes
-  at 10× stack_1000's body count (the ratio holds at ≈ 450 B of
-  solver-row growth per stacked body; ≈ 10 MB resident at 10 k bodies).
 
 ## Methodology
 
@@ -106,33 +61,6 @@ same bisect points.
   C++ side has no equivalent hook without patching upstream sources.
   Timed runs never enable stage sampling, so the headline numbers stay
   unpolluted.
-- **Memory trend** (`--mem`): one fresh-world run per engine, outside the
-  timed protocol, sampled every 50 frames from frame 0 (warmup included).
-  Both runners report **allocator-accounting requested bytes**: Rust wraps
-  the process global allocator; C++ hooks the global `operator new`/`delete`
-  family plus `btAlignedAllocSetCustomAligned` (Bullet's internal
-  `btAlignedObjectArray` storage routes to `_aligned_malloc` on Windows and
-  never touches `operator new`). CRT/runtime-internal allocations are
-  outside either count, so the two curves share one unit and the live/peak
-  columns are directly comparable. Tracking stays off during the timed
-  repeats (at most one relaxed load + branch per allocation), keeping the
-  headline numbers on the stock allocators.
-  **CRT discipline**: the Bullet statics are configured with
-  `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` (/MT) to match the probe
-  builds (cl default) — a /MD lib resolves its `new` through the CRT DLL
-  and silently bypasses the global operator new hook. Measured impact of
-  the fix was nil (Bullet classes overwhelmingly carry
-  `BT_DECLARE_ALIGNED_ALLOCATOR` and route through the aligned hook), but
-  the /MT build closes the audit hole.
-  **Anchor**: the C++ runner prints `mem mark` lines and a per-sample
-  `ws_mb` (process working set). The ws−live gap stays constant (~3.8 MB:
-  code pages + static CRT) and the live and ws deltas track each other
-  through the run, ruling out systematic undercounting. The dominant
-  term in Bullet's construction-phase baseline is its configuration-layer
-  preallocation — the 4096-entry `btPersistentManifold` pool plus the
-  collision-algorithm pool and the AxisSweep3 edge/handle tables — not
-  per-body objects; our construction baseline is ~14x smaller because the
-  matching structures are lazily grown `Vec`s.
 - **Caveats.** Absolute numbers are machine- and load-sensitive; only the
   rust/bullet ratio (same machine, interleaved runs) is meaningful. Chaotic
   trajectories may diverge slightly between engines, shifting when stacks
@@ -174,25 +102,25 @@ python tools/perf.py --sweep sphere_rain --repeats 2 --update-ledger
 
 ## Scene: stack_1000
 
-### Generated report (auto-generated by tools/perf.py, 2026-09-08)
+### Generated report (auto-generated by tools/perf.py, 2026-09-10)
 
 Scene: stack_1000 (f32), bodies: 1001, frames: 600, warmup: 30, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.432 | 859.1 | 101.7 |
-| rust | 0.891 | 534.5 | 77.2 |
-| rust/bullet | 0.62x | | |
+| bullet | 1.398 | 839.0 | 99.7 |
+| rust | 0.878 | 526.6 | 71.7 |
+| rust/bullet | 0.63x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
-- integrate_velocities: 2.9 ms (0.5%)
-- update_aabbs: 37.0 ms (6.5%)
-- broadphase: 94.2 ms (16.5%)
-- islands: 52.7 ms (9.2%)
-- narrowphase: 191.2 ms (33.5%)
-- solve: 186.9 ms (32.8%)
-- integrate_positions: 5.2 ms (0.9%)
+- integrate_velocities: 2.6 ms (0.5%)
+- update_aabbs: 35.6 ms (6.4%)
+- broadphase: 74.7 ms (13.3%)
+- islands: 67.2 ms (12.0%)
+- narrowphase: 190.0 ms (34.0%)
+- solve: 184.7 ms (33.0%)
+- integrate_positions: 4.7 ms (0.8%)
 
 **Analysis (2026-09-01, handwritten)**: the first soft-body perf scene — pure soft-body core work (PBD links + faces + aerodynamics), zero contacts. The soft-body stages live inside the Rust `integrate_positions` stage (the world's 7s section, where `solve_constraints` runs; 55.1 ms = 82%) plus the wind/predict slice of `integrate_velocities` (17.6%); broadphase/solve are near-zero because the cloths hang pinned in the air with no ground below. Bullet's stage breakdown is not instrumented, but the ratio (0.63x) lands between the rigid-solver scenes (0.6-0.8x) and the best pure-algorithm scenes — the classic `btSoftBody` position pipeline (links/faces iteration + `applyForces`) is cost-for-cost comparable to ours, with our edge mainly in the per-node bookkeeping. The workload is a genuine steady state: the wind keeps every node moving all run (max node speed stays ~2-3 m/s in both engines' dumps), so this measures sustained soft-body simulation, not a settle.
 
@@ -252,34 +180,6 @@ per-frame 0.874–0.929 ms across five back-to-back repeats (median 0.891 =
 the ledger row above), ratio 0.65–0.67x against a Bullet side drifting
 1.33–1.45 ms. The gate is now part of the tracked profile; this ledger row
 stays current within session noise.
-
-### Memory trend (auto-generated by tools/perf.py --mem, 2026-09-09)
-
-Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hooks global operator new + btAlignedAllocSetCustomAligned (Bullet's internal arrays; Windows _aligned_malloc route). CRT/runtime-internal allocations are outside either count, so the curves share one unit. live = bytes held at the sample; peak = high-water mark.
-
-| frame | rust live MB | rust peak MB | bullet live MB | bullet peak MB |
-|---|---|---|---|---|
-| 0 | 0.850 | 1.207 | 14.751 | 14.751 |
-| 50 | 4.359 | 5.774 | 16.879 | 17.782 |
-| 100 | 4.433 | 5.774 | 18.744 | 20.554 |
-| 150 | 4.522 | 5.774 | 18.613 | 20.554 |
-| 200 | 4.522 | 5.774 | 18.613 | 20.554 |
-| 250 | 4.522 | 5.774 | 18.613 | 20.554 |
-| 300 | 4.522 | 5.774 | 18.613 | 20.554 |
-| 350 | 4.522 | 5.774 | 18.613 | 20.554 |
-| 400 | 4.522 | 5.774 | 18.613 | 20.554 |
-| 450 | 4.522 | 5.774 | 18.613 | 20.554 |
-| 500 | 4.522 | 5.774 | 18.613 | 20.554 |
-| 550 | 4.522 | 5.774 | 18.613 | 20.554 |
-| 600 | 4.522 | 5.774 | 18.613 | 20.554 |
-| 629 | 4.522 | 5.774 | 18.613 | 20.554 |
-
-**Analysis (2026-09-04, handwritten)**: steady-state ~0.22x (4.06 vs
-18.61 MB live). Both curves peak during the contact-assembly phase
-(rust 5.01 at frame 50, bullet 20.55 at frame 100) and fall flat once
-the tower settles and the manifolds stop growing — a one-time cost,
-not per-frame churn. Bullet's construction base (14.75 vs our 0.83 MB)
-dominates the gap, same as rain_500.
 
 ## Scene: rain_500
 
@@ -456,34 +356,6 @@ parity deviations digit-for-digit unchanged.
 
 **Analysis (2026-09-01, handwritten)**: the first soft-body perf scene — pure soft-body core work (PBD links + faces + aerodynamics), zero contacts. The soft-body stages live inside the Rust `integrate_positions` stage (the world's 7s section, where `solve_constraints` runs; 55.1 ms = 82%) plus the wind/predict slice of `integrate_velocities` (17.6%); broadphase/solve are near-zero because the cloths hang pinned in the air with no ground below. Bullet's stage breakdown is not instrumented, but the ratio (0.63x) lands between the rigid-solver scenes (0.6-0.8x) and the best pure-algorithm scenes — the classic `btSoftBody` position pipeline (links/faces iteration + `applyForces`) is cost-for-cost comparable to ours, with our edge mainly in the per-node bookkeeping. The workload is a genuine steady state: the wind keeps every node moving all run (max node speed stays ~2-3 m/s in both engines' dumps), so this measures sustained soft-body simulation, not a settle.
 
-### Memory trend (auto-generated by tools/perf.py --mem, 2026-09-09)
-
-Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hooks global operator new + btAlignedAllocSetCustomAligned (Bullet's internal arrays; Windows _aligned_malloc route). CRT/runtime-internal allocations are outside either count, so the curves share one unit. live = bytes held at the sample; peak = high-water mark.
-
-| frame | rust live MB | rust peak MB | bullet live MB | bullet peak MB |
-|---|---|---|---|---|
-| 0 | 0.528 | 0.609 | 7.328 | 7.328 |
-| 50 | 0.562 | 0.609 | 7.372 | 7.383 |
-| 100 | 1.656 | 1.968 | 8.726 | 8.972 |
-| 150 | 1.839 | 1.968 | 8.732 | 8.972 |
-| 200 | 1.872 | 1.968 | 8.734 | 8.972 |
-| 250 | 1.879 | 1.968 | 8.735 | 8.972 |
-| 300 | 1.884 | 1.968 | 8.735 | 8.972 |
-| 309 | 1.885 | 1.968 | 8.735 | 8.972 |
-
-**Analysis (2026-09-04, handwritten)**: steady-state residency reads
-~0.20x (1.75 vs 8.74 MB live; peaks 1.79 vs 8.97 MB). The split already
-exists at construction (frame 0: 0.52 vs 7.33 MB, ~14x) and is dominated
-by Bullet's configuration-layer preallocation (4096-entry manifold pool,
-collision-algorithm pool, AxisSweep3 edge/handle tables — see the
-methodology anchor note), with per-body `btCollisionObject` +
-`btDefaultMotionState` objects a minor term against our value-semantics
-`RigidBody` slots; most of that gap persists through the run. The rain
-registration phase (frames 0→100) adds a similar slope on both sides
-(~1.2 MB rust vs ~1.4 MB bullet: broadphase proxies + persistent
-manifolds). Numbers are allocator-accounting, machine-independent;
-sampled every 50 frames over one fresh-world run.
-
 ## Scene: mb_chains
 
 ### Generated report (auto-generated by tools/perf.py, 2026-09-08)
@@ -581,28 +453,6 @@ build.
 
 **Analysis (2026-09-01, handwritten)**: the first soft-body perf scene — pure soft-body core work (PBD links + faces + aerodynamics), zero contacts. The soft-body stages live inside the Rust `integrate_positions` stage (the world's 7s section, where `solve_constraints` runs; 55.1 ms = 82%) plus the wind/predict slice of `integrate_velocities` (17.6%); broadphase/solve are near-zero because the cloths hang pinned in the air with no ground below. Bullet's stage breakdown is not instrumented, but the ratio (0.63x) lands between the rigid-solver scenes (0.6-0.8x) and the best pure-algorithm scenes — the classic `btSoftBody` position pipeline (links/faces iteration + `applyForces`) is cost-for-cost comparable to ours, with our edge mainly in the per-node bookkeeping. The workload is a genuine steady state: the wind keeps every node moving all run (max node speed stays ~2-3 m/s in both engines' dumps), so this measures sustained soft-body simulation, not a settle.
 
-### Memory trend (auto-generated by tools/perf.py --mem, 2026-09-09)
-
-Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hooks global operator new + btAlignedAllocSetCustomAligned (Bullet's internal arrays; Windows _aligned_malloc route). CRT/runtime-internal allocations are outside either count, so the curves share one unit. live = bytes held at the sample; peak = high-water mark.
-
-| frame | rust live MB | rust peak MB | bullet live MB | bullet peak MB |
-|---|---|---|---|---|
-| 0 | 0.888 | 0.954 | 7.781 | 7.781 |
-| 50 | 1.313 | 1.445 | 8.043 | 8.105 |
-| 100 | 1.722 | 1.996 | 8.057 | 8.105 |
-| 150 | 1.722 | 1.996 | 8.057 | 8.105 |
-| 200 | 1.722 | 1.996 | 8.057 | 8.105 |
-| 250 | 1.722 | 1.996 | 8.057 | 8.105 |
-| 300 | 1.722 | 1.996 | 8.057 | 8.105 |
-| 304 | 1.722 | 1.996 | 8.057 | 8.105 |
-
-**Analysis (2026-09-04, handwritten)**: steady-state ~0.21x (1.72 vs
-8.06 MB live). Both sides stop allocating once the chains have swung
-out (~frame 100); the ratio matches the rigid scenes — Featherstone
-state (position/velocity/cached transforms per DOF) costs similar
-bytes per link on both sides, and the gap stays in the per-body
-collision-object overhead.
-
 ## Scene: dbvt_rain_2000
 
 ### Generated report (auto-generated by tools/perf.py, 2026-09-08)
@@ -669,29 +519,6 @@ comparison: rust 7.46 ms/f (faster than the sweep run's 8.09), bullet
 21.21 (slower than its sweep 18.06), ratio 0.35x. The memory trend was
 re-recorded on the real backend.
 
-### Memory trend (auto-generated by tools/perf.py --mem, 2026-09-09)
-
-Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hooks global operator new + btAlignedAllocSetCustomAligned (Bullet's internal arrays; Windows _aligned_malloc route). CRT/runtime-internal allocations are outside either count, so the curves share one unit. live = bytes held at the sample; peak = high-water mark.
-
-| frame | rust live MB | rust peak MB | bullet live MB | bullet peak MB |
-|---|---|---|---|---|
-| 0 | 2.294 | 2.618 | 8.106 | 8.106 |
-| 50 | 2.503 | 2.618 | 8.207 | 8.230 |
-| 100 | 6.977 | 8.208 | 21.178 | 21.217 |
-| 150 | 7.791 | 8.208 | 22.565 | 22.626 |
-| 200 | 7.930 | 8.208 | 22.427 | 22.630 |
-| 250 | 7.969 | 8.208 | 22.334 | 22.630 |
-| 300 | 7.993 | 8.208 | 22.298 | 22.630 |
-| 309 | 7.995 | 8.208 | 22.298 | 22.630 |
-
-**Analysis (2026-09-04, handwritten)**: steady-state ~0.34x (7.52 vs
-22.30 MB live, real Dbvt backend after the config fix) — the weakest
-ratio in the set, and the biggest scene:
-2000 bodies' broadphase volume (dbvt nodes + proxies) plus contact
-manifolds grow with body count on both sides, so Bullet's fixed
-construction preallocation shrinks proportionally. The registration
-slope is similar (frame 100→309: +1.2 MB rust vs +1.1 MB bullet).
-
 ## Scene: gimpact_rain_100
 
 ### Generated report (auto-generated by tools/perf.py, 2026-09-08)
@@ -739,28 +566,6 @@ would be meaningless; the behavioral finding is recorded in deviations §1.
 
 
 **Analysis (2026-09-01, handwritten)**: the first soft-body perf scene — pure soft-body core work (PBD links + faces + aerodynamics), zero contacts. The soft-body stages live inside the Rust `integrate_positions` stage (the world's 7s section, where `solve_constraints` runs; 55.1 ms = 82%) plus the wind/predict slice of `integrate_velocities` (17.6%); broadphase/solve are near-zero because the cloths hang pinned in the air with no ground below. Bullet's stage breakdown is not instrumented, but the ratio (0.63x) lands between the rigid-solver scenes (0.6-0.8x) and the best pure-algorithm scenes — the classic `btSoftBody` position pipeline (links/faces iteration + `applyForces`) is cost-for-cost comparable to ours, with our edge mainly in the per-node bookkeeping. The workload is a genuine steady state: the wind keeps every node moving all run (max node speed stays ~2-3 m/s in both engines' dumps), so this measures sustained soft-body simulation, not a settle.
-
-### Memory trend (auto-generated by tools/perf.py --mem, 2026-09-09)
-
-Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hooks global operator new + btAlignedAllocSetCustomAligned (Bullet's internal arrays; Windows _aligned_malloc route). CRT/runtime-internal allocations are outside either count, so the curves share one unit. live = bytes held at the sample; peak = high-water mark.
-
-| frame | rust live MB | rust peak MB | bullet live MB | bullet peak MB |
-|---|---|---|---|---|
-| 0 | 1.406 | 1.407 | 7.246 | 7.246 |
-| 50 | 1.628 | 1.696 | 7.541 | 7.632 |
-| 100 | 1.637 | 1.696 | 7.541 | 7.632 |
-| 150 | 1.637 | 1.696 | 7.541 | 7.632 |
-| 200 | 1.637 | 1.696 | 7.541 | 7.632 |
-| 250 | 1.636 | 1.696 | 7.541 | 7.632 |
-| 300 | 1.637 | 1.696 | 7.541 | 7.632 |
-| 309 | 1.636 | 1.696 | 7.541 | 7.632 |
-
-**Analysis (2026-09-04, handwritten)**: steady-state ~0.21x (1.60 vs
-7.54 MB live). Bullet's construction baseline (configuration pools +
-the BVH inside each GImpact shape; triangle storage + bvh nodes are
-shape-owned on both sides) dominates at frame 0; the flat curves after
-frame 50 show the mesh-mesh path accumulates no per-contact memory
-(GJK pairs, no persistent clipped tris).
 
 ## Scene: game_arena
 
@@ -837,33 +642,6 @@ the old ~98 ms), while Bullet's tower behavior is unchanged. The old
 'awake-count divergence' analysis above predates this: after the merge the
 two engines' late-game activity converges instead of diverging.
 
-### Memory trend (auto-generated by tools/perf.py --mem, 2026-09-09)
-
-Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hooks global operator new + btAlignedAllocSetCustomAligned (Bullet's internal arrays; Windows _aligned_malloc route). CRT/runtime-internal allocations are outside either count, so the curves share one unit. live = bytes held at the sample; peak = high-water mark.
-
-| frame | rust live MB | rust peak MB | bullet live MB | bullet peak MB |
-|---|---|---|---|---|
-| 0 | 1.205 | 1.242 | 7.110 | 7.132 |
-| 50 | 1.363 | 1.399 | 7.337 | 7.423 |
-| 100 | 1.368 | 1.399 | 7.339 | 7.423 |
-| 150 | 1.370 | 1.399 | 7.342 | 7.423 |
-| 200 | 1.371 | 1.399 | 7.343 | 7.423 |
-| 250 | 1.372 | 1.399 | 7.346 | 7.423 |
-| 300 | 1.380 | 1.399 | 7.348 | 7.423 |
-| 350 | 1.385 | 1.399 | 7.350 | 7.423 |
-| 400 | 1.386 | 1.399 | 7.352 | 7.423 |
-| 450 | 1.387 | 1.399 | 7.355 | 7.423 |
-| 500 | 1.390 | 1.402 | 7.356 | 7.423 |
-| 550 | 1.394 | 1.406 | 7.358 | 7.423 |
-| 600 | 1.396 | 1.408 | 7.361 | 7.423 |
-| 609 | 1.396 | 1.408 | 7.361 | 7.423 |
-
-**Analysis (2026-09-04, handwritten)**: steady-state ~0.20x (1.49 vs
-7.36 MB live). This is the only scene with a growth trend by design:
-the launcher adds a body every 30 frames (+15 KB/body rust, +12 KB/body
-bullet — shape + broadphase proxy + solver slots), so live keeps
-creeping to the end of the run on both sides.
-
 ## Scene: cloth_wind
 
 ### Generated report (auto-generated by tools/perf.py, 2026-09-08)
@@ -887,27 +665,6 @@ Rust stage breakdown (cumulative over 300 frames):
 - integrate_positions: 55.3 ms (81.6%)
 
 **Analysis (2026-09-01, handwritten)**: the first soft-body perf scene — pure soft-body core work (PBD links + faces + aerodynamics), zero contacts. The soft-body stages live inside the Rust `integrate_positions` stage (the world's 7s section, where `solve_constraints` runs; 55.1 ms = 82%) plus the wind/predict slice of `integrate_velocities` (17.6%); broadphase/solve are near-zero because the cloths hang pinned in the air with no ground below. Bullet's stage breakdown is not instrumented, but the ratio (0.63x) lands between the rigid-solver scenes (0.6-0.8x) and the best pure-algorithm scenes — the classic `btSoftBody` position pipeline (links/faces iteration + `applyForces`) is cost-for-cost comparable to ours, with our edge mainly in the per-node bookkeeping. The workload is a genuine steady state: the wind keeps every node moving all run (max node speed stays ~2-3 m/s in both engines' dumps), so this measures sustained soft-body simulation, not a settle.
-
-### Memory trend (auto-generated by tools/perf.py --mem, 2026-09-09)
-
-Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hooks global operator new + btAlignedAllocSetCustomAligned (Bullet's internal arrays; Windows _aligned_malloc route). CRT/runtime-internal allocations are outside either count, so the curves share one unit. live = bytes held at the sample; peak = high-water mark.
-
-| frame | rust live MB | rust peak MB | bullet live MB | bullet peak MB |
-|---|---|---|---|---|
-| 0 | 1.515 | 1.532 | 8.641 | 8.655 |
-| 50 | 1.515 | 1.532 | 8.641 | 8.655 |
-| 100 | 1.515 | 1.532 | 8.641 | 8.655 |
-| 150 | 1.515 | 1.532 | 8.641 | 8.655 |
-| 200 | 1.515 | 1.532 | 8.641 | 8.655 |
-| 250 | 1.515 | 1.532 | 8.641 | 8.655 |
-| 300 | 1.515 | 1.532 | 8.641 | 8.655 |
-| 309 | 1.515 | 1.532 | 8.641 | 8.655 |
-
-**Analysis (2026-09-04, handwritten)**: steady-state ~0.18x (1.52 vs
-8.64 MB live). Both curves are dead flat from frame 0 — soft-body
-node/link/face storage is fully preallocated at build time and the
-wind workload allocates nothing per frame on either engine (the purest
-zero-churn scene in the set).
 
 ## Scene: softbody_rain
 
@@ -933,27 +690,6 @@ Rust stage breakdown (cumulative over 300 frames):
 
 **Analysis (2026-09-01, handwritten)**: the soft-body contact scene — 64 cloths settled onto a plane, every one of ~2300 nodes living inside the SDF_RS contact band for the whole run (soft bodies never sleep). **0.23x, the largest lead of any scene**: Bullet's soft-vs-plane route stacks three approximations per node per iteration (plane triangulated into concave-sub triangles, each extruded into a hull, then the sparse-SDF voxel interpolation) and pays all three at full node count, while our node-vs-plane distance is one analytic evaluation (deviations §1 "Soft body: node-vs-rigid distance"). Rust split: 27% narrowphase (the SDF_RS band queries) + 67% the PBD solve in `integrate_positions` — the contact projection itself is where Bullet burns the extra 4x. Drop height note: the first draft dropped the cloths from y = 4 (~8.9 m/s) and **Bullet's own cloths tunneled straight through the plane** (min_y −120 by frame 300) — the rope_ball_tunnel catch-leak class, measured live; y = 0.5 (~2.2 m/s) settles both engines cleanly (bullet min_y 0.337 / rust 0.2527, the known settle-offset pair). Reproducibility notes: the C++ runner must use `btSoftBodyRigidBodyCollisionConfiguration` (the default config silently drops **every** soft pair — the nodes fall straight through with no contact at all); the broad phase is the same sweep as every other scene (works fine for soft pairs — an earlier Dbvt guess was a misdiagnosis of the same missing-config symptom).
 
-### Memory trend (auto-generated by tools/perf.py --mem, 2026-09-09)
-
-Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hooks global operator new + btAlignedAllocSetCustomAligned (Bullet's internal arrays; Windows _aligned_malloc route). CRT/runtime-internal allocations are outside either count, so the curves share one unit. live = bytes held at the sample; peak = high-water mark.
-
-| frame | rust live MB | rust peak MB | bullet live MB | bullet peak MB |
-|---|---|---|---|---|
-| 0 | 1.580 | 1.582 | 9.142 | 9.142 |
-| 50 | 2.143 | 2.148 | 12.392 | 12.417 |
-| 100 | 2.143 | 2.148 | 12.392 | 12.417 |
-| 150 | 2.143 | 2.148 | 12.392 | 12.417 |
-| 200 | 2.143 | 2.148 | 12.392 | 12.417 |
-| 250 | 2.143 | 2.148 | 12.392 | 12.417 |
-| 300 | 2.143 | 2.148 | 12.392 | 12.417 |
-| 309 | 2.143 | 2.148 | 12.392 | 12.417 |
-
-**Analysis (2026-09-04, handwritten)**: steady-state ~0.17x (2.14 vs
-12.39 MB live) — the best ratio of the set. The cloth grid (nodes +
-links + faces) is preallocated once; the frame 0→50 step on both sides
-is the soft-vs-rigid contact machinery warming up, after which nothing
-grows.
-
 ## Scene: softbody_mesh
 
 ### Generated report (auto-generated by tools/perf.py, 2026-09-08)
@@ -977,28 +713,6 @@ Rust stage breakdown (cumulative over 300 frames):
 - integrate_positions: 71.3 ms (13.0%)
 
 **Analysis (2026-09-01, handwritten)**: the softbody_rain workload on the wavy 40×40 static mesh (~3200 triangles) instead of the analytic plane — deliberately built on Bullet's sparse-SDF home turf to decompose the softbody_rain lead. **0.39x (bullet 4.689 / rust 1.842 ms/frame), down from 0.23x on the plane**: the algorithm-substituted share of the plane lead shrinks exactly as predicted, but the cached SDF does not overtake the uncached exact queries. Both sides pay more on the mesh: Bullet 1.372 → 4.689 (+3.3 ms — the SDF's `BuildCell` runs a GJK signed-distance against the nearest extruded hull per voxel corner, and 3200 hulls at 0.25 m voxels make both the build and the cache-miss cost explode), while we go 0.310 → 1.842 (+1.5 ms — every node walks the local BVH and runs the exact point-triangle distance per query, no cache). Rust split flips hard: **narrowphase 476.9 ms = 86.4%** (vs 27.5% on the plane) — the node-vs-triangle query is now the dominant cost, and it is stateless per query even though settled nodes re-probe the same triangles frame after frame; a cross-frame/per-body distance cache (Bullet's SDF idea, applied to exact queries) or ndbvt-driven batch queries is the obvious soft-narrowphase optimization candidate if this workload class matters. Behavior: both engines settle in band over the troughs (bullet min_y ≈ 0.143 / rust ≈ 0.058 — the same ~85 mm SDF-lift pair as every SDF-vs-analytic scene), free-fall prefix frame-identical, soft_nodes 2304 on both sides.
-
-### Memory trend (auto-generated by tools/perf.py --mem, 2026-09-09)
-
-Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hooks global operator new + btAlignedAllocSetCustomAligned (Bullet's internal arrays; Windows _aligned_malloc route). CRT/runtime-internal allocations are outside either count, so the curves share one unit. live = bytes held at the sample; peak = high-water mark.
-
-| frame | rust live MB | rust peak MB | bullet live MB | bullet peak MB |
-|---|---|---|---|---|
-| 0 | 2.532 | 2.533 | 9.185 | 9.186 |
-| 50 | 3.096 | 3.102 | 14.885 | 14.885 |
-| 100 | 3.096 | 3.102 | 15.117 | 15.118 |
-| 150 | 3.096 | 3.102 | 15.357 | 15.357 |
-| 200 | 3.097 | 3.102 | 15.499 | 15.500 |
-| 250 | 3.097 | 3.102 | 15.610 | 15.611 |
-| 300 | 3.097 | 3.102 | 15.759 | 15.760 |
-| 309 | 3.097 | 3.102 | 15.772 | 15.773 |
-
-**Analysis (2026-09-04, handwritten)**: steady-state ~0.20x (3.10 vs
-15.77 MB live). The one bullet-side curve that keeps creeping through
-the run (14.89 → 15.77 MB) against a flat rust side (3.10 constant) —
-plausibly btSoftBody solver temporaries re-grown per step on the
-mesh-mesh workload; worth watching if any scene ever makes it
-superlinear.
 
 ## Scene: kinematic_pusher
 
@@ -1043,39 +757,6 @@ effective_mass 2.2%); the 0.79x ratio — rust's narrowest lead in the
 ledger — lives in the solver inner loop, consistent with solve being
 the ledger-wide #1 hotspot. Small-sample caveat: 1048 samples, treat
 sub-3% figures as qualitative.
-
-### Memory trend (auto-generated by tools/perf.py --mem, 2026-09-09)
-
-Allocator accounting, requested bytes: Rust wraps the global allocator; C++ hooks global operator new + btAlignedAllocSetCustomAligned (Bullet's internal arrays; Windows _aligned_malloc route). CRT/runtime-internal allocations are outside either count, so the curves share one unit. live = bytes held at the sample; peak = high-water mark.
-
-| frame | rust live MB | rust peak MB | bullet live MB | bullet peak MB |
-|---|---|---|---|---|
-| 0 | 0.038 | 0.042 | 6.494 | 6.500 |
-| 50 | 0.047 | 0.058 | 6.548 | 6.571 |
-| 100 | 0.047 | 0.058 | 6.548 | 6.571 |
-| 150 | 0.047 | 0.058 | 6.548 | 6.571 |
-| 200 | 0.047 | 0.058 | 6.548 | 6.571 |
-| 250 | 0.047 | 0.058 | 6.548 | 6.571 |
-| 300 | 0.047 | 0.058 | 6.548 | 6.571 |
-| 350 | 0.086 | 0.099 | 6.548 | 6.571 |
-| 400 | 0.086 | 0.099 | 6.556 | 6.571 |
-| 450 | 0.086 | 0.099 | 6.556 | 6.571 |
-| 500 | 0.086 | 0.099 | 6.556 | 6.571 |
-| 550 | 0.086 | 0.099 | 6.556 | 6.571 |
-| 600 | 0.086 | 0.099 | 6.556 | 6.571 |
-| 629 | 0.086 | 0.099 | 6.556 | 6.571 |
-
-**Analysis (2026-09-04, handwritten)**: the only scene where Bullet is
-faster per frame (0.78x) - and it measures exactly the kinematic paths,
-not the bulk pipeline: a 22-body scene is dominated by per-step fixed
-costs, where Bullet's preallocated solver pool avoids the per-frame
-setup our small `Vec` rows still pay. The memory curve shows the
-kinematic wake propagation working: rust live is flat at 0.043 MB while
-the cubes sleep ahead of the slab, then jumps to 0.077 MB at frame 350
-when the slab reaches them (woken island + contact rows) and stays
-there; bullet's flat 6.5 MB is its configuration-layer preallocation
-(seen on every scene). The 0.043 -> 0.077 step is the target signature
-this scene exists to watch.
 
 ## Sweep: sphere_rain
 

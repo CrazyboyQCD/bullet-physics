@@ -2,7 +2,8 @@
 
 > The single source of truth for the current state of the project. Update
 > this file whenever the state changes. Fine-grained evidence lives in the
-> ledgers (`docs/bullet-compare.md`, `docs/bullet-perf.md`) and the audit
+> ledgers (`docs/bullet-compare.md`, `docs/perf/speed.md`,
+> `docs/perf/memory.md`) and the audit
 > records (`docs/audit/`).
 
 ## Current HEAD
@@ -89,7 +90,7 @@ per step instead of incrementally maintained, so runtime
 disabled constraints stop suppressing — they do not, matching Bullet).
 Verified: tests ×2, clippy ×2, check.py, parity 8/8 bit-identical, no_std,
 perf in band (the first island-gating cut cost +20% on stack_1000; fixed by
-a per-proxy eligibility fast path, `docs/bullet-perf.md`). Residual
+a per-proxy eligibility fast path, `docs/perf/speed.md`). Residual
 semantic note recorded as deviations §1 "Islands: gating & kinematic wake".
 
 **Stage: audits 01–09 complete.** The broadphase integration audit landed as
