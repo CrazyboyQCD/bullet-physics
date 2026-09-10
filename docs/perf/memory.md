@@ -59,6 +59,27 @@ same bisect points.
   at 10× stack_1000's body count (the ratio holds at ≈ 450 B of
   solver-row growth per stacked body; ≈ 10 MB resident at 10 k bodies).
 
+### 2026-09-10 addendum: persistent-manifold extras (+0.125 MB)
+
+The extras round (`ContactPoint.lifetime` u32 + `PersistentPoint.lifetime`
+u32 + `ContactConstraint.anchor [Real; 2]`) moved the stack_1000 curve
+again: live 4.522 → 4.647 MB, peak 5.774 → 5.962 MB (**+0.125 /
++0.188 MB**). Attribution is structural, no bisect needed — the fields
+land in the same permanently-resident pools the 09-04 bisect already
+priced:
+
+- `PersistentPoint` crosses a power-of-two stride (56 → 64 B f32) —
+  4 points × every cached pair (~2 k pairs) ≈ 64 KB.
+- `ContactConstraint` grows by one `anchor` pair (8 B) × ≈ 8 k rows ≈
+  64 KB (pool capacity slack rounds the total up).
+
+Velocity is unaffected (rust 0.912 ms / 0.63× vs ledger 0.891 ms /
+0.62×, inside the noise band). The extras are opt-in per body
+(`HAS_FRICTION_ANCHOR`) / per world (`set_contact_point_events`); the
+field growth, however, is unconditional — reclaiming it means
+re-spaghettifying the row struct for the ~0.06 MB the anchor costs,
+not worth it pre-1.0.
+
 ## Methodology
 
 - **Memory trend** (`--mem`): one fresh-world run per engine, outside the

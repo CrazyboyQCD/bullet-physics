@@ -321,12 +321,21 @@ S/M/L · **See** = existing notes.
   - Files: `bullet-collision/src/shapes/triangle_mesh.rs`.
   - Risk: low — construction-time only; no runtime path changes.
   - Size: M.
-- **`btShapeHull`**: hull decimation / debug hull tool.
-  - Impl: sample the convex shape's supports over a direction set and
-    run the existing self-implemented quickhull (already in the softbody
-    cluster path) to produce a `ConvexHull`.
-  - Files: `bullet-collision/src/shapes/` (utility fn).
-  - Risk: none; pure utility.
+- **`btShapeHull`** ✅ (2026-09-10): hull decimation / debug hull tool.
+  - Impl: sample the convex shape's supports over Bullet's lowres
+    42-direction unit-sphere table (transcribed verbatim), dedupe, and
+    run the quickhull — which moved from `softbody/quickhull.rs` to
+    `bullet-math/src/quickhull.rs` (Bullet's hull library lives in
+    LinearMath; collision may now share it). `ShapeHull::to_convex_hull`
+    round-trips a primitive into a `ConvexHull`.
+  - Files: `bullet-collision/src/shapes/shape_hull.rs`, module move
+    `softbody/quickhull.rs` → `bullet-math/src/quickhull.rs`.
+  - Not ported: the highres 256-direction variant and the
+    preferred-penetration direction extras (no shape implements them
+    here) — deviations §1.
+  - Tests: 4 (sphere keeps all 42 samples on the surface, box collapses
+    to 8 corners × 12 triangles, capsule volume vs analytic, round-trip
+    support identity).
   - Size: S.
 - **Extras toolkits**: `ConvexDecomposition`, `HACD`/`VHACD` — convex
   decomposition is expected to run offline, like Bullet's own demos
@@ -391,14 +400,29 @@ S/M/L · **See** = existing notes.
   - Tests: 3 (link-collider Started/Link payload + removal Stopped, soft
     rope pair events, soft-removal Stopped with slot renumbering).
   - Size: M.
-- **Persistent-manifold extras**: point lifetime counters, friction
-  anchors, contact-processed callbacks.
-  - Impl: lifetime counters are a small field on `ContactPoint` +
-    capture/refresh updates; the callback maps onto a world-level drain
-    (zero-dyn rule), not a per-pair function pointer.
-  - Files: `bullet-collision/src/manifold.rs`, `world.rs` refresh path.
-  - Risk: fields must stay out of the numeric path (warm start reads
-    impulses only) or parity breaks.
+- **Persistent-manifold extras** ✅ (2026-09-10): point lifetime
+  counters, friction anchors, contact-processed callbacks.
+  - Impl: `PersistentPoint.lifetime` + `ContactPoint.lifetime` (capture
+    starts at 0, refresh increments survivors — Bullet's `m_lifeTime`
+    with the `replaceContactPoint` reset-on-redetect semantics). The
+    friction anchor is `CollisionFlags::HAS_FRICTION_ANCHOR` (0x0200):
+    the assembly sites project the cached A-side anchor and hand the
+    anchor separation to the row (Bullet's `setupFrictionConstraint`
+    `positionalError` branch, `m_frictionERP = 0.2` — sign flipped on
+    our rows because our friction `rel` is the negation of Bullet's).
+    The processed callback became a world-level opt-in drain
+    (`set_contact_point_events`, `ContactPointEvent { a, b, point }`),
+    cleared each step like `contact_events`.
+  - Files: `bullet-collision/src/manifold.rs`, `solver/sequential_impulse.rs`,
+    `body.rs`, `world.rs`, `world/step.rs`, facade prelude.
+  - Boundaries: the anchor respects the Coulomb cone (clamped by
+    `max_friction` — no super-friction; the scene test pins both sides);
+    multibody contacts ignore the anchor flag and report no point
+    events (no persistent manifold on that path — deviations §1);
+    sensor pairs report point events but solve no rows.
+  - Tests: 2 manifold (lifetime grow / reset-on-replace), 1 solver
+    (servo direction + plain-row no-op), 2 world (Coulomb cone guard,
+    point-event drain with growing lifetimes).
   - Size: M.
 - **CCD candidate pruning** ✅ (2026-09-02): the sweep tests every body linearly;
   Bullet prunes through a broad-phase AABB query first (cost only).
