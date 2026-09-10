@@ -1,7 +1,8 @@
-//! Incremental quickhull — a small deterministic implementation for the
-//! soft-body builders (`create_from_convex_hull` and the ellipsoid's
-//! Hammersley point set), playing the role of Bullet's `HullLibrary`
-//! (`Extras/ConvexDecomposition`).
+//! Incremental quickhull — a small deterministic implementation playing the
+//! role of Bullet's `HullLibrary` (`LinearMath/btConvexHull*`, which
+//! btShapeHull and the soft-body builders share), consumed by the
+//! collision shape hulls and the soft-body builders
+//! (`create_from_convex_hull` and the ellipsoid's Hammersley point set).
 //!
 //! Bullet's hull library re-indexes and merges its output vertices, so its
 //! link/face append order differs from ours; this implementation keeps the
@@ -11,7 +12,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bullet_math::{Real, Vector3};
+use crate::{Real, Vector3};
 
 /// A face of the evolving hull with its outside set.
 struct Face {

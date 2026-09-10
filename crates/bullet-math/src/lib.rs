@@ -16,6 +16,10 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(not(feature = "std"))]
+#[macro_use]
+extern crate alloc;
+
 #[cfg(all(not(feature = "std"), not(feature = "libm")))]
 compile_error!(
     "select a scalar math backend: the \"std\" feature (default) or \"libm\" for no_std builds"
@@ -52,6 +56,7 @@ pub use glam::Affine3A as Transform;
 pub use glam::DAffine3 as Transform;
 
 pub mod compat;
+pub mod quickhull;
 pub mod math;
 
 /// `pi` at the active precision.

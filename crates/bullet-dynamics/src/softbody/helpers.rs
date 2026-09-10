@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use bullet_math::{math, Real, Vector3};
 
 use super::body::SoftBody;
-use super::quickhull::quick_hull;
+use bullet_math::quickhull::quick_hull;
 use super::rng::MsvcRand;
 
 /// Bit flag for [`create_rope`]: pin the first node (Bullet's `fixeds & 1`).
