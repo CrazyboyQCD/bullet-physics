@@ -12,12 +12,17 @@ the analysis text below each report is hand-written).
 > reproduces 0.18–0.39×. The wall-clock sections were **not** re-recorded
 > (no semantic change, no churn). Memory: the `--mem` sections **were**
 > re-recorded (rust-side drift since the 2026-09-04 recording, e.g.
-> stack_1000 live 4.061 → 4.522 MB) — attributed by a git-worktree baseline
-> build at `10ac469` reproducing the identical curve, i.e. the drift is the
-> accumulated footprint of the 09-07/08/09 rounds (event tracking, island
-> eligibility bytes, etc.), **not** the debug-draw API (which adds no world
-> fields and is never called by the perf harness; its emit path is
-> allocation-free by design). Bullet-side numbers reproduced bit-for-bit.
+> stack_1000 live 4.061 → 4.522 MB). A commit-level bisect over the
+> worktree builds attributed the drift precisely: **+0.320 MB at
+> `cead978`** (the solver B1 rel-advance optimization: each contact row
+> grew three pre-folded coupling vectors `kn/kt1/kt2`, and the row pool
+> keeps its cross-step capacity), **+0.125 MB at `6af1123`** (A2: bias
+> invariants hoisted into prepare), the remaining ~0.016 MB spread over
+> 09-05..09-09 — **none of it from the debug-draw API** (adds no world
+> fields, never called by the perf harness, allocation-free emit). The
+> row growth is the direct memory price of the 09-04 solver speedups
+> (stack_1000 1.286 → 0.892 ms on the same round). Bullet-side numbers
+> reproduced bit-for-bit.
 
 ## Methodology
 
