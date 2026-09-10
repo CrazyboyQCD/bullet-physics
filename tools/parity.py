@@ -292,7 +292,9 @@ def update_ledger(scene_name, precision, report_md):
         return
     sec_start = scene_pos + rep_pos
     next_heading = text.find("\n### ", sec_start + len(start_marker))
-    if next_heading < 0:
+    # A scene section with no trailing "### Classification" must not swallow
+    # the next scene's content: clamp the replacement to the section end.
+    if next_heading < 0 or next_heading > end:
         next_heading = end
     updated = text[:sec_start] + new_section + "\n\n" + text[next_heading + 1:]
     with open(LEDGER, "w", encoding="utf-8") as f:
