@@ -1,5 +1,5 @@
 //! Simulation-island construction and sleep/wake propagation (phase D of
-//! `docs/multibody-collision.md`), driven from the pair pass in `step.rs`.
+//! `docs/design/multibody-collision.md`), driven from the pair pass in `step.rs`.
 
 use super::*;
 use crate::body::filter_groups;
@@ -9,7 +9,7 @@ impl PhysicsWorld {
     /// Build the per-step union-find islands and apply the island sleep/wake
     /// decision (Bullet's `calculateSimulationIslands` + the activation pass
     /// of `btSimulationIslandManager::buildIslands`; phase D design
-    /// `docs/multibody-collision.md` §9).
+    /// `docs/design/multibody-collision.md` §9).
     ///
     /// Node space: one node per non-static rigid body (including
     /// `DisableSimulation` — Bullet's tag pass only skips static/kinematic

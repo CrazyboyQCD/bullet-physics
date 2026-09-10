@@ -379,7 +379,7 @@ static void scene_spherical_motor(int frames)
 }
 
 // ---------------------------------------------------------------------------
-// Collider scenes (multibody-collision.md §7): link/base colliders meeting
+// Collider scenes (design/multibody-collision.md §7): link/base colliders meeting
 // static and dynamic rigid bodies. Unlike addColliders above (tiny filler
 // spheres only there to drive the island manager), these attach real shapes
 // and need the FK caches refreshed before the first step.

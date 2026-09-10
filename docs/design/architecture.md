@@ -234,12 +234,12 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
   (contact + constraint rows), with optional world-space / joint-frame
   reporting. `top` = linear force, `bottom` = angular torque.
 - `PhysicsWorld` steps the multibodies inline (the `btMultiBodyDynamicsWorld`
-  fusion, phase A of `docs/multibody-collision.md`): gravity → ABA velocity
+  fusion, phase A of `docs/design/multibody-collision.md`): gravity → ABA velocity
   integration → row conversion + PGS (10×1 iterations, alternating
   direction) → writeback with `±maxCoordinateVelocity` clamping → position
   integration → sleeping check, interleaved with the rigid-body stages.
   Collision integration (`btMultiBodyLinkCollider`) landed with phases B–D
-  of `docs/multibody-collision.md`: link/base colliders register in the
+  of `docs/design/multibody-collision.md`: link/base colliders register in the
   shared broad phase, detect contacts with rigid bodies and each other, and
   solve in the same PGS loop, inside shared simulation islands.
 
@@ -291,7 +291,7 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
 - **Multibody probes**: `tools/multibody_probe.cpp` vs
   `crates/bullet/examples/multibody_probe.rs`, 24 scenes × f32/f64 against
   the real Bullet library (13 multibody-dynamics scenes, the 6 collider
-  scenes of `docs/multibody-collision.md` §7, the joint-feedback pair and
+  scenes of `docs/design/multibody-collision.md` §7, the joint-feedback pair and
   the three multibody-vs-rigidbody constraint scenes, compared with
   `tools/mbdiff.py`; build via `tools/build_multibody_probe.py`).
 - **Soft-body / GImpact probes**: `tools/softbody_probe.cpp` +
@@ -343,7 +343,7 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
 | `btKinematicCharacterController`         | `dynamics::KinematicCharacterController`    |
 | `btRaycastVehicle`                       | `dynamics::RaycastVehicle`                  |
 | `btMultiBody` / `btMultiBodyConstraint` / `btMultiBodyDynamicsWorld` | `multibody::{MultiBody, MultiBodyConstraint}`, stepped by `dynamics::PhysicsWorld` |
-| `btMultiBodyLinkCollider` | `multibody::MultiBody` link/base collider slots registered in the shared broad phase (phases B–D of `docs/multibody-collision.md`) |
+| `btMultiBodyLinkCollider` | `multibody::MultiBody` link/base collider slots registered in the shared broad phase (phases B–D of `docs/design/multibody-collision.md`) |
 | `btRigidBody::setRollingFriction` | `RigidBody.rolling_friction` (torsional rows per contact) |
 | `btMotionState` | `dynamics::MotionState` trait (`initial_pose` / `synchronize`, builder `motion_state(..)`) |
 | `btGhostObject` overlap listing | sensor flag (`CollisionFlags::NO_CONTACT_RESPONSE`) + `PhysicsWorld::overlapping(handle)` |

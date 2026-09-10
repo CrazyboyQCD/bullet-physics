@@ -68,7 +68,7 @@ pub enum SolverPreset {
 /// `defaultCollisionHandler`), exactly like Bullet.
 ///
 /// Only the classic-system flags are defined here; the `SDF_RD*`/`VF_DD`
-/// deformable-system bits are out of scope (see `docs/softbody.md` §1).
+/// deformable-system bits are out of scope (see `docs/design/softbody.md` §1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SoftCollision(pub u32);
 

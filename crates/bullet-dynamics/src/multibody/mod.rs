@@ -7,7 +7,7 @@
 //! [`MultiBodyConstraint`]s (point-to-point, fixed, slider, joint motor,
 //! gear, joint limits) are enforced by the multibody rows solved inside
 //! [`crate::world::PhysicsWorld`] (the fused world of phase A; see
-//! `docs/multibody-collision.md`).
+//! `docs/design/multibody-collision.md`).
 //!
 //! Reference classes: `btMultiBody`, `btMultiBodyConstraint`,
 //! `btMultiBodyConstraintSolver`, `btMultiBodyDynamicsWorld`.

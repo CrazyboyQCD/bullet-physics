@@ -20,7 +20,7 @@ library boundaries:
 | `bullet-dynamics` | Rigid bodies, simulation world, constraint solvers                 | `BulletDynamics`  |
 | `bullet`          | Facade crate re-exporting the full API                             | —                 |
 
-See [docs/architecture.md](docs/architecture.md) for the detailed design.
+See [docs/design/architecture.md](docs/design/architecture.md) for the detailed design.
 
 ## Precision features
 

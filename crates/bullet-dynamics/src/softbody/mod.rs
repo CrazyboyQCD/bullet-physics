@@ -9,7 +9,7 @@
 //! contacts before writing the velocities back from the corrected
 //! positions. Stepping is owned by [`crate::world::PhysicsWorld`]
 //! (insertion points follow `btSoftRigidDynamicsWorld`; see
-//! `docs/softbody.md` §4).
+//! `docs/design/softbody.md` §4).
 //!
 //! Reference classes: `btSoftBody`, `btSoftBodyHelpers`,
 //! `btSoftRigidDynamicsWorld`.

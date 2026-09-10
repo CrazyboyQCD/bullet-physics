@@ -172,7 +172,7 @@ Standing decisions — do not re-add these to the plan because an API gap
 exists:
 
 - `btDeformable*` system (NeoHookean / backward-Euler / Krylov; deformable
-  contact projection) — `docs/softbody.md` §11.
+  contact projection) — `docs/design/softbody.md` §11.
 - `BulletReducedDeformableBody` (reduced deformable).
 - VHACD / HACD / ConvexDecomposition runtime integration (offline tooling
   at most, separate crates if ever).

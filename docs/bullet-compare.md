@@ -855,7 +855,7 @@ f64 pair of the f32 scene above: identical pattern and classification - one-step
 
 ## Multibody collider probes (2026-08-25)
 
-The §7 collider scenes of `docs/multibody-collision.md` (phase C's missing
+The §7 collider scenes of `docs/design/multibody-collision.md` (phase C's missing
 numerical validation) recorded as extended probe scenes rather than the
 scenes.json pipeline: `tools/multibody_probe(.cpp/_f64.exe) <scene>` vs
 `cargo run -p bullet [--features f64] --example multibody_probe -- <scene>`,

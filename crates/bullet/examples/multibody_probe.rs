@@ -444,7 +444,7 @@ fn scene_spherical_motor(dt: Real, frames: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// Collider scenes (multibody-collision.md §7): link/base colliders meeting
+// Collider scenes (design/multibody-collision.md §7): link/base colliders meeting
 // static and dynamic rigid bodies. Mirrors the C++ twins scene for scene.
 // ---------------------------------------------------------------------------
 

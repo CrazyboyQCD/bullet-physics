@@ -277,7 +277,7 @@ All assertions measured, f32 and f64:
 | Target filter chain | self/removed/sensor/suppression/group-mask/pair-filter/pretest | self/group-mask/overlap-filter/`checkCollideWithOverride`/`hasContactResponse`/direction guard (`:771-836`) | sensor was missing → **C-1 fixed**; direction guard = deviation 1 | match after fix |
 | Clamp | position-only retraction by fraction | full-transform re-prediction (`:1005-1006`) + `proceedToTransform` | rotation not rewound | deviation 2 |
 | Target selection | min fraction over valid hits | closest-hit callback | none | match |
-| Sweep targets | rigid bodies only | all collision objects (incl. multibody colliders, soft-body objects) | link/soft targets not swept | implementation difference (link-side already documented in `docs/multibody-collision.md`; target side recorded here) |
+| Sweep targets | rigid bodies only | all collision objects (incl. multibody colliders, soft-body objects) | link/soft targets not swept | implementation difference (link-side already documented in `docs/design/multibody-collision.md`; target side recorded here) |
 | Detection snapshot | consistent pre-integration snapshot for all targets | in-loop `proceedToTransform` writes back per body (order-dependent poses) | only observable with two fast bodies sweeping each other | implementation difference |
 | Contact anticipation | predicted-pose narrow phase (deviations §1 "Contact detection pose") | `createPredictiveContacts` for CCD movers (`:856-905`) | different mechanism, same purpose | already documented |
 

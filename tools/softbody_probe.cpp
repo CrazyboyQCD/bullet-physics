@@ -1,7 +1,7 @@
 // SoftBody probe: runs btSoftBody rope/cloth scenes against the real Bullet
 // library and prints per-frame trajectories for numerical comparison against
 // the Rust port (phase B of the classic btSoftBody port — see
-// docs/softbody.md §10).
+// docs/design/softbody.md §10).
 //
 // Scenes:
 //   rope_pendulum  rope pinned at one end and released horizontally — pure

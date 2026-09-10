@@ -412,4 +412,4 @@ S/M/L · **See** = existing notes.
 - **Toy world variants**: `btSimpleDynamicsWorld` /
   `btContinuousDynamicsWorld` — deliberately not ported. No action.
 - **Deformable system**: `btDeformable*` (NeoHookean, reduced volumes)
-  — explicitly out of scope, tracked in `softbody.md` §11. No action.
+  — explicitly out of scope, tracked in `design/softbody.md` §11. No action.

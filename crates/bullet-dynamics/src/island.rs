@@ -1,6 +1,6 @@
 //! Simulation islands — the union-find core of Bullet's
 //! `btUnionFind` + `btSimulationIslandManager`, phase D of the multibody
-//! collision integration (detailed design `docs/multibody-collision.md` §9).
+//! collision integration (detailed design `docs/design/multibody-collision.md` §9).
 //!
 //! Each step, dynamic rigid bodies and multibodies become nodes of a
 //! union-find merged by broad-phase AABB pairs (conservatively: owners whose

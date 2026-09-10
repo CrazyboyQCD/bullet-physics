@@ -26,7 +26,7 @@ no one has done a dedicated source-level review of that subsystem yet.
 
 | Subsystem | Status | Evidence today | Audit record |
 |---|---|---|---|
-| World / step pipeline | 🟡 | 350 unit tests ×2; parity 8 scenes × f32/f64; stepping order documented in `docs/architecture.md` §7 | — |
+| World / step pipeline | 🟡 | 350 unit tests ×2; parity 8 scenes × f32/f64; stepping order documented in `docs/design/architecture.md` §7 | — |
 | RigidBody | 🟡 | unit tests; kinematic / motion-state / rolling-friction semantics documented | — |
 | Solver (sequential impulse) | 🟡 | parity stacks; solver-info defaults audited 2026-09-01 (deviations §1/§2) | — |
 | Persistent Manifold | 🟡 | **audit-complete** 2026-09-08 (`01-manifold.md`): 18 decision points covered, 4 queued risks resolved, D1–D3 accepted deviations pinned by 11 adversarial tests (`ba3cd9a`; D1 is behavioral: contact-patch coverage / manifold adaptation, no instability reproduced) | `01-manifold.md` |

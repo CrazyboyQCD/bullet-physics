@@ -3,7 +3,7 @@
 //! `setupMultiBodyContactConstraint` (row assembly), the mixed
 //! multibody/rigid branches of `resolveSingleConstraintRowGeneric` (the PGS
 //! row solve) and `writeBackSolverBodyToMultiBody` (impulse + feedback
-//! writeback). See `docs/multibody-collision.md` §3 for the recipe.
+//! writeback). See `docs/design/multibody-collision.md` §3 for the recipe.
 //!
 //! Unlike the non-contact [`SolverRow`](super::constraint::SolverRow), either
 //! side of a contact row can be a rigid body: the rigid side's response is

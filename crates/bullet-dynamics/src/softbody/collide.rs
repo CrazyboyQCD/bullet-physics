@@ -1,6 +1,6 @@
 //! Soft-body collision — SDF_RS (nodes vs rigid bodies) with exact
 //! distances (phase B; soft-soft VF_SS and cluster CL_* arrive later —
-//! see `docs/softbody.md` §5/§10).
+//! see `docs/design/softbody.md` §5/§10).
 //!
 //! Bullet's `checkContact` samples a sparse signed-distance field cached
 //! over the rigid shape; we query the exact point-shape distance instead

@@ -1,7 +1,7 @@
 //! Soft-body simulation kernels — port of `btSoftBody`'s `predictMotion` /
 //! `solveConstraints` / `staticSolve` and the position/velocity solver
 //! functions (phase A: links only; contacts and anchors arrive with the
-//! collision phase — see `docs/softbody.md` §10).
+//! collision phase — see `docs/design/softbody.md` §10).
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

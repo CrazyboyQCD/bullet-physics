@@ -311,7 +311,7 @@ impl Default for Pose {
 /// A rope/cloth/volumetric soft body simulated with position-based dynamics
 /// (Bullet's `btSoftBody`, classic system). Phase A of the port covers the
 /// node/link skeleton; contacts, faces, tetras, clusters and joints follow
-/// in later phases — see `docs/softbody.md` §10.
+/// in later phases — see `docs/design/softbody.md` §10.
 ///
 /// Unlike Bullet, gravity is supplied by the owning
 /// [`crate::world::PhysicsWorld`] at step time instead of a
@@ -369,7 +369,7 @@ pub struct SoftBody {
     pub wind_velocity: Vector3,
     /// Air density for the aero forces (Bullet's
     /// `SoftBodyWorldInfo::air_density`, default 1.2; the water medium is
-    /// not ported — see `docs/softbody.md` §1).
+    /// not ported — see `docs/design/softbody.md` §1).
     pub air_density: Real,
     /// Contacts against rigid bodies this step (Bullet's `m_rcontacts`,
     /// cleared in `predict_motion`, filled by the collision phase).

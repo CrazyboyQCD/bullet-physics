@@ -184,7 +184,7 @@ pub type PairFilter = dyn Fn(BodyHandle, &RigidBody, BodyHandle, &RigidBody) -> 
 /// extended with the Featherstone multibody list of `btMultiBodyDynamicsWorld`
 /// (phase A of the collision-integration design: one fused world, stepping
 /// both subsystems; link-collider collision integration follows in later
-/// phases — see `docs/multibody-collision.md`).
+/// phases — see `docs/design/multibody-collision.md`).
 pub struct PhysicsWorld {
     bodies: Vec<RigidBody>,
     broadphase: BroadPhaseBackend,
@@ -285,7 +285,7 @@ pub struct PhysicsWorld {
     /// Position-based soft bodies (Bullet's `btSoftBody` list of
     /// `btSoftRigidDynamicsWorld`); each body owns one broad-phase proxy
     /// over its node-hull bounds (phase B: SDF_RS contacts and anchors;
-    /// soft-soft and clusters follow — see `docs/softbody.md` §4/§10).
+    /// soft-soft and clusters follow — see `docs/design/softbody.md` §4/§10).
     soft_bodies: Vec<SoftBody>,
     /// Broad-phase proxy of each soft body.
     soft_proxies: Vec<usize>,

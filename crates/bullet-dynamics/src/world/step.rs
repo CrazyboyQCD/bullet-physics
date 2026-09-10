@@ -121,7 +121,7 @@ impl PhysicsWorld {
         // 1s. Soft bodies: integrate the nodes to their predicted positions
         // (Bullet's `predictMotion`, driven from `predictUnconstraintMotion`
         // after the rigid velocity integration; insertion map
-        // `docs/softbody.md` §4).
+        // `docs/design/softbody.md` §4).
         let gravity = self.gravity;
         for sb in &mut self.soft_bodies {
             sb.predict_motion(dt, gravity);
@@ -193,7 +193,7 @@ impl PhysicsWorld {
         let pairs = self.broadphase.compute_pairs();
         clk.mark(&mut self.step_timings, StepStage::Broadphase);
 
-        // 4b. Simulation islands (phase D, docs/multibody-collision.md §9):
+        // 4b. Simulation islands (phase D, docs/design/multibody-collision.md §9):
         // union rigid bodies and multibodies by broad-phase pairs, joints
         // and multibody constraints, then decide sleep/wake per island —
         // the island-based replacement of the former one-hop wake-up pass
@@ -896,7 +896,7 @@ impl PhysicsWorld {
         // runs `solveSoftBodiesConstraints` after the rigid bodies are fully
         // stepped (solved *and* integrated), so contacts read the solved
         // rigid velocities and any impulses applied to rigid bodies land on
-        // the next step — kept identical here (see `docs/softbody.md` §0/§4).
+        // the next step — kept identical here (see `docs/design/softbody.md` §0/§4).
         // The cluster contact joints solve globally first (Bullet's static
         // `btSoftBody::solveClusters` over all bodies). The multibody
         // context carries the link contacts' jacobian buffers (phase F).
