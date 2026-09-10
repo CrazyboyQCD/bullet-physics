@@ -16,6 +16,7 @@ mod convex_hull;
 mod cylinder;
 mod heightfield;
 mod plane;
+mod shape_hull;
 mod sphere;
 mod triangle_mesh;
 
@@ -27,6 +28,7 @@ pub use convex_hull::ConvexHull;
 pub use cylinder::Cylinder;
 pub use heightfield::Heightfield;
 pub use plane::Plane;
+pub use shape_hull::ShapeHull;
 pub use sphere::Sphere;
 pub use triangle_mesh::TriangleMesh;
 
