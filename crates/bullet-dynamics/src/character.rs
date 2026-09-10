@@ -39,6 +39,12 @@ pub struct KinematicCharacterController {
     fall_speed: Real,
     /// Jump speed (Bullet's default 10 m/s).
     jump_speed: Real,
+    /// The user-configured jump speed (Bullet's `m_SetjumpSpeed`):
+    /// [`Self::set_jump_speed`] writes both speeds, while a directional
+    /// [`Self::jump_direction`] overwrites only the active
+    /// `jump_speed` for that jump and every later axis-aligned one until
+    /// the configured value is set again.
+    saved_jump_speed: Real,
     /// Cosine of the maximum walkable slope angle.
     max_slope_cosine: Real,
     /// Penetration depth above which `recover_from_penetration` pushes the
@@ -77,6 +83,7 @@ impl KinematicCharacterController {
             gravity: 9.8 * 3.0, // Bullet's 3G default.
             fall_speed: 55.0,
             jump_speed: 10.0,
+            saved_jump_speed: 10.0,
             max_slope_cosine: math::cos(core::f32::consts::FRAC_PI_4 as Real), // 45 degrees.
             max_penetration_depth: 0.2,
             walk_direction: Vector3::ZERO,
@@ -151,11 +158,36 @@ impl KinematicCharacterController {
         }
     }
 
-    /// Start a jump along the up axis (Bullet's `jump()`).
+    /// Start a jump along the up axis (Bullet's `jump()` with its default
+    /// zero direction).
     pub fn jump(&mut self) {
+        self.jump_speed = self.saved_jump_speed;
         self.vertical_velocity = self.jump_speed;
         self.was_jumping = true;
         self.jump_axis = self.up;
+    }
+
+    /// Start a jump along `direction` (Bullet's `jump(v)` with a non-zero
+    /// vector): the jump speed becomes the direction's length (overwriting
+    /// the configured speed until [`Self::set_jump_speed`] restores it) and
+    /// the jump axis becomes the normalized direction, so the character
+    /// leaps sideways or diagonally instead of straight up. A zero vector
+    /// falls back to the plain up-axis jump.
+    pub fn jump_direction(&mut self, direction: Vector3) {
+        if direction.length_squared() > 0.0 {
+            self.jump_speed = direction.length();
+            self.vertical_velocity = self.jump_speed;
+            self.was_jumping = true;
+            self.jump_axis = direction.normalize();
+        } else {
+            self.jump();
+        }
+    }
+
+    /// Point the jump axis (Bullet's `setJumpAxis`, stored unnormalized).
+    /// The next [`Self::jump`] overwrites it with the up axis again.
+    pub fn set_jump_axis(&mut self, axis: Vector3) {
+        self.jump_axis = axis;
     }
 
     /// Set gravity; the up axis is realigned to `-gravity` (Bullet's
@@ -186,6 +218,7 @@ impl KinematicCharacterController {
 
     pub fn set_jump_speed(&mut self, s: Real) {
         self.jump_speed = s;
+        self.saved_jump_speed = s;
     }
 
     pub fn set_max_penetration_depth(&mut self, d: Real) {
@@ -641,5 +674,68 @@ mod tests {
             "final y = {}",
             controller.position().y
         );
+    }
+    
+    /// A directional jump (`jump_direction`, Bullet's `jump(v)`) carries the
+    /// character along the jump axis while it rises; the plain jump keeps
+    /// the character on the spot horizontally. The directional speed also
+    /// overwrites the active jump speed until `set_jump_speed` restores it
+    /// (Bullet's `m_SetjumpSpeed` behavior).
+    #[test]
+    fn character_directional_jump_moves_along_the_jump_axis() {
+        let dt = DT;
+        // Plain jump: no horizontal motion.
+        let (mut world, mut controller) = flat_world();
+        controller.jump();
+        let (mut plain_x, mut plain_max_y) = (controller.position().x, 0.0 as Real);
+        for _ in 0..120 {
+            world.step_simulation(dt);
+            controller.update(&mut world, dt);
+            plain_x = controller.position().x;
+            plain_max_y = plain_max_y.max(controller.position().y);
+        }
+        assert!(plain_max_y > 2.0, "plain jump apex too low: {plain_max_y}");
+        assert!(plain_x.abs() < 1e-4, "plain jump drifted: x = {plain_x}");
+    
+        // Diagonal jump along (1, 0.5, 0).normalize(): rises while moving
+        // toward +x.
+        let (mut world, mut controller) = flat_world();
+        let speed = 12.0;
+        controller.jump_direction(Vector3::new(1.0, 0.5, 0.0) * speed);
+        let mut diag_max_x = controller.position().x;
+        for _ in 0..120 {
+            world.step_simulation(dt);
+            controller.update(&mut world, dt);
+            diag_max_x = diag_max_x.max(controller.position().x);
+        }
+        // Landing back on the ground happened well before the 120 steps.
+        assert!(
+            (controller.position().y - 1.2).abs() < 0.05,
+            "final y = {}",
+            controller.position().y
+        );
+        assert!(
+            diag_max_x > 0.5,
+            "diagonal jump did not travel along the axis: {diag_max_x}"
+        );
+    
+        // The directional jump overwrote the active jump speed (its length);
+        // a follow-up plain jump uses the *configured* speed again (10).
+        let (mut world, mut controller) = flat_world();
+        controller.jump_direction(Vector3::new(1.0, 0.5, 0.0) * speed);
+        // Land first (airborne ~0.68 s at 3G).
+        for _ in 0..60 {
+            world.step_simulation(dt);
+            controller.update(&mut world, dt);
+        }
+        controller.jump();
+        let mut apex = controller.position().y;
+        for _ in 0..90 {
+            world.step_simulation(dt);
+            controller.update(&mut world, dt);
+            apex = apex.max(controller.position().y);
+        }
+        // Apex ~ v² / (2 · 3g) with v = 10 → ~1.7 m above the ground.
+        assert!((apex - 1.2 - 1.70).abs() < 0.2, "restored apex = {apex}");
     }
 }
