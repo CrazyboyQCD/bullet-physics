@@ -38,5 +38,6 @@ pub use softbody::{
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
 pub use timing::{StepStage, StepTimings, STEP_STAGES};
 pub use world::{
-    CollisionEvent, CollisionObject, ConstraintTag, DebugDrawFlags, DebugPrim, PhysicsWorld,
+    CollisionEvent, CollisionObject, ContactPointEvent, ConstraintTag, DebugDrawFlags, DebugPrim,
+    PhysicsWorld,
 };

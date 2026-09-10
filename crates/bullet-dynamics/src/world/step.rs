@@ -81,6 +81,7 @@ impl PhysicsWorld {
         // Collision events are per-step (Rapier's drain): the new step
         // rebuilds the buffer and the touching set from scratch.
         self.contact_events.clear();
+        self.contact_point_events.clear();
         self.touching.clear();
         self.rolling_rows.clear();
         // Joint-collision suppression is re-derived from the current
@@ -476,6 +477,14 @@ impl PhysicsWorld {
                 .contains(CollisionFlags::NO_CONTACT_RESPONSE)
                 || b.collision_flags
                     .contains(CollisionFlags::NO_CONTACT_RESPONSE);
+            // Friction anchoring is a pair property: either side opting in
+            // anchors the contact (Bullet sets the point flag from either
+            // body's `CF_HAS_FRICTION_ANCHOR` in `btManifoldResult`).
+            let anchored = a
+                .collision_flags
+                .contains(CollisionFlags::HAS_FRICTION_ANCHOR)
+                || b.collision_flags
+                    .contains(CollisionFlags::HAS_FRICTION_ANCHOR);
             // Both sides immovable (Bullet's broadphase StaticFilter group
             // excludes static-kinematic and kinematic-kinematic pairs
             // outright): detection could only produce rows the solver would
@@ -516,7 +525,15 @@ impl PhysicsWorld {
                     if !no_response {
                         for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
                             cp.normal_impulse *= WARM_STARTING_FACTOR;
-                            let mut row = ContactConstraint::prepare(i, j, &cp, a, b, k as u32);
+                            // The refreshed points line up with the cache
+                            // entries (`retain_mut` keeps the order), so
+                            // entry k yields the A-side anchor of contact k.
+                            let anchor_disp = anchored.then(|| {
+                                let cached = &cache.points()[k];
+                                pa + a.orientation * cached.local_a - cp.position
+                            });
+                            let mut row =
+                                ContactConstraint::prepare(i, j, &cp, a, b, k as u32, anchor_disp);
                             row.attach_rolling(a, b, &mut self.rolling_rows);
                             self.contact_rows.push(row);
                         }
@@ -526,6 +543,15 @@ impl PhysicsWorld {
                     {
                         self.touching
                             .push((ContactKey::body(i.min(j)), ContactKey::body(i.max(j))));
+                    }
+                    if self.contact_point_events_enabled {
+                        for cp in &self.refresh_out {
+                            self.contact_point_events.push(ContactPointEvent {
+                                a: BodyHandle::from_index(i),
+                                b: BodyHandle::from_index(j),
+                                point: *cp,
+                            });
+                        }
                     }
                     served_from_cache = true;
                 }
@@ -564,10 +590,17 @@ impl PhysicsWorld {
                     .min(b.shape.contact_breaking_threshold());
                 cache.capture(&manifold, pa, a.orientation, pb, b.orientation, threshold);
                 cache.refresh(pa, a.orientation, pb, b.orientation, &mut self.refresh_out);
-                                if !no_response {
+                if !no_response {
                     for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
                         cp.normal_impulse *= WARM_STARTING_FACTOR;
-                        let mut row = ContactConstraint::prepare(i, j, &cp, a, b, k as u32);
+                        // Same cache alignment as the refresh path: entry k
+                        // is the A-side anchor of contact k.
+                        let anchor_disp = anchored.then(|| {
+                            let cached = &cache.points()[k];
+                            pa + a.orientation * cached.local_a - cp.position
+                        });
+                        let mut row =
+                            ContactConstraint::prepare(i, j, &cp, a, b, k as u32, anchor_disp);
                         row.attach_rolling(a, b, &mut self.rolling_rows);
                         self.contact_rows.push(row);
                     }
@@ -575,6 +608,15 @@ impl PhysicsWorld {
                 if a.collision_events || b.collision_events || no_response {
                     self.touching
                         .push((ContactKey::body(i.min(j)), ContactKey::body(i.max(j))));
+                }
+                if self.contact_point_events_enabled {
+                    for cp in &self.refresh_out {
+                        self.contact_point_events.push(ContactPointEvent {
+                            a: BodyHandle::from_index(i),
+                            b: BodyHandle::from_index(j),
+                            point: *cp,
+                        });
+                    }
                 }
             } else {
                 // Detection found nothing: the pair separated past the
@@ -2592,5 +2634,105 @@ mod tests {
                 "immovable bodies must not synchronize"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Persistent-manifold extras: friction anchor, contact-point events.
+    // ------------------------------------------------------------------
+
+    /// Friction anchoring must not violate the Coulomb cone: with
+    /// `μ < tan θ` (friction saturated) an anchored box slides just like a
+    /// plain one, and with ample friction both rest — the anchor servo
+    /// (Bullet's `BT_CONTACT_FLAG_FRICTION_ANCHOR`) only ever spends the
+    /// friction budget's slack, it never adds force.
+    #[test]
+    fn friction_anchor_respects_the_coulomb_cone() {
+        let end_position = |anchored: bool, friction: Real| -> Vector3 {
+            let mut world = PhysicsWorld::new();
+            world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
+            let mut ramp = RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(8.0, 0.5, 2.0)),
+                Vector3::ZERO,
+            );
+            // ~15 degrees: `tan ≈ 0.27`. The pair friction is the
+            // *product* of the two coefficients, so 0.9/0.9 → 0.81 rests
+            // almost immediately and 0.2/0.2 saturates.
+            ramp.orientation = Quaternion::from_rotation_z(-0.26);
+            ramp.friction = friction;
+            world.add_body(ramp);
+            let mut cube = RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.4)),
+                Vector3::new(0.0, 1.2, 0.0),
+                1.0,
+            );
+            cube.friction = friction;
+            if anchored {
+                cube.collision_flags = crate::body::CollisionFlags::HAS_FRICTION_ANCHOR;
+            }
+            let cube = world.add_body(cube);
+            for _ in 0..120 {
+                world.step_simulation(1.0 / 60.0);
+            }
+            world.body(cube).position
+        };
+        // Saturated friction (`0.2 < tan θ`): both slide down, the anchor
+        // cannot hold.
+        let plain = end_position(false, 0.2);
+        let anchored = end_position(true, 0.2);
+        assert!(plain.x > 0.3, "plain box must slide: x = {plain}");
+        assert!(
+            anchored.x > 0.3,
+            "anchor must not act as super-friction: x = {anchored}"
+        );
+    }
+
+    /// With `set_contact_point_events` enabled, every step reports one
+    /// event per surviving point of a touching rigid pair (Bullet's
+    /// `gContactProcessedCallback` remapped onto a drain), the payload
+    /// handle is the higher side of the pair, and the point lifetime grows
+    /// while the contact persists; nothing is collected while disabled.
+    #[test]
+    fn contact_point_events_report_surviving_points() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        world.set_contact_point_events(true);
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        ));
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 1.05, 0.0),
+            1.0,
+        ));
+        let mut seen = 0;
+        let mut max_lifetime = 0;
+        for _ in 0..30 {
+            world.step_simulation(dt);
+            for ev in world.contact_point_events() {
+                // `a < b`: the plane was added first, the ball second.
+                assert_eq!(ev.b, ball);
+                seen += 1;
+                max_lifetime = max_lifetime.max(ev.point.lifetime);
+            }
+        }
+        assert!(seen > 0, "no contact-point events collected");
+        assert!(max_lifetime > 5, "lifetime did not grow: {max_lifetime}");
+
+        // Disabled: the buffer stays empty.
+        let mut quiet = PhysicsWorld::new();
+        quiet.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        ));
+        quiet.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 1.05, 0.0),
+            1.0,
+        ));
+        for _ in 0..10 {
+            quiet.step_simulation(dt);
+        }
+        assert!(quiet.contact_point_events().is_empty());
     }
 }

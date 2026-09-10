@@ -20,6 +20,10 @@ pub struct ContactPoint {
     pub normal_impulse: Real,
     /// Accumulated friction impulses along two tangent axes.
     pub tangent_impulse: [Real; 2],
+    /// Age of the contact in steps (Bullet's `m_lifeTime`, its
+    /// `getLifeTime()` accessor): 0 on a freshly detected point, +1 on every
+    /// refresh of a surviving cached point.
+    pub lifetime: u32,
 }
 
 impl ContactPoint {
@@ -31,6 +35,7 @@ impl ContactPoint {
             penetration,
             normal_impulse: 0.0,
             tangent_impulse: [0.0; 2],
+            lifetime: 0,
         }
     }
 }
@@ -129,6 +134,11 @@ pub struct PersistentPoint {
     /// Accumulated normal impulse from the last solve, inherited by points
     /// that persist across steps (warm starting).
     pub normal_impulse: Real,
+    /// Age of the contact in steps (Bullet's `m_lifeTime`): incremented on
+    /// every refresh of a surviving point, reset to zero by a re-detection
+    /// that replaces it (Bullet's `replaceContactPoint` stores the fresh
+    /// point, whose lifetime is 0).
+    pub lifetime: u32,
 }
 
 /// Relative-pose drift (translation in meters, rotation in radians)
@@ -257,10 +267,12 @@ impl PersistentManifold {
                 return false;
             }
             p.penetration = penetration;
+            p.lifetime += 1;
             let mut cp = ContactPoint::new(wb, p.normal, penetration);
             // Carry the accumulated impulse so the solver warm-starts from
             // it (the writeback stores it back after the solve).
             cp.normal_impulse = p.normal_impulse;
+            cp.lifetime = p.lifetime;
             out.push(cp);
             true
         });
@@ -337,6 +349,7 @@ impl PersistentManifold {
                 normal: cp.normal,
                 penetration: cp.penetration,
                 normal_impulse: 0.0,
+                lifetime: 0,
             };
             if let Some(slot) = self.points.iter_mut().find(|o| {
                 (o.local_a - point.local_a).length_squared() < threshold_sq
@@ -541,6 +554,74 @@ mod tests {
         assert_eq!(cache.points().len(), 2);
         assert_relative_eq!(cache.points()[0].normal_impulse, 5.0);
         assert_relative_eq!(cache.points()[1].normal_impulse, 0.0);
+    }
+
+    #[test]
+    fn refresh_increments_the_lifetime_of_surviving_points() {
+        let (manifold, pos_a, pos_b) = resting_contact(0.01);
+        let mut cache = PersistentManifold::new();
+        cache.capture(
+            &manifold,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
+        // The detection itself does not count as a refresh (Bullet's new
+        // points carry `m_lifeTime == 0`).
+        assert_eq!(cache.points()[0].lifetime, 0);
+        let mut out = Vec::new();
+        for step in 1..=3u32 {
+            cache.refresh(
+                pos_a,
+                Quaternion::IDENTITY,
+                pos_b,
+                Quaternion::IDENTITY,
+                &mut out,
+            );
+            assert_eq!(out.len(), 1);
+            // The cache entry and the emitted contact point agree.
+            assert_eq!(cache.points()[0].lifetime, step);
+            assert_eq!(out[0].lifetime, step);
+        }
+    }
+
+    #[test]
+    fn capture_resets_the_lifetime_of_replaced_points() {
+        let (manifold, pos_a, pos_b) = resting_contact(0.01);
+        let mut cache = PersistentManifold::new();
+        cache.capture(
+            &manifold,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
+        let mut out = Vec::new();
+        for _ in 0..5 {
+            cache.refresh(
+                pos_a,
+                Quaternion::IDENTITY,
+                pos_b,
+                Quaternion::IDENTITY,
+                &mut out,
+            );
+        }
+        assert_eq!(cache.points()[0].lifetime, 5);
+        // Re-detection at the same pose matches the cached point and
+        // replaces it (Bullet's `replaceContactPoint` stores the fresh
+        // point): the lifetime restarts from zero.
+        cache.capture(
+            &manifold,
+            pos_a,
+            Quaternion::IDENTITY,
+            pos_b,
+            Quaternion::IDENTITY,
+            CONTACT_BREAKING_THRESHOLD,
+        );
+        assert_eq!(cache.points()[0].lifetime, 0);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use crate::timing::{default_step_clock, StepClock, StepStage, StepTimings};
 
 use bullet_collision::broadphase::{BroadPhase, BroadPhaseBackend};
-use bullet_collision::manifold::{ContactManifold, PersistentManifold, CONTACT_BREAKING_THRESHOLD};
+use bullet_collision::manifold::{ContactManifold, ContactPoint, PersistentManifold, CONTACT_BREAKING_THRESHOLD};
 use bullet_collision::narrowphase::{self, epa::EpaScratch, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
 use bullet_collision::shapes::CompoundChild;
@@ -124,6 +124,25 @@ pub enum CollisionEvent {
         b: CollisionObject,
         sensor: bool,
     },
+}
+
+/// A per-contact-point event, drained every step (Bullet's
+/// `gContactProcessedCallback` remapped onto a world-level buffer instead
+/// of a process-global function pointer). Emitted for every surviving
+/// point of every touching rigid pair's persistent manifold — fresh
+/// (lifetime 0) and long-lived points alike, mirroring the callback's
+/// "every valid point, every step" firing pattern — but only while
+/// [`PhysicsWorld::set_contact_point_events`] is enabled. Multibody and
+/// soft contacts carry no persistent manifold, so they report no point
+/// events.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactPointEvent {
+    /// The lower rigid-body handle of the pair.
+    pub a: BodyHandle,
+    /// The higher rigid-body handle of the pair.
+    pub b: BodyHandle,
+    /// The surviving contact point (see [`ContactPoint::lifetime`]).
+    pub point: ContactPoint,
 }
 
 /// One side of the tracked-pair id: a kind tag over the object's slot
@@ -244,6 +263,13 @@ pub struct PhysicsWorld {
     /// Collision events of the last step, cleared at the start of each
     /// step (Rapier's post-step drain buffer).
     contact_events: Vec<CollisionEvent>,
+    /// Per-contact-point events of the last step, cleared at the start of
+    /// each step; collected only while `contact_point_events_enabled`.
+    contact_point_events: Vec<ContactPointEvent>,
+    /// Whether per-contact-point events are collected at all (the
+    /// world-level equivalent of `gContactProcessedCallback` being
+    /// installed).
+    contact_point_events_enabled: bool,
     /// Broad-phase proxy id for each rigid body (proxy ids are shared with
     /// the multibody link colliders, so they no longer coincide with body
     /// indices).
@@ -348,6 +374,8 @@ impl PhysicsWorld {
             prev_touching: Vec::new(),
             touching: Vec::new(),
             contact_events: Vec::new(),
+            contact_point_events: Vec::new(),
+            contact_point_events_enabled: false,
             body_proxies: Vec::new(),
             collider_entries: Vec::new(),
             proxy_owners: Vec::new(),
@@ -644,6 +672,34 @@ impl PhysicsWorld {
     /// empty.
     pub fn take_contact_events(&mut self) -> Vec<CollisionEvent> {
         core::mem::take(&mut self.contact_events)
+    }
+
+    /// Enable per-contact-point event collection for rigid pairs (Bullet's
+    /// `gContactProcessedCallback` as an opt-in world-level drain). While
+    /// enabled, every step fills the buffer with one event per surviving
+    /// point of every touching rigid pair — including the sensor
+    /// (`NO_CONTACT_RESPONSE`) pairs, which solve no response but still
+    /// report their points; disabled, nothing is collected. The buffer is
+    /// cleared at the start of the next
+    /// [`PhysicsWorld::step_simulation`] (or drained immediately with
+    /// [`PhysicsWorld::take_contact_point_events`]).
+    pub fn set_contact_point_events(&mut self, enabled: bool) {
+        self.contact_point_events_enabled = enabled;
+        if !enabled {
+            self.contact_point_events.clear();
+        }
+    }
+
+    /// The per-contact-point events of the step that ran last (empty unless
+    /// [`PhysicsWorld::set_contact_point_events`] is enabled).
+    pub fn contact_point_events(&self) -> &[ContactPointEvent] {
+        &self.contact_point_events
+    }
+
+    /// Take the per-contact-point events of the last step, leaving the
+    /// buffer empty.
+    pub fn take_contact_point_events(&mut self) -> Vec<ContactPointEvent> {
+        core::mem::take(&mut self.contact_point_events)
     }
 
     /// The persistent overlap list of a body (the query surface of Bullet's

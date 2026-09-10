@@ -23,6 +23,9 @@ pub(crate) const RESTITUTION_THRESHOLD: Real = 1.0;
 const SPLIT_IMPULSE_PENETRATION_THRESHOLD: Real = 0.04;
 /// Split-impulse positional correction factor (Bullet's `m_erp2`).
 const SPLIT_ERP2: Real = 0.2;
+/// Positional error reduction of the friction-anchor bias (Bullet's
+/// `m_frictionERP`, `btContactSolverInfo` default 0.2).
+const FRICTION_ERP: Real = 0.2;
 /// Orientation scaling for the split-impulse turn velocity (Bullet's
 /// `m_splitImpulseTurnErp`, applied in `writebackVelocityAndTransform`).
 pub(crate) const SPLIT_TURN_ERP: Real = 0.1;
@@ -103,6 +106,18 @@ pub struct ContactConstraint {
     /// pool lives outside this struct to keep the hot-path footprint of
     /// every row unchanged — most scenes run without rolling friction).
     rolling: Option<u32>,
+    /// Friction-anchor targets per tangent axis (Bullet's
+    /// `BT_CONTACT_FLAG_FRICTION_ANCHOR` branch of
+    /// `setupFrictionConstraint`): `-((wa - wb)·tangent) · m_frictionERP`,
+    /// built once at `prepare` from the cached world anchors of the
+    /// persistent-manifold point (Bullet reads the refreshed
+    /// `m_positionWorldOnA/B` at row setup). The solve multiplies by
+    /// `inv_dt` to form the positional bias that pulls the pair's world
+    /// anchors back together along the tangent plane. Both zeros unless a
+    /// pair side carries [`CollisionFlags::HAS_FRICTION_ANCHOR`]; a zero
+    /// target leaves the friction row exactly as before (`vt - 0.0 == vt`
+    /// bit-for-bit).
+    anchor: [Real; 2],
 }
 
 /// The two torsional-friction rows of one contact point (Bullet's
@@ -283,6 +298,7 @@ impl ContactConstraint {
         a: &RigidBody,
         b: &RigidBody,
         point_index: u32,
+        anchor_disp: Option<Vector3>,
     ) -> Self {
         let normal = cp.normal;
         let (tangent1, tangent2) = tangent_basis(normal);
@@ -342,6 +358,27 @@ impl ContactConstraint {
         let friction = a.friction * b.friction;
         let restitution = a.restitution * b.restitution;
 
+        // Friction-anchor targets (Bullet's `setupFrictionConstraint`
+        // `BT_CONTACT_FLAG_FRICTION_ANCHOR` branch): the cached world
+        // anchors' separation along each tangent axis, scaled by
+        // `m_frictionERP` (the `inv_dt` factor is applied at solve time,
+        // matching Bullet's `rhs` assembly order). The sign follows from
+        // the row conventions: Bullet's friction `rel_vel` is
+        // `(v0 - vB) . t` — the negation of ours — and its servo target
+        // `-distance * m_frictionERP / dt` there becomes `+distance *
+        // m_frictionERP / dt` on our rows, driving the separation
+        // `distance` exponentially to zero ("pin the anchors together").
+        // `None` keeps both targets at exactly zero, leaving the friction
+        // solve bit-for-bit unchanged.
+        let anchor = if let Some(disp) = anchor_disp {
+            [
+                disp.dot(tangent1) * FRICTION_ERP,
+                disp.dot(tangent2) * FRICTION_ERP,
+            ]
+        } else {
+            [0.0; 2]
+        };
+
         ContactConstraint {
             body_a,
             body_b,
@@ -386,6 +423,7 @@ impl ContactConstraint {
             kt1,
             kt2,
             rolling: None,
+            anchor,
         }
     }
 
@@ -655,13 +693,17 @@ fn solve_contact(
     // block projects the *incrementally advanced* `rel` (advanced by the
     // previous block's impulse through the pre-folded couplings) instead
     // of re-reading both bodies' velocities — same sequential-impulse
-    // semantics, one cross-pair saved per tangent block.
+    // semantics, one cross-pair saved per tangent block. The anchor term
+    // is Bullet's friction-anchor positional bias (`positionalError =
+    // -distance * m_frictionERP / dt` on Bullet's rows, `+distance *
+    // m_frictionERP / dt` on ours — see `prepare`); for unanchored
+    // contacts it is zero and `vt - 0.0 == vt` bit-for-bit.
     let max_friction = c.friction * c.normal_impulse;
 
     // Tangent 1.
     {
         let vt = rel.dot(c.tangent1);
-        let lambda = -c.tangent1_mass * vt;
+        let lambda = -c.tangent1_mass * (vt - c.anchor[0] * inv_dt);
         let old = c.tangent1_impulse;
         let new = (old + lambda).clamp(-max_friction, max_friction);
         c.tangent1_impulse = new;
@@ -673,7 +715,7 @@ fn solve_contact(
     // Tangent 2.
     {
         let vt = rel.dot(c.tangent2);
-        let lambda = -c.tangent2_mass * vt;
+        let lambda = -c.tangent2_mass * (vt - c.anchor[1] * inv_dt);
         let old = c.tangent2_impulse;
         let new = (old + lambda).clamp(-max_friction, max_friction);
         c.tangent2_impulse = new;
@@ -801,8 +843,68 @@ mod tests {
             Vector3::Y,                           // normal A -> B (box -> plane)
             penetration,
         );
-        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &cube, u32::MAX);
+        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &cube, u32::MAX, None);
         (vec![ground, cube], vec![c])
+    }
+
+    /// The friction-anchor servo (Bullet's `BT_CONTACT_FLAG_FRICTION_ANCHOR`
+    /// branch): with the pair's cached world anchors separated along a
+    /// tangent axis, one iteration drives body B toward body A's anchor —
+    /// the separation `distance` decays exponentially to zero — while a
+    /// plain friction row (`anchor_disp = None`) leaves resting bodies
+    /// untouched. The servo is directional: an anchor displacement along
+    /// +X moves B along +X (toward the displaced A-side anchor).
+    #[test]
+    fn friction_anchor_servo_pulls_body_b_toward_body_a_s_anchor() {
+        let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
+        let make_cube = || {
+            RigidBody::new_dynamic(
+                CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            )
+        };
+        let cp = bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.0, 0.0, 0.0), // box bottom / plane top
+            Vector3::Y,
+            0.0,
+        );
+        // Normal +Y: `tangent_basis` yields t1 along -Z and t2 along -X, so
+        // a displacement of +X*d reads `distance = -d` on t2 and the servo
+        // target velocity is negative along t2 — i.e. B moves toward +X,
+        // closing the gap to the anchor (which sits +X of B's).
+        let d = 0.02;
+        let anchored = ContactConstraint::prepare(
+            0,
+            1,
+            &cp,
+            &ground,
+            &make_cube(),
+            u32::MAX,
+            Some(Vector3::new(d, 0.0, 0.0)),
+        );
+        let mut bodies = vec![ground, make_cube()];
+        // Approach speed along the normal: the first iteration builds a
+        // normal impulse (`max_friction = friction · normal_impulse`) so
+        // the friction cone has slack for the servo to spend.
+        bodies[1].linear_velocity = Vector3::new(0.0, -1.0, 0.0);
+        let mut constraints = vec![anchored];
+        solve(&mut bodies, &mut constraints, &mut [], &mut [], 1, 60.0);
+        assert!(
+            bodies[1].linear_velocity.x > 0.01,
+            "servo must pull B toward the A-side anchor: vx = {}",
+            bodies[1].linear_velocity.x
+        );
+
+        // Without the anchor displacement the plain friction row only
+        // zeroes the tangential slip (which is zero here) — no drive.
+        let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
+        let plain = ContactConstraint::prepare(0, 1, &cp, &ground, &make_cube(), u32::MAX, None);
+        let mut bodies = vec![ground, make_cube()];
+        bodies[1].linear_velocity = Vector3::new(0.0, -1.0, 0.0);
+        let mut constraints = vec![plain];
+        solve(&mut bodies, &mut constraints, &mut [], &mut [], 1, 60.0);
+        assert_relative_eq!(bodies[1].linear_velocity.x, 0.0, epsilon = 1e-7);
     }
 
     /// Deep penetration (> threshold): the split pass pushes the body out of
@@ -874,7 +976,7 @@ mod tests {
                 Vector3::Y,
                 0.01,
             );
-            let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX);
+            let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None);
             let mut pool: Vec<RollingFriction> = Vec::new();
             c.attach_rolling(&ground, &sphere, &mut pool);
             (vec![ground, sphere], vec![c], pool)
@@ -924,7 +1026,7 @@ mod tests {
             Vector3::Y,
             0.01,
         );
-        let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX);
+        let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None);
         let mut pool: Vec<RollingFriction> = Vec::new();
         c.attach_rolling(&ground, &sphere, &mut pool);
         let mut bodies = vec![ground, sphere];

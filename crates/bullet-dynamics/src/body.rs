@@ -143,6 +143,16 @@ impl CollisionFlags {
     /// [`RigidBody::new_kinematic`](RigidBody::new_kinematic).
     pub const KINEMATIC: Self = Self(0x0004);
 
+    /// The body's contacts anchor friction (Bullet's
+    /// `CF_HAS_FRICTION_ANCHOR`): every friction row of the pair carries a
+    /// positional bias that pulls the two world anchors of the cached
+    /// contact back together along the tangent plane (Bullet's
+    /// `setupFrictionConstraint` `BT_CONTACT_FLAG_FRICTION_ANCHOR`
+    /// branch), so the body sticks to the surface it rests on instead of
+    /// creeping under tangential loads. Multibody contacts ignore the flag
+    /// today (deviations §1).
+    pub const HAS_FRICTION_ANCHOR: Self = Self(0x0200);
+
     /// Whether every bit of `other` is set.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
