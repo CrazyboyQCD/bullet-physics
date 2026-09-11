@@ -134,6 +134,7 @@ fn main() {
                 ))
         };
         body.rolling_friction = b.rolling_friction as Real;
+        body.spinning_friction = b.spinning_friction as Real;
         body.set_damping(b.linear_damping as Real, b.angular_damping as Real);
         if b.additional_damping {
             // Construction-info-only opt-in in Bullet (no post-construction

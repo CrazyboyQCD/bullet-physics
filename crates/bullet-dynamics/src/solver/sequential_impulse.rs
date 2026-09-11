@@ -134,51 +134,66 @@ pub struct ContactConstraint {
     normal_cfm: Real,
 }
 
-/// The two torsional-friction rows of one contact point (Bullet's
-/// `setupTorsionalFrictionConstraint` pair installed for a positive
-/// `m_combinedRollingFriction`): pure-angular constraints on the two
-/// tangent-plane axes that drive the contact's relative angular velocity
-/// toward zero. Each row's accumulated impulse is clamped per iteration to
-/// `±min(rolling_friction · normal_impulse, rolling_friction)`, so rolling
+/// The torsional-friction rows of one contact point (Bullet's
+/// `setupTorsionalFrictionConstraint` trio installed inside the
+/// rolling-friction branch of `convertContact`): pure-angular constraints
+/// that drive the contact's relative angular velocity toward zero. Rows 1
+/// and 2 sit on the two tangent-plane axes with the combined rolling
+/// coefficient; row 0 spins around the contact normal with the combined
+/// spinning coefficient, like Bullet's spinning-friction row (which his
+/// own assembly site adds unconditionally inside the rolling branch, so
+/// it only ever coexists with rolling friction). Each row's accumulated
+/// impulse is clamped per iteration to
+/// `±min(friction · normal_impulse, friction)`, so rolling or spinning
 /// bodies only decelerate while the contact actually carries load. The
 /// rows are rebuilt from zero every step (Bullet's rolling pool stores
 /// `m_originalContactPoint = 0`: no warm start) and never touch the
 /// linear velocity or the split-impulse pass.
 pub struct RollingFriction {
-    /// The tangent-plane axes (Bullet's `btPlaneSpace1(normal)` output,
-    /// re-normalized like the assembly site does).
-    axis: [Vector3; 2],
+    /// The row axes in install order: `[normal, tangent0, tangent1]`
+    /// (Bullet's spinning row first, then the `btPlaneSpace1(normal)`
+    /// output, re-normalized like the assembly site does).
+    axis: [Vector3; 3],
     /// Pre-folded angular impulse components `invI · axis` per side. A
     /// row impulse applies `ω_a -= comp_a · j` and `ω_b += comp_b · j`,
     /// matching Bullet's `angularComponentA/B` signs for its
     /// `relpos1CrossNormal = -axis` / `relpos2CrossNormal = +axis` rows.
-    comp_a: [Vector3; 2],
-    comp_b: [Vector3; 2],
+    comp_a: [Vector3; 3],
+    comp_b: [Vector3; 3],
     /// Inverse effective mass per row: `1 / (axis·invI_a·axis +
     /// axis·invI_b·axis)` — a pure-rotation row, no linear term.
-    mass: [Real; 2],
+    mass: [Real; 3],
     /// Accumulated impulses of the current step (reset by `prepare`).
-    impulse: [Real; 2],
-    /// The combined rolling-friction coefficient (the clamp scale).
-    friction: Real,
+    impulse: [Real; 3],
+    /// The per-row clamp scale `[spinning, rolling, rolling]` (the
+    /// combined coefficient each row was built with).
+    friction: [Real; 3],
+    /// Whether the spinning row (row 0) is active: Bullet installs it
+    /// unconditionally inside the rolling branch, but a non-positive
+    /// coefficient gives it a zero/inverted window that clamps its
+    /// impulse to a no-op (or worse, upstream): skipping the row is
+    /// bit-identical for every sane input.
+    spinning: bool,
 }
 
 impl RollingFriction {
-    /// Build the two rows for a contact with the given normal.
+    /// Build the rows for a contact with the given normal.
     pub(crate) fn prepare(
         normal: Vector3,
         inv_inertia_a: Matrix3,
         inv_inertia_b: Matrix3,
         friction: Real,
+        spinning: Real,
     ) -> Self {
         let (a0, a1) = plane_space(normal);
         // The assembly site normalizes both axes (Bullet's `axis.normalize()`);
         // the `length() > 0.001` gate after it only exists for the anisotropic
         // filter this crate does not have, so both axes are always unit here.
-        let axis = [a0 / a0.length(), a1 / a1.length()];
-        let mut comp_a = [Vector3::ZERO; 2];
-        let mut comp_b = [Vector3::ZERO; 2];
-        let mut mass = [0.0; 2];
+        let tangent = [a0 / a0.length(), a1 / a1.length()];
+        let axis = [normal, tangent[0], tangent[1]];
+        let mut comp_a = [Vector3::ZERO; 3];
+        let mut comp_b = [Vector3::ZERO; 3];
+        let mut mass = [0.0; 3];
         for (i, &axis) in axis.iter().enumerate() {
             comp_a[i] = inv_inertia_a * axis;
             comp_b[i] = inv_inertia_b * axis;
@@ -190,8 +205,9 @@ impl RollingFriction {
             comp_a,
             comp_b,
             mass,
-            impulse: [0.0; 2],
-            friction,
+            impulse: [0.0; 3],
+            friction: [spinning, friction, friction],
+            spinning: spinning > 0.0,
         }
     }
 }
@@ -510,11 +526,20 @@ impl ContactConstraint {
         if combined <= 0.0 {
             return;
         }
+        // The spinning coefficient combines with the same quirk formula
+        // (Bullet's `calculateCombinedSpinningFriction`) and its row is
+        // installed inside this same branch (Bullet's `convertContact`),
+        // so a pair with a positive spinning value but no rolling value
+        // gets no spinning row either — the upstream gate kept verbatim.
+        let combined_spinning = (a.spinning_friction * b.friction
+            + b.spinning_friction * a.friction)
+            .clamp(-10.0, 10.0);
         let rows = RollingFriction::prepare(
             self.normal,
             a.inv_inertia_world(),
             b.inv_inertia_world(),
             combined,
+            combined_spinning,
         );
         self.rolling = Some(pool.len() as u32);
         pool.push(rows);
@@ -838,8 +863,10 @@ fn solve_contact(
         && let Some(index) = c.rolling
     {
         let rf = &mut rolling[index as usize];
-        let magnitude = (rf.friction * c.normal_impulse).min(rf.friction);
-        for i in 0..2 {
+        // Row 0 is the spinning row; without a positive combined spinning
+        // coefficient the sweep starts at the two tangent-plane rows.
+        for i in usize::from(!rf.spinning)..3 {
+            let magnitude = (rf.friction[i] * c.normal_impulse).min(rf.friction[i]);
             let ang_rel =
                 rf.axis[i].dot(b.angular_velocity) - rf.axis[i].dot(a.angular_velocity);
             let lambda = rf.mass[i] * (0.0 - ang_rel);
@@ -1137,6 +1164,90 @@ mod tests {
         // |ΔL| per row ≤ combined (0.005); I = 0.1 → |Δω| ≤ 0.05.
         let dw = (100.0 - bodies[1].angular_velocity.z).abs();
         assert!(dw <= 0.06, "clamp should cap the change: Δω = {}", dw);
+    }
+
+    /// The spinning-friction row (Bullet's third torsional row, around the
+    /// contact normal): a sphere spinning about the normal decays while the
+    /// tangent-plane rolling rows see no motion (the spin is orthogonal to
+    /// them), and the spin drop matches the same clamp formula scaled by
+    /// the combined spinning coefficient.
+    #[test]
+    fn spinning_friction_row_decays_normal_axis_spin() {
+        let build = || {
+            let mut ground = RigidBody::new_static(
+                CollisionShape::plane(Vector3::Y, 0.0),
+                Vector3::ZERO,
+            );
+            ground.rolling_friction = 0.5;
+            ground.spinning_friction = 0.5;
+            let mut sphere = RigidBody::new_dynamic(
+                CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            );
+            sphere.rolling_friction = 0.5;
+            sphere.spinning_friction = 0.5;
+            // Spin about the contact normal (+Y): only the spinning row
+            // sees it (`plane_space(Y)` tangent axes are in the X-Z plane).
+            sphere.angular_velocity = Vector3::new(0.0, 2.0, 0.0);
+            let cp = bullet_collision::manifold::ContactPoint::new(
+                Vector3::new(0.0, 0.5, 0.0),
+                Vector3::Y,
+                0.01,
+            );
+            let c =
+                ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0);
+            let mut pool: Vec<RollingFriction> = Vec::new();
+            let mut c = c;
+            c.attach_rolling(&ground, &sphere, &mut pool);
+            (vec![ground, sphere], vec![c], pool)
+        };
+
+        let (mut bodies, mut constraints, mut pool) = build();
+        solve(&mut bodies, &mut constraints, &mut [], &mut pool, 10, 60.0);
+        assert_eq!(pool.len(), 1);
+        assert!(pool[0].spinning);
+        // Same math as the rolling test: the row saturates its clamp at
+        // `min(spinning · normal_impulse, spinning) = 0.03`, invI = 10,
+        // so one solve drops the spin by 0.3.
+        assert_relative_eq!(bodies[1].angular_velocity.y, 1.7, epsilon = 1e-5);
+        assert!(pool[0].impulse[0].abs() <= 0.03 + 1e-6);
+        // The tangent-plane rows stayed idle (spin orthogonal to them).
+        assert_eq!(pool[0].impulse[1], 0.0);
+        assert_eq!(pool[0].impulse[2], 0.0);
+    }
+
+    /// Bullet's `convertContact` installs the spinning row inside the
+    /// rolling-friction branch: without a positive combined rolling value
+    /// no torsional row is built at all, so a spinning-only pair keeps
+    /// spinning forever (the upstream gate kept verbatim).
+    #[test]
+    fn spinning_friction_needs_the_rolling_friction_branch() {
+        let mut ground = RigidBody::new_static(
+            CollisionShape::plane(Vector3::Y, 0.0),
+            Vector3::ZERO,
+        );
+        ground.spinning_friction = 0.5;
+        let mut sphere = RigidBody::new_dynamic(
+            CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.5, 0.0),
+            1.0,
+        );
+        sphere.spinning_friction = 0.5;
+        sphere.angular_velocity = Vector3::new(0.0, 2.0, 0.0);
+        let cp = bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.0, 0.5, 0.0),
+            Vector3::Y,
+            0.01,
+        );
+        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0);
+        let mut pool: Vec<RollingFriction> = Vec::new();
+        let mut c = c;
+        c.attach_rolling(&ground, &sphere, &mut pool);
+        let mut bodies = vec![ground, sphere];
+        solve(&mut bodies, std::slice::from_mut(&mut c), &mut [], &mut pool, 10, 60.0);
+        assert!(pool.is_empty());
+        assert_relative_eq!(bodies[1].angular_velocity.y, 2.0, epsilon = 1e-6);
     }
 
     /// The soft-contact channel (Bullet's

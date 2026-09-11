@@ -190,6 +190,7 @@ int main(int argc, char** argv) {
     body->setFriction(b.friction);
     body->setRestitution(b.restitution);
     body->setRollingFriction(b.rolling_friction);
+    body->setSpinningFriction(b.spinning_friction);
     body->setDamping(b.linear_damping, b.angular_damping);
     body->setAnisotropicFriction(btVector3(b.anisotropic_friction[0],
                                            b.anisotropic_friction[1],

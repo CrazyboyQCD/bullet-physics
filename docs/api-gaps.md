@@ -309,18 +309,29 @@ S/M/L · **See** = existing notes.
   - Size: S–M (the parity scene was the M half).
 - **Rigid-body property surface**: anisotropic friction ✅ (2026-09-10),
   per-object contact stiffness/damping ✅ (2026-09-10), the opt-in
-  additional-damping block ✅ (2026-09-10) — all three in, with parity
-  scenes (`anisotropic_friction` / `contact_soft` / `damped_stack`) and
-  the mb-contact scope cut recorded in deviations §1/§3.
-  Remaining: **spinning friction** (the same-axis row around the contact
-  normal — the torsional-row machinery the rolling friction shipped;
-  on demand).
-  - Impl: one extra row around the contact normal in
-    `ContactConstraint::prepare` (Bullet's `setupSpinningFrictionConstraint`).
-  - Files: `body.rs`, `solver/sequential_impulse.rs`.
-  - Risk: solver-semantic change → parity re-record for scenes using it
-    (default-off keeps the rest bit-identical).
-  - Size: S–M.
+  additional-damping block ✅ (2026-09-10), spinning friction ✅
+  (2026-09-11) — all in, with parity scenes (`anisotropic_friction` /
+  `contact_soft` / `damped_stack` / `spinning`) and the mb-contact scope
+  cut recorded in deviations §1/§3.
+  - Shipped (spinning friction, 2026-09-11): `RigidBody.spinning_friction`
+    (default 0) adds the third torsional row around the contact normal —
+    the rolling rows' pool, per-iteration clamp (with the row's own
+    coefficient) and the combined-coefficient quirk formula are shared.
+    Bullet's install gate is kept verbatim: the spinning row lives inside
+    the rolling-friction branch of `convertContact`, so a pair without a
+    positive combined rolling value gets no spinning row either. A
+    non-positive combined spinning coefficient skips the row entirely
+    (Bullet's zero window is a no-op; the negative one is an upstream
+    inverted-window pathology) — deviations §1.
+  - Files: `body.rs`, `solver/sequential_impulse.rs` (`RollingFriction`
+    rows = [normal, tangent0, tangent1]), parity scene `spinning`
+    (`scenes.json` schema + both recorders gained `spinning_friction`).
+  - Risk resolved: default 0 keeps every scene bit-identical (the row is
+    never installed); parity `rolling` ball_rf stays exceed-0 after the
+    row-struct rework. Scene `spinning` classifies both balls under the
+    pure-spin friction-noise knife edge (the rolling scene's documented
+    class — positions stay digit-identical, orientation offsets freeze).
+  - Size: S.
 - **Scaled-shape wrappers**: `btScaledBvhTriangleMeshShape`,
   `btUniformScalingShape`, `btConvex2DShape`.
   - Impl: new `CollisionShape` variants wrapping an inner shape + scale,

@@ -222,6 +222,15 @@ pub struct RigidBody {
     /// combined value (`rf_a · friction_b + rf_b · friction_a`, Bullet's
     /// `calculateCombinedRollingFriction` quirk) exceeds zero.
     pub rolling_friction: Real,
+    /// Torsional friction around the contact normal (Bullet's
+    /// `m_spinningFriction`, default 0): spins a touching body down about
+    /// the normal axis, clamped like the rolling rows. Like Bullet's
+    /// `convertContact`, the row is installed inside the rolling-friction
+    /// branch — a positive pair value has no effect unless the pair's
+    /// combined rolling friction is positive too (upstream quirk, kept
+    /// verbatim). Combined with the same quirk formula as rolling
+    /// (`sf_a · friction_b + sf_b · friction_a`, clamped ±10).
+    pub spinning_friction: Real,
     /// Soft-constraint parameters of this body's contacts (Bullet's
     /// `m_contactStiffness` / `m_contactDamping`, defaults `BT_LARGE_FLOAT`
     /// / `0.1`): only read when either side of a pair carries
@@ -312,6 +321,7 @@ impl RigidBody {
             restitution: 0.0,
             anisotropic_friction: Vector3::ONE,
             rolling_friction: 0.0,
+            spinning_friction: 0.0,
             contact_stiffness: BT_LARGE_FLOAT,
             contact_damping: 0.1,
             collision_group: filter_groups::DEFAULT,
@@ -376,6 +386,7 @@ impl RigidBody {
             restitution: 0.0,
             anisotropic_friction: Vector3::ONE,
             rolling_friction: 0.0,
+            spinning_friction: 0.0,
             contact_stiffness: BT_LARGE_FLOAT,
             contact_damping: 0.1,
             collision_group: filter_groups::DEFAULT,

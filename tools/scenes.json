@@ -1,5 +1,5 @@
 {
-  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/src/parity_scenes.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant), mesh(grid[nx,nz], origin[x0,z0], cell[dx,dz], heights[nx*nz] in z-major order; indices derived with the falling_mesh winding), mesh_parts(parts[], each a mesh spec; parts are independent IndexedMesh buffers — seams duplicate vertices — concatenated into one triangle stream in part order). Body fields: mass (0 = static), friction, restitution, position, optional velocity[vx,vy,vz] (initial linear velocity), angular_velocity[vx,vy,vz], damping fields linear_damping/angular_damping/additional_damping (the flag is Bullet's m_additionalDamping opt-in) and ccd{motion_threshold, swept_sphere_radius}. Consumer-API body fields (all optional): gravity[x,y,z] (implies DISABLE_WORLD_GRAVITY: the body keeps its own gravity detached from world propagation), no_contact_response (true = trigger/sensor, CF_NO_CONTACT_RESPONSE), group/mask (collision filter group & mask, -1 = all; default group 1 / mask -1). Consumer-API scene fields (optional): pair_filter [nameA, nameB] (this pair is excluded from collision, btOverlapFilterCallback style), rays [{from, to, mode 'all'|'closest', group, mask}] (probed once after the last frame, recorded to <scene>_rays_*.csv: ray_idx body_idx fraction, sorted by fraction).",
+  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/src/parity_scenes.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant), mesh(grid[nx,nz], origin[x0,z0], cell[dx,dz], heights[nx*nz] in z-major order; indices derived with the falling_mesh winding), mesh_parts(parts[], each a mesh spec; parts are independent IndexedMesh buffers \u2014 seams duplicate vertices \u2014 concatenated into one triangle stream in part order). Body fields: mass (0 = static), friction, restitution, position, optional velocity[vx,vy,vz] (initial linear velocity), angular_velocity[vx,vy,vz], damping fields linear_damping/angular_damping/additional_damping (the flag is Bullet's m_additionalDamping opt-in) and ccd{motion_threshold, swept_sphere_radius}. Consumer-API body fields (all optional): gravity[x,y,z] (implies DISABLE_WORLD_GRAVITY: the body keeps its own gravity detached from world propagation), no_contact_response (true = trigger/sensor, CF_NO_CONTACT_RESPONSE), group/mask (collision filter group & mask, -1 = all; default group 1 / mask -1). Consumer-API scene fields (optional): pair_filter [nameA, nameB] (this pair is excluded from collision, btOverlapFilterCallback style), rays [{from, to, mode 'all'|'closest', group, mask}] (probed once after the last frame, recorded to <scene>_rays_*.csv: ray_idx body_idx fraction, sorted by fraction).",
   "scenes": {
     "falling_box": {
       "dt": [
@@ -1263,11 +1263,31 @@
                   1.0
                 ],
                 "heights": [
-                  0.0, 0.0, 0.0, 0.0, 0.0,
-                  0.0, 0.0, 0.0, 0.0, 0.0,
-                  0.0, 0.0, 0.0, 0.0, 0.0,
-                  0.0, 0.0, 0.0, 0.0, 0.0,
-                  0.0, 0.0, 0.0, 0.0, 0.0
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0
                 ]
               },
               {
@@ -1284,11 +1304,31 @@
                   1.0
                 ],
                 "heights": [
-                  0.0, 0.0, 0.0, 0.0, 0.0,
-                  0.0, 0.0, 0.0, 0.0, 0.0,
-                  0.0, 0.0, 0.0, 0.0, 0.0,
-                  0.0, 0.0, 0.0, 0.0, 0.0,
-                  0.0, 0.0, 0.0, 0.0, 0.0
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0
                 ]
               }
             ]
@@ -1358,6 +1398,82 @@
         "sphere",
         "box",
         "box_seam"
+      ]
+    },
+    "spinning": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 240,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -10,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              40,
+              0.5,
+              20
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "mass": 0,
+          "rolling_friction": 0.2,
+          "spinning_friction": 0.5
+        },
+        {
+          "name": "ball_spin",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            -6,
+            0.5,
+            0
+          ],
+          "mass": 1,
+          "angular_velocity": [
+            0,
+            20,
+            0
+          ],
+          "rolling_friction": 0.2,
+          "spinning_friction": 0.5
+        },
+        {
+          "name": "ball_plain",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            -6,
+            0.5,
+            4
+          ],
+          "mass": 1,
+          "angular_velocity": [
+            0,
+            20,
+            0
+          ]
+        }
+      ],
+      "record": [
+        "ball_spin",
+        "ball_plain"
       ]
     }
   }

@@ -113,7 +113,7 @@ def gen_c(scenes):
         "  ShapeType shape;",
         "  btScalar params[6];",
         "  btScalar pos[3];",
-        "  btScalar mass, friction, restitution, rolling_friction;",
+        "  btScalar mass, friction, restitution, rolling_friction, spinning_friction;",
         "  btScalar linear_damping, angular_damping;  // setDamping pair",
         "  int additional_damping;  // btRigidBodyConstructionInfo flag",
         "  btScalar anisotropic_friction[3];",
@@ -192,6 +192,7 @@ def gen_c(scenes):
             pos = ", ".join(f"btScalar({fmt(x)})" for x in b["position"])
             mass = fmt(b.get("mass", 0.0))
             rf = fmt(b.get("rolling_friction", 0.0))
+            sfr = fmt(b.get("spinning_friction", 0.0))
             aniso = b.get("anisotropic_friction", [1.0, 1.0, 1.0])
             aniso_s = ", ".join(f"btScalar({fmt(x)})" for x in aniso)
             cks = b.get("contact_stiffness")
@@ -226,7 +227,7 @@ def gen_c(scenes):
             grp = b.get("group", 1)
             msk = b.get("mask", -1)
             lines.append(f"  {{\"{b['name']}\", {SHAPE_ENUM[t]}, {{{p}}}, {{{pos}}}, "
-                         f"btScalar({mass}), btScalar({fr}), btScalar({re}), btScalar({rf}), "
+                         f"btScalar({mass}), btScalar({fr}), btScalar({re}), btScalar({rf}), btScalar({sfr}), "
                          f"btScalar({ld}), btScalar({admp}), {add}, "
                          f"{{{aniso_s}}}, btScalar({cks_s}), btScalar({ckd}), {cks_set}, {st}, "
                          f"{{{vel_s}}}, {{{ang_s}}}, {ccd_on}, btScalar({fmt(ccd_mt)}), "
@@ -297,6 +298,7 @@ def gen_rs(scenes):
         "    pub friction: f32,",
         "    pub restitution: f32,",
         "    pub rolling_friction: f32,",
+        "    pub spinning_friction: f32,",
         "    pub linear_damping: f32,",
         "    pub angular_damping: f32,",
         "    pub additional_damping: bool,",
@@ -378,6 +380,7 @@ def gen_rs(scenes):
                 fr, re = fmt(b.get("friction", 0.5)), fmt(b.get("restitution", 0.0))
                 st = "false"
             rf = fmt(b.get("rolling_friction", 0.0))
+            sfr = fmt(b.get("spinning_friction", 0.0))
             ld = fmt(b.get("linear_damping", 0.0))
             admp = fmt(b.get("angular_damping", 0.0))
             add = "true" if b.get("additional_damping") else "false"
@@ -403,7 +406,7 @@ def gen_rs(scenes):
             msk = b.get("mask", -1) & 0xFFFF
             lines.append(f"            BodySpec {{ name: \"{b['name']}\", shape: {shape}, "
                          f"position: {pos}, mass: {mass}, friction: {fr}, restitution: {re}, "
-                         f"rolling_friction: {rf}, linear_damping: {ld}, angular_damping: {admp}, "
+                         f"rolling_friction: {rf}, spinning_friction: {sfr}, linear_damping: {ld}, angular_damping: {admp}, "
                          f"additional_damping: {add}, "
                          f"anisotropic_friction: [{aniso_s}], "
                          f"contact_stiffness: {cks_s}, contact_damping: {ckd}, "
