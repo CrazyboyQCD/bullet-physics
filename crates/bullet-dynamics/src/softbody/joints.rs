@@ -642,12 +642,15 @@ impl SoftJoint {
 
     /// Bullet's `Terminate` dispatch: apply the drift split (the contact
     /// variant also flags its deletion — handled by the caller's filter).
+    /// `d_impulse` takes `(side, rpos, impulse)` — Bullet passes the drift
+    /// impulse first (`applyDImpulse(impulse, rpos)`), keep the order
+    /// straight here.
     pub(crate) fn terminate(&self, softs: &mut [SoftBody], bodies: &mut [RigidBody]) {
         match self {
             SoftJoint::Linear(j) => {
                 if j.split > 0.0 {
-                    side_apply::d_impulse(j.bodies[0], -j.sdrift, j.rpos[0], softs, bodies);
-                    side_apply::d_impulse(j.bodies[1], j.sdrift, j.rpos[1], softs, bodies);
+                    side_apply::d_impulse(j.bodies[0], j.rpos[0], -j.sdrift, softs, bodies);
+                    side_apply::d_impulse(j.bodies[1], j.rpos[1], j.sdrift, softs, bodies);
                 }
             }
             SoftJoint::Angular(j) => {
@@ -658,8 +661,8 @@ impl SoftJoint {
             }
             SoftJoint::Contact(j) => {
                 if j.split > 0.0 {
-                    side_apply::d_impulse(j.bodies[0], -j.sdrift, j.rpos[0], softs, bodies);
-                    side_apply::d_impulse(j.bodies[1], j.sdrift, j.rpos[1], softs, bodies);
+                    side_apply::d_impulse(j.bodies[0], j.rpos[0], -j.sdrift, softs, bodies);
+                    side_apply::d_impulse(j.bodies[1], j.rpos[1], j.sdrift, softs, bodies);
                 }
             }
         }

@@ -9,8 +9,8 @@
 //! Run with `cargo run --example softbody_joints`.
 
 use bullet::dynamics::{
-    AngularControl, AngularJointSpecs, create_patch, AJoint, PhysicsWorld, RigidBody, Side,
-    LinearJointSpecs,
+    AngularControl, AngularJointSpecs, create_patch, AJoint, JointSpecs, PhysicsWorld, RigidBody,
+    Side, LinearJointSpecs,
 };
 use bullet::math::{Real, Vector3};
 use bullet::prelude::CollisionShape;
@@ -64,7 +64,12 @@ fn main() {
         sb.generate_clusters(8, 32);
     }
     // The drag box rides above the cloth (nothing collides with it); the
-    // joint pins the master cluster at the patch's center.
+    // joint pins the master cluster at the patch's center. `split: 0.0`
+    // keeps the correction in the velocity channel: with the default
+    // `split = 1` the drift split fires the full position error (scaled by
+    // erp/dt) as an impulse on the rigid side every step — against a
+    // kinematically-driven box (velocity rewritten each frame, 1.6 arm) that
+    // feedback loop diverges, so the soft channel is the right tuning here.
     let drag = world.add_body(RigidBody::new_dynamic(
         CollisionShape::box_shape(Vector3::splat(0.3)),
         Vector3::new(0.0, 5.6, 0.0),
@@ -74,7 +79,7 @@ fn main() {
         cloth,
         LinearJointSpecs {
             position: Vector3::new(0.0, 4.0, 0.0),
-            ..LinearJointSpecs::default()
+            tuning: JointSpecs { split: 0.0, ..JointSpecs::default() },
         },
         Side::Rigid(drag),
     );

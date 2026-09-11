@@ -1150,7 +1150,7 @@ fn convex_hull_builder_drops_interior() {
 
 use bullet_math::compat::quat_from_axis_angle;
 use super::body::{ImplicitFn, Side};
-use super::joints::{AngularControl, AngularJointSpecs, AJoint, LinearJointSpecs};
+use super::joints::{AngularControl, AngularJointSpecs, AJoint, JointSpecs, LinearJointSpecs};
 
 /// The SoftDemo motor control (Bullet's `MotorControl`): drive the joint
 /// speed toward `goal` with a clamped torque rate.
@@ -1384,6 +1384,41 @@ fn linear_joint_holds_cluster_at_anchor() {
     assert!(d < 0.6, "cluster fell away from the anchor: {d} ({com:?})");
     // Free fall over 5s would be ~120m; the joint is what holds it.
     assert!(d < 1.0);
+}
+
+/// The cluster-joint drift split must reach the nodes (regression for the
+/// `terminate` parameter-order bug that swapped the drift impulse with the
+/// anchor offset, collapsing the split channel to noise). The split only
+/// reallocates the anchor correction between the velocity channel and the
+/// drift channel, so the first-step node displacement must be identical
+/// whether the joint runs the default `split = 1` or `split = 0` — the
+/// bug dropped the drift half, shifting the `split = 1` outcome by ~8e-3.
+#[test]
+fn linear_joint_drift_split_reaches_nodes() {
+    let run = |split: Real| {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(GRAVITY);
+        let a = world.add_soft_body(cluster_ellipsoid(Vector3::new(0.0, 5.0, 0.0)));
+        let b = world.add_soft_body(cluster_ellipsoid(Vector3::new(0.0, 4.5, 0.0)));
+        world.add_soft_linear_joint(
+            a,
+            LinearJointSpecs {
+                position: Vector3::new(0.0, 4.75, 0.0),
+                tuning: JointSpecs { split, ..JointSpecs::default() },
+            },
+            Side::Cluster { soft: b, cluster: 0 },
+        );
+        world.soft_body_mut(b).add_velocity(Vector3::new(0.0, 1.0, 0.0));
+        world.step_simulation(DT);
+        world.soft_body(a).get_center_of_mass().y
+    };
+    let drift = run(1.0);
+    let no_drift = run(0.0);
+    let delta = (drift - no_drift).abs();
+    // The correct split applies the drift half (~8e-3, minus the share the
+    // position pass re-absorbs -> ~6e-3); the parameter-order bug left only
+    // a ~2e-3 residue.
+    assert!(delta > 0.0045, "drift split had no effect on the nodes: {delta}");
 }
 
 /// An angular joint realigns a rotated cluster frame back onto the axis
