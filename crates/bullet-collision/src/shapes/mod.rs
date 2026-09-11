@@ -30,7 +30,7 @@ pub use heightfield::Heightfield;
 pub use plane::Plane;
 pub use shape_hull::ShapeHull;
 pub use sphere::Sphere;
-pub use triangle_mesh::TriangleMesh;
+pub use triangle_mesh::{TriangleMesh, TriangleMeshPart};
 
 /// Shape category, mirroring Bullet's `BroadphaseProxyTypes`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +113,14 @@ impl CollisionShape {
     #[inline]
     pub fn triangle_mesh(vertices: Vec<Vector3>, indices: Vec<[u32; 3]>) -> Self {
         Self::TriangleMesh(TriangleMesh::new(vertices, indices))
+    }
+
+    /// A static triangle mesh built from independent parts (Bullet's
+    /// `btTriangleIndexVertexArray`): see
+    /// [`TriangleMesh::from_parts`] for the part semantics.
+    #[inline]
+    pub fn triangle_mesh_parts(parts: Vec<TriangleMeshPart>) -> Self {
+        Self::TriangleMesh(TriangleMesh::from_parts(parts))
     }
 
     /// A static heightfield terrain from a `width x depth` height grid.

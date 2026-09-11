@@ -50,8 +50,9 @@ class PairExcludeFilter : public btOverlapFilterCallback {
   }
 };
 
-btCollisionShape* make_shape(const BodySpec& b,
-                             std::vector<std::unique_ptr<btTriangleMesh>>& meshes) {
+btCollisionShape* make_shape(
+    const BodySpec& b, std::vector<std::unique_ptr<btTriangleMesh>>& meshes,
+    std::vector<std::unique_ptr<btTriangleIndexVertexArray>>& mesh_arrays) {
   const btScalar* p = b.params;
   switch (b.shape) {
     case SHAPE_BOX:
@@ -86,6 +87,26 @@ btCollisionShape* make_shape(const BodySpec& b,
       }
       meshes.push_back(std::unique_ptr<btTriangleMesh>(tm));
       return new btBvhTriangleMeshShape(tm, true);
+    }
+    case SHAPE_MESH_PARTS: {
+      // btTriangleIndexVertexArray over the independent IndexedMesh parts -
+      // the multi-part API the crate mirrors with TriangleMesh::from_parts
+      // (the BVH spans every part; the vertex/index arrays live in the
+      // generated header, so only the mesh interface needs owning here).
+      btTriangleIndexVertexArray* iv = new btTriangleIndexVertexArray();
+      for (int pi = 0; pi < b.num_mesh_parts; ++pi) {
+        const MeshSpec& part = b.mesh_parts[pi];
+        btIndexedMesh im;
+        im.m_numVertices = part.num_vertices;
+        im.m_vertexBase = reinterpret_cast<const unsigned char*>(part.vertices);
+        im.m_vertexStride = sizeof(btScalar) * 3;
+        im.m_numTriangles = part.num_triangles;
+        im.m_triangleIndexBase = reinterpret_cast<const unsigned char*>(part.indices);
+        im.m_triangleIndexStride = sizeof(int) * 3;
+        iv->addIndexedMesh(im, PHY_INTEGER);
+      }
+      mesh_arrays.push_back(std::unique_ptr<btTriangleIndexVertexArray>(iv));
+      return new btBvhTriangleMeshShape(iv, true);
     }
   }
   return nullptr;
@@ -146,11 +167,13 @@ int main(int argc, char** argv) {
   // first, which the declaration order guarantees) ---
   std::vector<std::unique_ptr<btCollisionShape>> shapes;
   std::vector<std::unique_ptr<btTriangleMesh>> mesh_storage;
+  std::vector<std::unique_ptr<btTriangleIndexVertexArray>> mesh_array_storage;
   std::vector<std::unique_ptr<btMotionState>> motions;
   std::vector<std::unique_ptr<btRigidBody>> bodies;
   for (int i = 0; i < spec->num_bodies; ++i) {
     const BodySpec& b = spec->bodies[i];
-    shapes.push_back(std::unique_ptr<btCollisionShape>(make_shape(b, mesh_storage)));
+    shapes.push_back(std::unique_ptr<btCollisionShape>(
+        make_shape(b, mesh_storage, mesh_array_storage)));
     btCollisionShape* shape = shapes.back().get();
     motions.push_back(std::unique_ptr<btMotionState>(
         new btDefaultMotionState(btTransform(btQuaternion(0, 0, 0, 1),
@@ -159,11 +182,15 @@ int main(int argc, char** argv) {
     if (!b.is_static) shape->calculateLocalInertia(b.mass, local_inertia);
     btRigidBody::btRigidBodyConstructionInfo ci(
         b.is_static ? btScalar(0.0) : b.mass, motions.back().get(), shape, local_inertia);
+    // Construction-info-only opt-in (Bullet exposes no post-construction
+    // setter): the ragdoll-stack "additional damping" block of applyDamping.
+    ci.m_additionalDamping = b.additional_damping != 0;
     bodies.push_back(std::unique_ptr<btRigidBody>(new btRigidBody(ci)));
     btRigidBody* body = bodies.back().get();
     body->setFriction(b.friction);
     body->setRestitution(b.restitution);
     body->setRollingFriction(b.rolling_friction);
+    body->setDamping(b.linear_damping, b.angular_damping);
     body->setAnisotropicFriction(btVector3(b.anisotropic_friction[0],
                                            b.anisotropic_friction[1],
                                            b.anisotropic_friction[2]));

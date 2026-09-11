@@ -1,5 +1,5 @@
 {
-  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/src/parity_scenes.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant), mesh(grid[nx,nz], origin[x0,z0], cell[dx,dz], heights[nx*nz] in z-major order; indices derived with the falling_mesh winding). Body fields: mass (0 = static), friction, restitution, position, optional velocity[vx,vy,vz] (initial linear velocity) and ccd{motion_threshold, swept_sphere_radius}. Consumer-API body fields (all optional): gravity[x,y,z] (implies DISABLE_WORLD_GRAVITY: the body keeps its own gravity detached from world propagation), no_contact_response (true = trigger/sensor, CF_NO_CONTACT_RESPONSE), group/mask (collision filter group & mask, -1 = all; default group 1 / mask -1). Consumer-API scene fields (optional): pair_filter [nameA, nameB] (this pair is excluded from collision, btOverlapFilterCallback style), rays [{from, to, mode 'all'|'closest', group, mask}] (probed once after the last frame, recorded to <scene>_rays_*.csv: ray_idx body_idx fraction, sorted by fraction).",
+  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/src/parity_scenes.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant), mesh(grid[nx,nz], origin[x0,z0], cell[dx,dz], heights[nx*nz] in z-major order; indices derived with the falling_mesh winding), mesh_parts(parts[], each a mesh spec; parts are independent IndexedMesh buffers — seams duplicate vertices — concatenated into one triangle stream in part order). Body fields: mass (0 = static), friction, restitution, position, optional velocity[vx,vy,vz] (initial linear velocity), angular_velocity[vx,vy,vz], damping fields linear_damping/angular_damping/additional_damping (the flag is Bullet's m_additionalDamping opt-in) and ccd{motion_threshold, swept_sphere_radius}. Consumer-API body fields (all optional): gravity[x,y,z] (implies DISABLE_WORLD_GRAVITY: the body keeps its own gravity detached from world propagation), no_contact_response (true = trigger/sensor, CF_NO_CONTACT_RESPONSE), group/mask (collision filter group & mask, -1 = all; default group 1 / mask -1). Consumer-API scene fields (optional): pair_filter [nameA, nameB] (this pair is excluded from collision, btOverlapFilterCallback style), rays [{from, to, mode 'all'|'closest', group, mask}] (probed once after the last frame, recorded to <scene>_rays_*.csv: ray_idx body_idx fraction, sorted by fraction).",
   "scenes": {
     "falling_box": {
       "dt": [
@@ -1093,6 +1093,271 @@
         "ball_soft",
         "ball_hard",
         "ball_soft_heavy"
+      ]
+    },
+    "damped_stack": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 600,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              25,
+              0.5,
+              25
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "b1",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            0.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "linear_damping": 0.02,
+          "angular_damping": 0.05,
+          "additional_damping": true
+        },
+        {
+          "name": "b2",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            1.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "linear_damping": 0.02,
+          "angular_damping": 0.05,
+          "additional_damping": true
+        },
+        {
+          "name": "b3",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            2.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "linear_damping": 0.02,
+          "angular_damping": 0.05,
+          "additional_damping": true
+        },
+        {
+          "name": "b4",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0,
+            3.5,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0,
+          "linear_damping": 0.02,
+          "angular_damping": 0.05,
+          "additional_damping": true,
+          "velocity": [
+            0.3,
+            0,
+            0
+          ],
+          "angular_velocity": [
+            0,
+            0,
+            2
+          ]
+        }
+      ],
+      "record": [
+        "b1",
+        "b2",
+        "b3",
+        "b4"
+      ]
+    },
+    "mesh_parts": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 420,
+      "iterations": 20,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "mesh_parts",
+            "parts": [
+              {
+                "grid": [
+                  5,
+                  5
+                ],
+                "origin": [
+                  -4.5,
+                  -2.5
+                ],
+                "cell": [
+                  1.0,
+                  1.0
+                ],
+                "heights": [
+                  0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0
+                ]
+              },
+              {
+                "grid": [
+                  5,
+                  5
+                ],
+                "origin": [
+                  0.5,
+                  -2.5
+                ],
+                "cell": [
+                  1.0,
+                  1.0
+                ],
+                "heights": [
+                  0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0
+                ]
+              }
+            ]
+          },
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "sphere",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            -2,
+            5,
+            0.5
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "name": "box",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            3.5,
+            5,
+            0.5
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        },
+        {
+          "name": "box_seam",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "position": [
+            0.5,
+            5,
+            0.5
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        }
+      ],
+      "record": [
+        "sphere",
+        "box",
+        "box_seam"
       ]
     }
   }

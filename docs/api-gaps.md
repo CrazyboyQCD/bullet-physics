@@ -354,14 +354,26 @@ S/M/L · **See** = existing notes.
   - Files: `character.rs` (`jump` at L154 is the template).
   - Risk: none; upstream defaults already verified (deviations §3).
   - Size: S.
-- **Soft-body cluster kernels**: `PSolve_CLinks` / `VSolve_CLinks`
-  (Bullet's default presets never install them; custom solver sequences
-  would need them).
-  - Impl: the softbody solver sequence gains the two cluster-link
-    kernels; only reachable when a user installs a custom sequence.
-  - Files: `softbody/solver.rs`.
-  - Risk: none for default behavior (presets unchanged).
-  - Size: S. See: deviations §3.
+- **Soft-body cluster core** ✅ (2026-09-10/11): the full cluster-core
+  lifecycle is ported and verified against real Bullet — the static
+  `solveClusters(bodies)` pass (joints Prepare → `citerations` ×
+  Solve(sor = 1) → Terminate + delete), `applyClusters(false/true)`,
+  `dampClusters`, and the LJoint / AJoint / CJoint trio with the drift
+  split (specs defaults erp = cfm = split = 1, master = `clusters[0]`,
+  refs = full inverse-frame · pin). The cluster-link kernels
+  `PSolve_CLinks` / `VSolve_CLinks` listed here earlier are a **phantom
+  entry**: a full bullet3-master refs sweep found no such symbols (the
+  ePSolver set has 4 kernels, the eVSolver set 1 — all ported). The
+  `cluster_joints` probe (two 7×7 patches + LJoint@midpoint + AJoint∥Y,
+  patch B at +2 m/s) reproduces Bullet bit-for-bit in f64 across 20
+  frames after the 2026-09-11 fix of the `terminate` drift-impulse
+  parameter order (the split channel had been silently dead since the
+  first port); the regression test
+  `linear_joint_drift_split_reaches_nodes` pins it.
+  Known residual: the `cluster_pair` CL_SS chaos probe still diverges
+  qualitatively from Bullet (pre-existing, unrelated to the split
+  channel — first frame already off; tracked for a separate round).
+  Files: `softbody/cluster.rs`, `softbody/joints.rs`, `softbody/solver.rs`.
 - **Collision-event sources** ✅ (2026-09-07): multibody-collider and
   soft-body pairs joined the rigid pairs as event sources.
   - Shipped: `CollisionEvent::Started/Stopped` sides widened from

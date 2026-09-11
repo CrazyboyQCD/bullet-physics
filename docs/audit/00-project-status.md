@@ -8,19 +8,24 @@
 
 ## Current HEAD
 
-`7a20273` — *docs(design): debug draw design specification* (2026-09-09),
-followed by the debug-draw implementation commit (same day).
-`origin/main` is behind by 2 commits (push pending).
+`67e46f3` — *docs: re-record the speed ledger after the soft-contact fix*
+(2026-09-10, pushed). The working tree carries the uncommitted on-demand
+third batch (additional damping, multi-part meshes, parity scenes
+`damped_stack`/`mesh_parts`) plus the 2026-09-11 cluster-joint
+drift-split fix (`terminate` parameter order — the split channel had been
+silently dead since the first port; `cluster_joints` probe now bit-identical
+in f64, regression test pinned).
 
 ## Current Phase
 
-**Correctness hardening / independent audit.** The functional core is
-complete: the rigid-body pipeline, Featherstone multibodies with collision
+**1.0 API freeze (pre-freeze review).** The functional core is complete and
+audited: the rigid-body pipeline, Featherstone multibodies with collision
 integration, the classic SoftBody system, and the consumer-facing API layer
-are all implemented and covered by the test/parity/probe suites. Development
-now shifts from adding features to verifying what exists — subsystem-by-
-subsystem independent source review, adversarial testing, and only then the
-remaining API items and the 1.0 API freeze.
+are all implemented and covered by the test/parity/probe suites. The
+subsystem audits (01–09) are complete, the minimal debug draw shipped, and
+the consumer-API backlog (`docs/api-priorities.md`) is fully dispatched —
+every row is Done or explicitly Won't-do/deferred. The remaining 1.0 item
+is the API freeze review (naming / docs / breaking surface).
 
 ## Completed
 
@@ -51,13 +56,27 @@ Feature status at this HEAD (evidence for *tested* cases only):
   `CollisionEvent` (sides generalized to the `CollisionObject` enum:
   Body / Link / Soft), ghost overlap list, compound child transforms,
   motion states, multibody/soft-body event sources (2026-09-07).
+- **Consumer API (on-demand rounds, 2026-09-09/10)**: persistent-manifold
+  extras (`ContactPoint::lifetime`, `HAS_FRICTION_ANCHOR`,
+  `set_contact_point_events`), `btShapeHull` (42-direction table;
+  quickhull moved to `bullet-math`), character directional jump,
+  anisotropic friction, per-pair contact stiffness/damping (parity scenes
+  `anisotropic_friction` / `contact_soft`), additional damping
+  (`RigidBody::additional_damping` + builder, parity scene `damped_stack`),
+  multi-part triangle meshes (`TriangleMeshPart` / `from_parts`, parity
+  scene `mesh_parts`). Cluster core verified against real Bullet
+  (`cluster_joints` probe f64 bit-identical after the drift-split fix).
+- **Debug draw** (2026-09-09): `debug_primitives(flags, emit)` — five
+  read-only domains, `DebugPrim` `#[non_exhaustive]`, invariance contract
+  test-pinned.
 - **no_std**: whole workspace behind `--no-default-features --features libm`
   (std default bit-identical; libm scalar backend; injectable step clock).
-- **Tooling**: parity harness (8 scenes × f32/f64, ledger current),
+- **Tooling**: parity harness (10 scenes × f32/f64, ledger current),
   multibody/softbody/GImpact probes (24 mb scenes × f32/f64), perf ledger
-  (2026-09-09 re-check: wall clock in band, memory sections re-recorded),
-  memory-trend harness, flamegraph workflow.
-- **Quality gates**: 456 unit tests × f32/f64 green, 14 demos, clippy clean
+  (2026-09-11 re-record after the third batch + drift-split fix: wall clock
+  in band, memory +0.031 MB attributed), memory-trend harness, flamegraph
+  workflow.
+- **Quality gates**: 475 unit tests × f32/f64 green, 14 demos, clippy clean
   on both features.
 
 ## In Progress
@@ -93,16 +112,22 @@ perf in band (the first island-gating cut cost +20% on stack_1000; fixed by
 a per-proxy eligibility fast path, `docs/perf/speed.md`). Residual
 semantic note recorded as deviations §1 "Islands: gating & kinematic wake".
 
-**Stage: audits 01–09 complete.** The broadphase integration audit landed as
+**Stage: audits 01–09 complete; on-demand API rounds dispatched.** The
+broadphase integration audit landed as
 [`07-broadphase-integration.md`](07-broadphase-integration.md), the CCD audit
 as [`08-ccd.md`](08-ccd.md) (one confirmed sensor-target bug fixed), and the
 full integrated adversarial pass as
 [`09-integrated-adversarial.md`](09-integrated-adversarial.md) (one P3
 zero-link fixed-base multibody panic fixed; 11 cross-system adversarial
 tests; deterministic state machine bit-repeatable). The minimal debug
-draw — the last feature item — shipped on 2026-09-09 per
-`docs/design/debug-draw.md` (five read-only domains, invariance contract
-test-pinned). The remaining 1.0 item is the API freeze review.
+draw shipped on 2026-09-09 per `docs/design/debug-draw.md`. The on-demand
+consumer-API rounds landed 2026-09-09/10 and the third batch (additional
+damping, multi-part meshes, cluster-core verification) on 2026-09-10/11 —
+the cluster-core round reproduced and fixed the long-standing dead
+cluster-joint split channel (`terminate` parameter order; f64 bit-identical
+probe, regression test pinned). The remaining 1.0 item is the API freeze
+review. Known residual: the `cluster_pair` CL_SS chaos probe diverges
+qualitatively (pre-existing, tracked for a separate round).
 
 ## Known Deviations
 
@@ -163,8 +188,8 @@ coherence (all fixed and test-pinned, see In Progress above).
 - Optional semantic parity items (each triggers a parity re-record):
   `m_allowedCcdPenetration = 0.04`, implicit gyroscopic impulse, CCD
   rotation rewind / compound gate alignment (deviations §1 candidates).
-- Contact-force events, per-pair solver hooks, spinning friction,
-  btShapeHull, character directional jump (all on-demand, `docs/api-gaps.md`).
+- Contact-force events, per-pair solver hooks, spinning friction (all
+  on-demand, `docs/api-gaps.md`).
 
 ## Explicitly Out of Scope
 
@@ -188,16 +213,14 @@ exists:
 ## Current Priority
 
 1. Documentation alignment (done, 2026-09-07).
-2. Independent source audit: manifold (`01-manifold.md` — done 2026-09-08).
-3. Independent source audit: GJK (next).
-4. Independent source audit: EPA.
-5. Independent source audit: convex-convex.
-6. Independent source audit: broadphase (AxisSweep3 + DBVT).
-7. Adversarial correctness testing (done).
-8. Minimal debug draw (done, 2026-09-09).
-9. 1.0 API freeze (next).
-10. IslandWork / parallel island solver.
-11. Further performance optimization.
+2. Independent source audits 01–09 (done 2026-09-09).
+3. Adversarial correctness testing (done).
+4. Minimal debug draw (done, 2026-09-09).
+5. On-demand consumer-API rounds (done 2026-09-09/10; third batch +
+   cluster-core verification done 2026-09-10/11).
+6. 1.0 API freeze review (next).
+7. IslandWork / parallel island solver.
+8. Further performance optimization.
 
 ## Do Not Work On Yet
 

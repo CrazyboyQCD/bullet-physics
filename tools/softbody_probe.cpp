@@ -287,11 +287,57 @@ static void scene_rope_ball_tunnel(int frames)
 	}
 }
 
+// Scene 8: two 7x7 patches mid-air (no ground - keeps the scene inside the
+// deterministic-helpers class; the ellipsoid hull vertex-order scatter of
+// the Phase D probes never enters), each split into 4 K-mean clusters,
+// pinned to each other through a LJoint at (0, 4, 0) plus an AJoint on +Y
+// (master clusters, specs defaults erp = cfm = split = 1, default
+// IControl); patch B starts with +2 m/s so the joint fight is non-trivial.
+// Exercises the user-joint half of the cluster-core solve (prepare /
+// citerations x solve / terminate with the drift split). Patches, not
+// ropes: a straight rope's master cluster is a colinear point set whose
+// inertia matrix is singular (Bullet's initializeClusters inverts it
+// unguarded - both engines NaN identically, an upstream capacity edge the
+// scene must stay clear of).
+static void scene_cluster_joints(int frames)
+{
+	btSoftRigidDynamicsWorld* world = makeWorld();
+	btSoftBody* a = btSoftBodyHelpers::CreatePatch(world->getWorldInfo(),
+	                                               btVector3(-2, 5, -2), btVector3(2, 5, -2),
+	                                               btVector3(-2, 5, 2), btVector3(2, 5, 2),
+	                                               7, 7, 0, true);
+	btSoftBody* b = btSoftBodyHelpers::CreatePatch(world->getWorldInfo(),
+	                                               btVector3(-2, 3, -2), btVector3(2, 3, -2),
+	                                               btVector3(-2, 3, 2), btVector3(2, 3, 2),
+	                                               7, 7, 0, true);
+	for (btSoftBody* psb : {a, b})
+	{
+		psb->m_cfg.piterations = 4;
+		psb->generateClusters(4, 32);
+		world->addSoftBody(psb);
+	}
+	b->addVelocity(btVector3(0, 2, 0));
+	btSoftBody::LJoint::Specs lin;
+	lin.position = btVector3(0, 4, 0);
+	a->appendLinearJoint(lin, b);
+	btSoftBody::AJoint::Specs ang;
+	ang.axis = btVector3(0, 1, 0);
+	a->appendAngularJoint(ang, b);
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3 c0 = a->m_clusters[0]->m_framexform.getOrigin();
+		const btVector3 c1 = b->m_clusters[0]->m_framexform.getOrigin();
+		printf("%d %.6f %.6f %.6f %.6f\n", f, c0.x(), c0.y(),
+		       (c0 - c1).length(), centerOfMass(a).y());
+	}
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s <rope_pendulum|rope_ground|cloth_plane|patch_catenary|soft_soft_vf|ellipsoid_ground|cluster_pair|rope_ball_tunnel> [frames]\n", argv[0]);
+		fprintf(stderr, "usage: %s <rope_pendulum|rope_ground|cloth_plane|patch_catenary|soft_soft_vf|ellipsoid_ground|cluster_pair|cluster_joints|rope_ball_tunnel> [frames]\n", argv[0]);
 		return 1;
 	}
 	const char* scene = argv[1];
@@ -310,6 +356,8 @@ int main(int argc, char** argv)
 		scene_ellipsoid_ground(frames);
 	else if (!strcmp(scene, "cluster_pair"))
 		scene_cluster_pair(frames);
+	else if (!strcmp(scene, "cluster_joints"))
+		scene_cluster_joints(frames);
 	else if (!strcmp(scene, "rope_ball_tunnel"))
 		scene_rope_ball_tunnel(frames);
 	else

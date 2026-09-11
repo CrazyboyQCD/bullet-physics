@@ -7,8 +7,8 @@
 //! with scene in {rope_pendulum, rope_ground, cloth_plane}.
 
 use bullet::dynamics::{
-    create_ellipsoid, create_patch, create_rope, PhysicsWorld, RigidBody, SoftBodyHandle,
-    SoftCollision,
+    create_ellipsoid, create_patch, create_rope, AngularJointSpecs, LinearJointSpecs,
+    PhysicsWorld, RigidBody, Side, SoftBodyHandle, SoftCollision,
 };
 use bullet::math::{Real, Vector3};
 use bullet::shapes::CollisionShape;
@@ -26,6 +26,7 @@ fn main() {
         "soft_soft_vf" => scene_soft_soft_vf(dt, frames),
         "ellipsoid_ground" => scene_ellipsoid_ground(dt, frames),
         "cluster_pair" => scene_cluster_pair(dt, frames),
+        "cluster_joints" => scene_cluster_joints(dt, frames),
         "rope_ball_tunnel" => scene_rope_ball_tunnel(dt, frames),
         other => {
             eprintln!("unknown scene {other}");
@@ -279,6 +280,79 @@ fn scene_cluster_pair(dt: Real, frames: usize) {
             min_a.min(min_b),
             ca.x
         );
+    }
+}
+
+/// Two 7x7 patches mid-air (no ground — keeps the scene inside the
+/// deterministic-helpers class; the ellipsoid hull vertex-order scatter of
+/// the Phase D probes never enters), each split into 4 K-mean clusters,
+/// pinned to each other through a LJoint at (0, 4, 0) plus an AJoint on +Y
+/// (master clusters, specs defaults erp = cfm = split = 1, default
+/// IControl); patch B starts with +2 m/s so the joint fight is non-trivial.
+/// Exercises the user-joint half of the cluster-core solve (prepare /
+/// citerations × solve / terminate with the drift split). Patches, not
+/// ropes: a straight rope's master cluster is a colinear point set whose
+/// inertia matrix is singular (Bullet's initializeClusters inverts it
+/// unguarded — both engines NaN identically, an upstream capacity edge the
+/// scene must stay clear of).
+fn scene_cluster_joints(dt: Real, frames: usize) {
+    let mut world = make_world();
+    let a = world.add_soft_body(create_patch(
+        Vector3::new(-2.0, 5.0, -2.0),
+        Vector3::new(2.0, 5.0, -2.0),
+        Vector3::new(-2.0, 5.0, 2.0),
+        Vector3::new(2.0, 5.0, 2.0),
+        7,
+        7,
+        0,
+        true,
+        0.0,
+    ));
+    let b = world.add_soft_body(create_patch(
+        Vector3::new(-2.0, 3.0, -2.0),
+        Vector3::new(2.0, 3.0, -2.0),
+        Vector3::new(-2.0, 3.0, 2.0),
+        Vector3::new(2.0, 3.0, 2.0),
+        7,
+        7,
+        0,
+        true,
+        0.0,
+    ));
+    for i in [a, b] {
+        let sb = world.soft_body_mut(i);
+        sb.cfg.piterations = 4;
+        sb.generate_clusters(4, 32);
+    }
+    world.soft_body_mut(b).add_velocity(Vector3::new(0.0, 2.0, 0.0));
+    // Bullet's appendLinearJoint(lin, b) / appendAngularJoint(ang, b) install
+    // on m_clusters[0] of `a` joined to m_clusters[0] of `b`.
+    world.add_soft_linear_joint(
+        a,
+        LinearJointSpecs {
+            position: Vector3::new(0.0, 4.0, 0.0),
+            ..LinearJointSpecs::default()
+        },
+        Side::Cluster { soft: b, cluster: 0 },
+    );
+    world.add_soft_angular_joint(
+        a,
+        AngularJointSpecs {
+            axis: Vector3::Y,
+            ..AngularJointSpecs::default()
+        },
+        Side::Cluster { soft: b, cluster: 0 },
+    );
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let (c0, c1, com_y) = {
+            let sa = world.soft_body(a);
+            let sb = world.soft_body(b);
+            let c0 = sa.clusters[0].framepos;
+            let c1 = sb.clusters[0].framepos;
+            (c0, c1, sa.get_center_of_mass().y)
+        };
+        println!("{f} {:.6} {:.6} {:.6} {:.6}", c0.x, c0.y, (c0 - c1).length(), com_y);
     }
 }
 

@@ -5,6 +5,17 @@ use alloc::vec::Vec;
 use super::bvh::Bvh;
 use super::CollisionShape;
 
+/// One indexed triangle soup of a mesh part (Bullet's `btIndexedMesh`): an
+/// independent vertex/index pair with its own index base. Parts never share
+/// vertex buffers — tiled terrain duplicates the seam vertices instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriangleMeshPart {
+    /// The part's vertices.
+    pub vertices: Vec<Vector3>,
+    /// Triangle corner indices into [`TriangleMeshPart::vertices`].
+    pub indices: Vec<[u32; 3]>,
+}
+
 /// A triangle mesh collision shape, equivalent to Bullet's
 /// `btBvhTriangleMeshShape` when used statically and to its
 /// `btGImpactMeshShape` when used dynamically (a `btTriangleMesh` plus a
@@ -39,6 +50,30 @@ pub struct TriangleMesh {
 impl TriangleMesh {
     /// Build a mesh from vertices and triangle indices (not validated).
     pub fn new(vertices: Vec<Vector3>, indices: Vec<[u32; 3]>) -> Self {
+        Self::from_parts(vec![TriangleMeshPart { vertices, indices }])
+    }
+
+    /// Build a mesh from several independent parts (Bullet's
+    /// `btTriangleIndexVertexArray` with `btIndexedMesh` entries): parts
+    /// never share vertex buffers, so the vertices are concatenated and the
+    /// indices offset per part. The runtime — BVH, narrow phase, ray casts,
+    /// inertia — sees one triangle stream in part order, exactly like
+    /// Bullet's BVH leaves spanning every part; there is no per-part
+    /// runtime path, this is a construction-time convenience.
+    pub fn from_parts(parts: Vec<TriangleMeshPart>) -> Self {
+        let total_vertices = parts.iter().map(|p| p.vertices.len()).sum();
+        let total_indices = parts.iter().map(|p| p.indices.len()).sum();
+        let mut vertices = Vec::with_capacity(total_vertices);
+        let mut indices = Vec::with_capacity(total_indices);
+        for part in parts {
+            let offset = vertices.len() as u32;
+            vertices.extend(part.vertices);
+            indices.extend(
+                part.indices
+                    .into_iter()
+                    .map(|t| [t[0] + offset, t[1] + offset, t[2] + offset]),
+            );
+        }
         let bvh = Bvh::build(&vertices, &indices);
         let mut tri_hulls = Vec::with_capacity(indices.len());
         let mut tri_aabbs = Vec::with_capacity(indices.len());
@@ -229,5 +264,68 @@ mod tests {
     fn empty_mesh_inertia_is_zero() {
         let m = TriangleMesh::new(Vec::new(), Vec::new());
         assert_eq!(m.local_inertia(1.0), Vector3::ZERO);
+    }
+
+    /// Two unit-square parts tiling x in [0, 2] (duplicated seam vertices at
+    /// x=1, like independent `btIndexedMesh` buffers).
+    fn two_parts() -> Vec<TriangleMeshPart> {
+        let quad = |x0: Real| {
+            vec![
+                Vector3::new(x0, 0.0, 0.0),
+                Vector3::new(x0 + 1.0, 0.0, 0.0),
+                Vector3::new(x0 + 1.0, 0.0, 1.0),
+                Vector3::new(x0, 0.0, 1.0),
+            ]
+        };
+        let tris = || vec![[0, 1, 2], [0, 2, 3]];
+        vec![
+            TriangleMeshPart { vertices: quad(0.0), indices: tris() },
+            TriangleMeshPart { vertices: quad(1.0), indices: tris() },
+        ]
+    }
+
+    /// `from_parts` is exactly the concatenated single-buffer mesh: same
+    /// vertices, same (offset) indices, same derived data — byte-identical
+    /// to the concatenation workaround.
+    #[test]
+    fn parts_equal_the_concatenated_mesh() {
+        let parts = two_parts();
+        let concatenated = TriangleMesh::new(
+            parts[0]
+                .vertices
+                .iter()
+                .chain(&parts[1].vertices)
+                .cloned()
+                .collect(),
+            vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]],
+        );
+        let multi = TriangleMesh::from_parts(parts);
+        assert_eq!(multi, concatenated);
+    }
+
+    /// The runtime paths treat the part boundary as an internal seam: the
+    /// BVH reports candidate triangles from both parts across it, ray casts
+    /// hit either side, and the vertex point-mass inertia sums both parts
+    /// (Bullet's `btOptimizedBvh::build` walks every `IndexedMesh` part the
+    /// same way).
+    #[test]
+    fn seam_crossing_queries_reach_both_parts() {
+        let m = TriangleMesh::from_parts(two_parts());
+        // The seam column x=1: candidates from both parts share the seam.
+        let query = Aabb::new(Vector3::new(0.8, -1.0, -0.1), Vector3::new(1.2, 1.0, 1.1));
+        let hits = m.triangles_in_aabb(&query);
+        assert!(hits.contains(&1), "part A triangle missing");
+        assert!(hits.contains(&2), "part B triangle missing");
+        // A ray down the seam hits a triangle (t and normal identical to
+        // the interior case — the duplicated seam vertices are exact).
+        let (t, n) = m
+            .raycast(Vector3::new(1.0, 5.0, 0.5), Vector3::new(1.0, -1.0, 0.5))
+            .unwrap();
+        assert_relative_eq!(t, 5.0 / 6.0, epsilon = 1e-6);
+        assert_relative_eq!(n.y, 1.0, epsilon = 1e-6);
+        // Inertia: 8 vertex point masses at the grid corners.
+        let i = m.local_inertia(8.0);
+        assert_relative_eq!(i.x, 4.0, epsilon = 1e-5); // sum(y²+z²) = 4
+        assert_relative_eq!(i.z, 12.0, epsilon = 1e-5); // sum(x²+y²) = 12
     }
 }

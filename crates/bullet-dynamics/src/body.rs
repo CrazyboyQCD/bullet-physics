@@ -254,6 +254,16 @@ pub struct RigidBody {
     /// [`RigidBody::integrate_velocities`]).
     linear_damping: Real,
     angular_damping: Real,
+    /// The opt-in "additional damping" block of Bullet's `applyDamping`
+    /// (Bullet's `m_additionalDamping` plus the four construction-info
+    /// scalars; defaults factor 0.005, both thresholds² 0.01, angular
+    /// factor 0.01 — Bullet exposes no setters after construction, so this
+    /// crate gates them behind the builder too).
+    additional_damping: bool,
+    additional_damping_factor: Real,
+    additional_linear_damping_threshold_sqr: Real,
+    additional_angular_damping_threshold_sqr: Real,
+    additional_angular_damping_factor: Real,
     is_static: bool,
     activation_state: ActivationState,
     deactivation_time: Real,
@@ -311,6 +321,11 @@ impl RigidBody {
             gravity: Vector3::ZERO,
             linear_damping: 0.0,
             angular_damping: 0.0,
+            additional_damping: false,
+            additional_damping_factor: 0.005,
+            additional_linear_damping_threshold_sqr: 0.01,
+            additional_angular_damping_threshold_sqr: 0.01,
+            additional_angular_damping_factor: 0.01,
             is_static: false,
             activation_state: ActivationState::Active,
             deactivation_time: 0.0,
@@ -370,6 +385,11 @@ impl RigidBody {
             gravity: Vector3::ZERO,
             linear_damping: 0.0,
             angular_damping: 0.0,
+            additional_damping: false,
+            additional_damping_factor: 0.005,
+            additional_linear_damping_threshold_sqr: 0.01,
+            additional_angular_damping_threshold_sqr: 0.01,
+            additional_angular_damping_factor: 0.01,
             is_static: true,
             activation_state: ActivationState::IslandSleeping,
             deactivation_time: 0.0,
@@ -791,6 +811,39 @@ impl RigidBody {
         self.angular_damping = angular.clamp(0.0, 1.0);
     }
 
+    /// Builder: opt this body into the "additional damping" block of
+    /// [`RigidBody::apply_damping`]
+    /// (`btRigidBodyConstructionInfo::m_additionalDamping`) — a
+    /// humanoid/ragdoll-stack tuning safety valve that shrinks velocities
+    /// below per-step thresholds by an extra factor. Bullet offers no
+    /// post-construction setter for this (construction info only), so this
+    /// crate gates it behind the builder as well.
+    pub fn additional_damping(mut self, on: bool) -> Self {
+        self.additional_damping = on;
+        self
+    }
+
+    /// Builder: override the four additional-damping scalars (Bullet's
+    /// construction-info fields, which also carry no setters). Defaults:
+    /// `factor = 0.005`, `linear_threshold_sqr = 0.01`,
+    /// `angular_threshold_sqr = 0.01`, `angular_factor = 0.01`. Upstream
+    /// quirk, mirrored: `applyDamping` never reads the angular factor —
+    /// both velocities scale by `factor` — so the last parameter only
+    /// rides along like Bullet's.
+    pub fn additional_damping_params(
+        mut self,
+        factor: Real,
+        linear_threshold_sqr: Real,
+        angular_threshold_sqr: Real,
+        angular_factor: Real,
+    ) -> Self {
+        self.additional_damping_factor = factor;
+        self.additional_linear_damping_threshold_sqr = linear_threshold_sqr;
+        self.additional_angular_damping_threshold_sqr = angular_threshold_sqr;
+        self.additional_angular_damping_factor = angular_factor;
+        self
+    }
+
     /// Soft-constraint parameters for this body's contacts (Bullet's
     /// `setContactStiffnessAndDamping`): every contact pair involving this
     /// body replaces its Baumgarte factor and adds a compliance CFM derived
@@ -906,7 +959,11 @@ impl RigidBody {
     /// integrates gravity and forces). Bullet applies it to every non-static
     /// body; gating on activity here is equivalent because sleeping bodies
     /// carry zero velocity. The opt-in "additional damping" block of the
-    /// same function is not ported (deviations §3).
+    /// same function (the ragdoll-stack safety valve, see
+    /// [`RigidBody::additional_damping`]) runs verbatim when enabled —
+    /// including the upstream quirks of comparing the speeds against the
+    /// damping factors themselves (`speed < m_linearDamping`) and the
+    /// hardcoded `0.005` subtraction rates.
     #[inline]
     fn apply_damping(&mut self, dt: Real) {
         // Zero factors skip the `powf`; multiplying by
@@ -916,6 +973,36 @@ impl RigidBody {
         }
         if self.angular_damping != 0.0 {
             self.angular_velocity *= math::powf(1.0 - self.angular_damping, dt);
+        }
+        if !self.additional_damping {
+            return;
+        }
+        // "Additional damping can help avoiding lowpass jitter motion, help
+        // stability for ragdolls etc." — btRigidBody.cpp, verbatim.
+        if self.angular_velocity.length_squared() < self.additional_angular_damping_threshold_sqr
+            && self.linear_velocity.length_squared() < self.additional_linear_damping_threshold_sqr
+        {
+            self.angular_velocity *= self.additional_damping_factor;
+            self.linear_velocity *= self.additional_damping_factor;
+        }
+        let damp_vel: Real = 0.005;
+        let speed = self.linear_velocity.length();
+        if speed < self.linear_damping {
+            if speed > damp_vel {
+                let dir = self.linear_velocity / self.linear_velocity.length();
+                self.linear_velocity -= dir * damp_vel;
+            } else {
+                self.linear_velocity = Vector3::ZERO;
+            }
+        }
+        let ang_speed = self.angular_velocity.length();
+        if ang_speed < self.angular_damping {
+            if ang_speed > damp_vel {
+                let dir = self.angular_velocity / self.angular_velocity.length();
+                self.angular_velocity -= dir * damp_vel;
+            } else {
+                self.angular_velocity = Vector3::ZERO;
+            }
         }
     }
 
@@ -1083,5 +1170,68 @@ mod tests {
         }
         assert_relative_eq!(body.linear_velocity.x, 5.0, epsilon = 1e-4);
         assert_relative_eq!(body.angular_velocity.z, 10.0, epsilon = 1e-4);
+    }
+
+    /// The additional-damping block: velocities below both thresholds²
+    /// (0.01) shrink by the factor every step, velocities above stay
+    /// untouched, and the flag gates it off entirely (Bullet's
+    /// `applyDamping` construction-info defaults). Bullet scales *both*
+    /// velocities by `m_additionalDampingFactor` here — its
+    /// `m_additionalAngularDampingFactor` field is never read by the
+    /// function, and the port mirrors that.
+    #[test]
+    fn additional_damping_shrinks_low_speeds() {
+        let dt = 1.0 / 60.0;
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0)
+            .additional_damping(true);
+        body.linear_velocity = Vector3::new(0.05, 0.0, 0.0);
+        body.angular_velocity = Vector3::new(0.0, 0.02, 0.0);
+        body.integrate_velocities(dt);
+        assert_relative_eq!(body.linear_velocity.x, 0.05 * 0.005, epsilon = 1e-6);
+        assert_relative_eq!(body.angular_velocity.y, 0.02 * 0.005, epsilon = 1e-6);
+        // Above both thresholds the block does nothing.
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0)
+            .additional_damping(true);
+        body.linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+        body.angular_velocity = Vector3::new(0.0, 0.5, 0.0);
+        body.integrate_velocities(dt);
+        assert_relative_eq!(body.linear_velocity.x, 1.0, epsilon = 1e-6);
+        assert_relative_eq!(body.angular_velocity.y, 0.5, epsilon = 1e-6);
+        // Without the flag nothing runs.
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0);
+        body.linear_velocity = Vector3::new(0.05, 0.0, 0.0);
+        body.integrate_velocities(dt);
+        assert_relative_eq!(body.linear_velocity.x, 0.05, epsilon = 1e-6);
+    }
+
+    /// The verbatim subtract quirks: with large damping factors the block
+    /// compares the speeds against the factors themselves and removes a
+    /// hardcoded 0.005 per step (zeroing below it) — Bullet compares
+    /// against `m_linearDamping`, not a threshold. The pow damping runs
+    /// first, so the expectations below carry its factor.
+    #[test]
+    fn additional_damping_subtract_block_follows_the_upstream_quirk() {
+        let dt = 1.0 / 60.0;
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0)
+            .additional_damping(true);
+        body.set_damping(0.2, 0.2);
+        body.linear_velocity = Vector3::new(0.04, 0.0, 0.0);
+        body.angular_velocity = Vector3::new(0.0, 0.0, 0.15);
+        // After the pow pass the angular speed stays above the threshold²
+        // (0.01), which skips the factor block (the AND gate); both speeds
+        // sit under their damping factors and above the 0.005 cut, so both
+        // lose exactly 0.005.
+        let pow = bullet_math::math::powf(1.0 - 0.2, dt);
+        body.integrate_velocities(dt);
+        assert_relative_eq!(body.linear_velocity.x, 0.04 * pow - 0.005, epsilon = 1e-5);
+        assert_relative_eq!(body.angular_velocity.z, 0.15 * pow - 0.005, epsilon = 1e-5);
+        // A speed below the 0.005 cut zeroes out instead of going negative
+        // (the factor block shrinks it further below the cut first).
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0)
+            .additional_damping(true);
+        body.set_damping(0.2, 0.2);
+        body.linear_velocity = Vector3::new(0.002, 0.0, 0.0);
+        body.integrate_velocities(dt);
+        assert_eq!(body.linear_velocity, Vector3::ZERO);
     }
 }

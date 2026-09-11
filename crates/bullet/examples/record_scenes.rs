@@ -20,7 +20,7 @@ use std::io::Write;
 use bullet::dynamics::body::RayFilter;
 use bullet::dynamics::{BodyHandle, CollisionFlags, PhysicsWorld, RigidBody};
 use bullet::math::{Real, Vector3};
-use bullet::shapes::CollisionShape;
+use bullet::shapes::{CollisionShape, TriangleMeshPart};
 
 // Included via #[path] from src/parity_scenes.rs (auto-generated from
 // tools/scenes.json).
@@ -103,6 +103,22 @@ fn main() {
                     .collect();
                 CollisionShape::triangle_mesh(vertices, indices)
             }
+            ShapeSpec::MeshParts(parts) => {
+                // Independent IndexedMesh buffers (seam vertices duplicated);
+                // from_parts concatenates them into one triangle stream in
+                // part order, mirroring btTriangleIndexVertexArray.
+                let parts: Vec<TriangleMeshPart> = parts
+                    .iter()
+                    .map(|(verts, idx)| TriangleMeshPart {
+                        vertices: verts
+                            .chunks(3)
+                            .map(|c| Vector3::new(c[0] as Real, c[1] as Real, c[2] as Real))
+                            .collect(),
+                        indices: idx.chunks(3).map(|t| [t[0], t[1], t[2]]).collect(),
+                    })
+                    .collect();
+                CollisionShape::triangle_mesh_parts(parts)
+            }
         };
         let position = Vector3::new(
             b.position[0] as Real, b.position[1] as Real, b.position[2] as Real,
@@ -118,6 +134,12 @@ fn main() {
                 ))
         };
         body.rolling_friction = b.rolling_friction as Real;
+        body.set_damping(b.linear_damping as Real, b.angular_damping as Real);
+        if b.additional_damping {
+            // Construction-info-only opt-in in Bullet (no post-construction
+            // setter) — mirrored by the builder.
+            body = body.additional_damping(true);
+        }
         body.anisotropic_friction = Vector3::new(
             b.anisotropic_friction[0] as Real,
             b.anisotropic_friction[1] as Real,

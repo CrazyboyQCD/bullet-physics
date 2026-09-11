@@ -23,18 +23,19 @@ C_HEADER = os.path.join(ROOT, "tools", "bullet_scenes.h")
 # example; record_scenes.rs pulls it in with #[path].
 RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "parity_scenes.rs")
 
-SHAPE_TYPES = {"box", "sphere", "capsule", "cylinder", "cone", "plane", "mesh"}
+SHAPE_TYPES = {"box", "sphere", "capsule", "cylinder", "cone", "plane", "mesh",
+               "mesh_parts"}
 SHAPE_ENUM = {"box": "SHAPE_BOX", "sphere": "SHAPE_SPHERE", "capsule": "SHAPE_CAPSULE",
               "cylinder": "SHAPE_CYLINDER", "cone": "SHAPE_CONE", "plane": "SHAPE_PLANE",
-              "mesh": "SHAPE_MESH"}
+              "mesh": "SHAPE_MESH", "mesh_parts": "SHAPE_MESH_PARTS"}
 
 
 def shape_params(shape):
     """Flatten a shape dict into (type, [params...]) with the union layout:
     box: 3 half extents; sphere: radius; capsule/cylinder/cone: radius,
     half_height; plane: normal xyz + constant. Padded to 6 floats. Mesh bodies
-    carry their geometry in a dedicated MeshSpec; the params array stays
-    all-zero so the union layout still parses."""
+    (single or multi-part) carry their geometry in a dedicated MeshSpec; the
+    params array stays all-zero so the union layout still parses."""
     t = shape["type"]
     if t == "box":
         return t, list(shape["half_extents"])
@@ -44,7 +45,7 @@ def shape_params(shape):
         return t, [shape["radius"], shape["half_height"]]
     if t == "plane":
         return t, list(shape["normal"]) + [shape["constant"]]
-    if t == "mesh":
+    if t in ("mesh", "mesh_parts"):
         return t, [0.0] * 6
     raise ValueError(f"unknown shape type {t!r}")
 
@@ -98,7 +99,7 @@ def gen_c(scenes):
         "",
         "#include \"btBulletDynamicsCommon.h\"",
         "",
-        "enum ShapeType { SHAPE_BOX, SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_CYLINDER, SHAPE_CONE, SHAPE_PLANE, SHAPE_MESH };",
+        "enum ShapeType { SHAPE_BOX, SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_CYLINDER, SHAPE_CONE, SHAPE_PLANE, SHAPE_MESH, SHAPE_MESH_PARTS };",
         "",
         "struct MeshSpec {",
         "  int num_vertices;",
@@ -113,6 +114,8 @@ def gen_c(scenes):
         "  btScalar params[6];",
         "  btScalar pos[3];",
         "  btScalar mass, friction, restitution, rolling_friction;",
+        "  btScalar linear_damping, angular_damping;  // setDamping pair",
+        "  int additional_damping;  // btRigidBodyConstructionInfo flag",
         "  btScalar anisotropic_friction[3];",
         "  btScalar contact_stiffness, contact_damping;",
         "  int contact_stiffness_set;  // setContactStiffnessAndDamping opt-in",
@@ -126,6 +129,8 @@ def gen_c(scenes):
         "  int no_contact_response;  // CF_NO_CONTACT_RESPONSE: trigger/sensor",
         "  int group, mask;  // collision filter; addRigidBody(body, group, mask)",
         "  const MeshSpec* mesh;  // non-null only for SHAPE_MESH",
+        "  int num_mesh_parts;  // > 0 only for SHAPE_MESH_PARTS",
+        "  const MeshSpec* mesh_parts;  // non-null only for SHAPE_MESH_PARTS",
         "};",
         "",
         "struct RaySpec {",
@@ -153,17 +158,32 @@ def gen_c(scenes):
     for name, sc in scenes.items():
         # Emit mesh geometry first so the body specs can reference it.
         for b in sc["bodies"]:
-            if b["shape"]["type"] != "mesh":
-                continue
-            nx, nz, verts = mesh_vertices(b["shape"])
-            idx = mesh_indices(nx, nz)
-            vs = ", ".join(f"btScalar({fmt(x)})" for x in verts)
-            is_ = ", ".join(str(i) for i in idx)
-            lines.append(f"static const btScalar k{name}_{b['name']}_verts[] = {{ {vs} }};")
-            lines.append(f"static const int k{name}_{b['name']}_idx[] = {{ {is_} }};")
-            lines.append(f"static const MeshSpec k{name}_{b['name']}_mesh = "
-                         f"{{ {len(verts) // 3}, k{name}_{b['name']}_verts, "
-                         f"{len(idx) // 3}, k{name}_{b['name']}_idx }};")
+            t = b["shape"]["type"]
+            if t == "mesh":
+                nx, nz, verts = mesh_vertices(b["shape"])
+                idx = mesh_indices(nx, nz)
+                vs = ", ".join(f"btScalar({fmt(x)})" for x in verts)
+                is_ = ", ".join(str(i) for i in idx)
+                lines.append(f"static const btScalar k{name}_{b['name']}_verts[] = {{ {vs} }};")
+                lines.append(f"static const int k{name}_{b['name']}_idx[] = {{ {is_} }};")
+                lines.append(f"static const MeshSpec k{name}_{b['name']}_mesh = "
+                             f"{{ {len(verts) // 3}, k{name}_{b['name']}_verts, "
+                             f"{len(idx) // 3}, k{name}_{b['name']}_idx }};")
+            elif t == "mesh_parts":
+                # Independent IndexedMesh buffers: one vert/idx pair per part,
+                # then the MeshSpec array the shape constructor walks.
+                part_specs = []
+                for pi, part in enumerate(b["shape"]["parts"]):
+                    nx, nz, verts = mesh_vertices(part)
+                    idx = mesh_indices(nx, nz)
+                    vs = ", ".join(f"btScalar({fmt(x)})" for x in verts)
+                    is_ = ", ".join(str(i) for i in idx)
+                    lines.append(f"static const btScalar k{name}_{b['name']}_p{pi}_verts[] = {{ {vs} }};")
+                    lines.append(f"static const int k{name}_{b['name']}_p{pi}_idx[] = {{ {is_} }};")
+                    part_specs.append(f"{{ {len(verts) // 3}, k{name}_{b['name']}_p{pi}_verts, "
+                                      f"{len(idx) // 3}, k{name}_{b['name']}_p{pi}_idx }}")
+                lines.append(f"static const MeshSpec k{name}_{b['name']}_parts[] = {{ "
+                             f"{', '.join(part_specs)} }};")
         lines.append(f"static const BodySpec k{name}_bodies[] = {{")
         for b in sc["bodies"]:
             t, params = shape_params(b["shape"])
@@ -193,6 +213,12 @@ def gen_c(scenes):
             ccd_mt = ccd.get("motion_threshold", 0.0) if ccd else 0.0
             ccd_sr = ccd.get("swept_sphere_radius", 0.0) if ccd else 0.0
             mesh_ref = f"&k{name}_{b['name']}_mesh" if t == "mesh" else "nullptr"
+            nmp = len(b["shape"]["parts"]) if t == "mesh_parts" else 0
+            nmp_s = str(nmp)
+            mp_ref = f"k{name}_{b['name']}_parts" if t == "mesh_parts" else "nullptr"
+            ld = fmt(b.get("linear_damping", 0.0))
+            admp = fmt(b.get("angular_damping", 0.0))
+            add = 1 if b.get("additional_damping") else 0
             bg = b.get("gravity")
             dwg = 1 if bg else 0
             bg_s = ", ".join(f"btScalar({fmt(x)})" for x in (bg if bg else [0.0, 0.0, 0.0]))
@@ -201,10 +227,11 @@ def gen_c(scenes):
             msk = b.get("mask", -1)
             lines.append(f"  {{\"{b['name']}\", {SHAPE_ENUM[t]}, {{{p}}}, {{{pos}}}, "
                          f"btScalar({mass}), btScalar({fr}), btScalar({re}), btScalar({rf}), "
+                         f"btScalar({ld}), btScalar({admp}), {add}, "
                          f"{{{aniso_s}}}, btScalar({cks_s}), btScalar({ckd}), {cks_set}, {st}, "
                          f"{{{vel_s}}}, {{{ang_s}}}, {ccd_on}, btScalar({fmt(ccd_mt)}), "
                          f"btScalar({fmt(ccd_sr)}), {{{bg_s}}}, {dwg}, {ncr}, {grp}, {msk}, "
-                         f"{mesh_ref}}},")
+                         f"{mesh_ref}, {nmp_s}, {mp_ref}}},")
         lines.append("};")
         lines.append("")
         rec = ", ".join(f"\"{r}\"" for r in sc["record"])
@@ -259,6 +286,7 @@ def gen_rs(scenes):
         "    Cone(f32, f32),",
         "    Plane([f32; 4]),",
         "    Mesh(&'static [f32], &'static [u32]),",
+        "    MeshParts(&'static [(&'static [f32], &'static [u32])]),",
         "}",
         "",
         "pub struct BodySpec {",
@@ -269,6 +297,9 @@ def gen_rs(scenes):
         "    pub friction: f32,",
         "    pub restitution: f32,",
         "    pub rolling_friction: f32,",
+        "    pub linear_damping: f32,",
+        "    pub angular_damping: f32,",
+        "    pub additional_damping: bool,",
         "    pub anisotropic_friction: [f32; 3],",
         "    pub contact_stiffness: f32,",
         "    pub contact_damping: f32,",
@@ -322,13 +353,23 @@ def gen_rs(scenes):
                 shape = f"ShapeSpec::{cap}({fmt(params[0])}, {fmt(params[1])})"
             elif t == "plane":
                 shape = f"ShapeSpec::Plane([{', '.join(fmt(x) for x in params)}])"
-            else:  # mesh
+            elif t == "mesh":  # single-part mesh
                 _, _, verts = mesh_vertices(b["shape"])
                 nx, nz = b["shape"]["grid"]
                 idx = mesh_indices(nx, nz)
                 vs = ", ".join(fmt(x) for x in verts)
                 is_ = ", ".join(str(i) for i in idx)
                 shape = f"ShapeSpec::Mesh(&[{vs}], &[{is_}])"
+            else:  # mesh_parts
+                tuples = []
+                for part in b["shape"]["parts"]:
+                    _, _, verts = mesh_vertices(part)
+                    nx, nz = part["grid"]
+                    idx = mesh_indices(nx, nz)
+                    vs = ", ".join(fmt(x) for x in verts)
+                    is_ = ", ".join(str(i) for i in idx)
+                    tuples.append(f"(&[{vs}], &[{is_}])")
+                shape = f"ShapeSpec::MeshParts(&[{', '.join(tuples)}])"
             pos = f"[{', '.join(fmt(x) for x in b['position'])}]"
             mass = fmt(b.get("mass", 0.0))
             if b.get("mass", 0.0) == 0:
@@ -337,6 +378,9 @@ def gen_rs(scenes):
                 fr, re = fmt(b.get("friction", 0.5)), fmt(b.get("restitution", 0.0))
                 st = "false"
             rf = fmt(b.get("rolling_friction", 0.0))
+            ld = fmt(b.get("linear_damping", 0.0))
+            admp = fmt(b.get("angular_damping", 0.0))
+            add = "true" if b.get("additional_damping") else "false"
             aniso = b.get("anisotropic_friction", [1.0, 1.0, 1.0])
             aniso_s = ", ".join(fmt(x) for x in aniso)
             cks = b.get("contact_stiffness")
@@ -359,7 +403,9 @@ def gen_rs(scenes):
             msk = b.get("mask", -1) & 0xFFFF
             lines.append(f"            BodySpec {{ name: \"{b['name']}\", shape: {shape}, "
                          f"position: {pos}, mass: {mass}, friction: {fr}, restitution: {re}, "
-                         f"rolling_friction: {rf}, anisotropic_friction: [{aniso_s}], "
+                         f"rolling_friction: {rf}, linear_damping: {ld}, angular_damping: {admp}, "
+                         f"additional_damping: {add}, "
+                         f"anisotropic_friction: [{aniso_s}], "
                          f"contact_stiffness: {cks_s}, contact_damping: {ckd}, "
                          f"contact_stiffness_set: {cks_set}, "
                          f"is_static: {st}, velocity: [{vel_s}], angular_velocity: [{ang_s}], ccd_on: {ccd_on}, "
@@ -418,6 +464,13 @@ def main():
                 except ValueError as e:
                     print(f"error: {name}/{b['name']}: {e}", file=sys.stderr)
                     return 1
+            if b["shape"]["type"] == "mesh_parts":
+                for pi, part in enumerate(b["shape"]["parts"]):
+                    try:
+                        mesh_vertices(part)
+                    except ValueError as e:
+                        print(f"error: {name}/{b['name']}/part{pi}: {e}", file=sys.stderr)
+                        return 1
     with open(C_HEADER, "w", encoding="utf-8", newline="\n") as f:
         f.write(gen_c(scenes))
     with open(RS_TABLE, "w", encoding="utf-8", newline="\n") as f:
