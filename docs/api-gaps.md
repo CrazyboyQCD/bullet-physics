@@ -332,16 +332,36 @@ S/M/L · **See** = existing notes.
     pure-spin friction-noise knife edge (the rolling scene's documented
     class — positions stay digit-identical, orientation offsets freeze).
   - Size: S.
-- **Scaled-shape wrappers**: `btScaledBvhTriangleMeshShape`,
+- **Scaled-shape wrappers** ✅ (2026-09-11): `btScaledBvhTriangleMeshShape`,
   `btUniformScalingShape`, `btConvex2DShape`.
-  - Impl: new `CollisionShape` variants wrapping an inner shape + scale,
-    delegating support/AABB/inertia through the scaling (margin-core
-    scaling needs care: non-uniform scale breaks the exact ball-Minkowski
-    shortcut the GJK margin band relies on).
-  - Files: `bullet-collision/src/shapes/`.
-  - Risk: non-uniform scaling interacts with the margin-core
-    architecture (deviations §1) — sphere/box cores stop being exact
-    under scale.
+  - Shipped:
+    * `CollisionShape::scaled_triangle_mesh(mesh, scaling)` — the
+      `btScaledBvhTriangleMeshShape` semantics realized at construction
+      time (`TriangleMesh::scaled`): vertices are scaled (negative
+      components flip the winding exactly like the wrapper's per-axis
+      swap) and the BVH/hulls/AABBs rebuild from the scaled stream. Our
+      value-semantics shapes have no shared runtime BVH, so the wrapper
+      collapses into a constructor (deviations §1); for the static-terrain
+      usage the result is identical triangle-for-triangle.
+    * `CollisionShape::uniform_scaling(child, factor)` — a real wrapper
+      variant: support points, margin (Bullet's `getMargin` multiplies)
+      and the linear-inertia note are scaled through the dispatch layer,
+      so the ball-Minkowski margin-band decomposition stays exact for
+      sphere children and every GJK/EPA consumer sees the scaled shape
+      without special-casing. Rays remap endpoints through
+      `position + (p - position) / f` (same fraction, same normals).
+    * `CollisionShape::convex_2d(child)` — the marker variant: every query
+      forwards to the child verbatim, like Bullet's wrapper (it forwards
+      the 3D support untouched; the caller owns the 2D usage).
+  - Files: `shapes/mod.rs` (variants + constructors + dispatch +
+    scaled-AABB helpers), `shapes/triangle_mesh.rs` (`scaled`),
+    `raycast.rs` (raycast/inside arms). The sweep and narrow-phase
+    matches fall through their generic arms — no changes needed.
+  - Tests: 4 collision (uniform-scaling support/margin/inertia/negative
+    factor, convex-2d forwarding identity, scaled-mesh vertices/AABB/
+    flip, world support at the scaled radius) + 1 world scene (a x2
+    sphere rests at the scaled radius and sleeps; a 2d-wrapped box rests
+    like the plain box).
   - Size: M.
 - **Multi-part triangle meshes** ✅ (2026-09-10): `TriangleMeshPart` +
   `TriangleMesh::from_parts` (constructor-time concatenation with

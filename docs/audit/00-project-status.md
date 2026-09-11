@@ -130,8 +130,10 @@ probe, regression test pinned). The fourth batch is in progress (user call,
 `ContactForceEvent` drain, no Bullet counterpart — deviations §3);
 spinning friction landed 2026-09-11 (the third torsional row around the
 contact normal, inside the rolling-friction branch — upstream gate kept
-verbatim); only the scaled-shape wrappers remain. After the batch: the
-API freeze review. Known residual: the `cluster_pair` CL_SS chaos probe diverges
+verbatim) and the scaled-shape wrappers landed 2026-09-11
+(`scaled_triangle_mesh` construction-time equivalent + the
+`uniform_scaling` / `convex_2d` wrapper variants). The batch is complete:
+the next stage is the 1.0 API freeze review. Known residual: the `cluster_pair` CL_SS chaos probe diverges
 qualitatively (pre-existing, tracked for a separate round).
 
 ## Known Deviations
@@ -194,7 +196,8 @@ coherence (all fixed and test-pinned, see In Progress above).
   `m_allowedCcdPenetration = 0.04`, implicit gyroscopic impulse, CCD
   rotation rewind / compound gate alignment (deviations §1 candidates).
 - Per-pair solver hooks (on-demand, `docs/api-gaps.md`); contact-force
-  events and spinning friction landed 2026-09-11 (`docs/api-gaps.md`).
+  events, spinning friction and the scaled-shape wrappers landed
+  2026-09-11 (`docs/api-gaps.md`).
 
 ## Explicitly Out of Scope
 
@@ -222,10 +225,10 @@ exists:
 3. Adversarial correctness testing (done).
 4. Minimal debug draw (done, 2026-09-09).
 5. On-demand consumer-API rounds (done 2026-09-09/10; third batch +
-   cluster-core verification done 2026-09-10/11; fourth batch in progress —
-   contact-force events + spinning friction done 2026-09-11, scaled-shape
-   wrappers next).
-6. 1.0 API freeze review (after the fourth batch).
+   cluster-core verification done 2026-09-10/11; fourth batch done
+   2026-09-11 — contact-force events + spinning friction + scaled-shape
+   wrappers).
+6. 1.0 API freeze review (next).
 7. IslandWork / parallel island solver.
 8. Further performance optimization.
 

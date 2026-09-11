@@ -2947,6 +2947,65 @@ mod tests {
         assert!(quiet.contact_force_events().is_empty());
     }
 
+    /// A uniformly scaled sphere rides the full GJK margin-band pipeline
+    /// (support x factor, margin x factor) and settles exactly like a plain
+    /// sphere of the scaled radius: resting center at the scaled radius
+    /// above the ground, asleep.
+    #[test]
+    fn uniform_scaled_sphere_rests_at_the_scaled_radius() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(20.0, 0.5, 20.0)),
+            Vector3::new(0.0, -0.5, 0.0),
+        ));
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::uniform_scaling(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                2.0,
+            ),
+            Vector3::new(0.0, 5.0, 0.0),
+            1.0,
+        ));
+        for _ in 0..240 {
+            world.step_simulation(dt);
+        }
+        let body = world.body(ball);
+        assert!(
+            (body.position.y - 1.0).abs() < 0.02,
+            "scaled sphere must rest at radius * factor: y = {}",
+            body.position.y
+        );
+        assert!(
+            body.activation_state() == ActivationState::IslandSleeping,
+            "settled sphere should sleep"
+        );
+
+        // The convex-2d marker behaves like its child: a 2d-wrapped box
+        // slides and settles just like the plain box.
+        let mut world = PhysicsWorld::new();
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(20.0, 0.5, 20.0)),
+            Vector3::new(0.0, -0.5, 0.0),
+        ));
+        let flat = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::convex_2d(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5)),
+            ),
+            Vector3::new(0.0, 0.5, 0.0),
+            1.0,
+        ));
+        for _ in 0..120 {
+            world.step_simulation(dt);
+        }
+        let body = world.body(flat);
+        assert!(
+            (body.position.y - 0.5).abs() < 0.02,
+            "2d-wrapped box must rest on the ground: y = {}",
+            body.position.y
+        );
+    }
+
     /// Sensor pairs solve no contact rows, so they carry no impulse and
     /// never report a contact-force event — not even at threshold 0.
     #[test]

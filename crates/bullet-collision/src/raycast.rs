@@ -104,6 +104,24 @@ fn local_raycast(
         CollisionShape::Compound(compound) => {
             compound_raycast(compound, inv, position, ray_from, ray_to)
         }
+        // The uniform scale maps a ray point `p` to `position + (p -
+        // position) / f` on the child (the scale maps the child hit back
+        // onto the original ray at the same parameter), so casting against
+        // the child with the remapped endpoints returns the same fraction
+        // and the same local normal (uniform scales keep directions).
+        CollisionShape::UniformScaling(child, f) => {
+            let map = |p: Vector3| position + (p - position) / f;
+            local_raycast(
+                child,
+                inv,
+                position,
+                map(ray_from),
+                map(ray_to),
+            )
+        }
+        CollisionShape::Convex2d(child) => {
+            local_raycast(child, inv, position, ray_from, ray_to)
+        }
     }
 }
 
@@ -147,7 +165,7 @@ fn local_inside(
             hull_distance_squared(&h.points, p) <= 1e-12
         }
         CollisionShape::Plane(_) => false,
-        // Open surfaces: rays pass through freely; hits report the surface
+        // Open surfaces: rays pass through freely; hits report the surface     
         // normal facing the ray origin from either side.
         CollisionShape::TriangleMesh(_) | CollisionShape::Heightfield(_) => false,
         CollisionShape::Compound(compound) => compound.children.iter().any(|child| {
@@ -155,6 +173,15 @@ fn local_inside(
             let child_ori = orientation * child.orientation;
             local_inside(&child.shape, child_pos, child_ori, point)
         }),
+        // The uniform scale maps a point `p` to `position + (p - position) /
+        // f` on the child (the inverse of the shape's own scale around
+        // `position`).
+        CollisionShape::UniformScaling(child, f) => {
+            local_inside(child, position, orientation, position + (point - position) / f)
+        }
+        CollisionShape::Convex2d(child) => {
+            local_inside(child, position, orientation, point)
+        }
     }
 }
 

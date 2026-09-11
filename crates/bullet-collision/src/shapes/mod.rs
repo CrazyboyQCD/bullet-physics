@@ -5,6 +5,8 @@
 
 use bullet_math::{Aabb, Quaternion, Real, Vector3};
 #[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 mod box_shape;
@@ -45,6 +47,8 @@ pub enum ShapeType {
     Plane,
     TriangleMesh,
     Heightfield,
+    UniformScalingShape,
+    Convex2dShape,
 }
 
 /// A collision shape.
@@ -60,6 +64,15 @@ pub enum CollisionShape {
     Plane(Plane),
     TriangleMesh(TriangleMesh),
     Heightfield(Heightfield),
+    /// A uniformly scaled convex child (Bullet's `btUniformScalingShape`):
+    /// support points and margin scale by the factor, the inertia scales
+    /// linearly (Bullet's own "not realistic" note, kept verbatim).
+    UniformScaling(Box<CollisionShape>, Real),
+    /// A 2D-convex marker over an arbitrary convex child (Bullet's
+    /// `btConvex2dShape`): every query forwards to the child verbatim —
+    /// the wrapper only tags the type, the caller owns the 2D usage
+    /// (Bullet forwards the 3D support untouched).
+    Convex2d(Box<CollisionShape>),
 }
 
 impl CollisionShape {
@@ -134,6 +147,37 @@ impl CollisionShape {
         Self::Heightfield(Heightfield::new(heights, width, depth, cell_size))
     }
 
+    /// A scaled copy of a static triangle mesh (Bullet's
+    /// `btScaledBvhTriangleMeshShape` semantics): the vertices are scaled
+    /// at construction time, so the BVH, narrow phase and rays see the
+    /// scaled geometry directly. This is equivalent to Bullet's wrapper
+    /// (which rescales every triangle vertex inside its callback and
+    /// un-scales the query box, flipping per axis for negative components);
+    /// our value-semantics shapes have no shared runtime BVH to reuse, so
+    /// the wrapper collapses into a constructor.
+    #[inline]
+    pub fn scaled_triangle_mesh(mesh: TriangleMesh, scaling: Vector3) -> Self {
+        Self::TriangleMesh(mesh.scaled(scaling))
+    }
+
+    /// A uniformly scaled convex child (Bullet's `btUniformScalingShape`).
+    /// The child's support points and margin scale by `factor` (the margin
+    /// scales too — Bullet's `getMargin` multiplies), and the local inertia
+    /// scales linearly (Bullet's own "not realistic" note, kept verbatim).
+    #[inline]
+    pub fn uniform_scaling(child: CollisionShape, factor: Real) -> Self {
+        Self::UniformScaling(Box::new(child), factor)
+    }
+
+    /// A 2D-convex marker over an arbitrary convex child (Bullet's
+    /// `btConvex2dShape`): every query forwards to the child verbatim —
+    /// the wrapper only tags the type, the caller owns the 2D usage
+    /// (Bullet forwards the child's 3D support untouched).
+    #[inline]
+    pub fn convex_2d(child: CollisionShape) -> Self {
+        Self::Convex2d(Box::new(child))
+    }
+
     #[inline]
     pub fn shape_type(&self) -> ShapeType {
         match self {
@@ -147,6 +191,8 @@ impl CollisionShape {
             Self::Plane(_) => ShapeType::Plane,
             Self::TriangleMesh(_) => ShapeType::TriangleMesh,
             Self::Heightfield(_) => ShapeType::Heightfield,
+            Self::UniformScaling(_, _) => ShapeType::UniformScalingShape,
+            Self::Convex2d(_) => ShapeType::Convex2dShape,
         }
     }
 
@@ -162,6 +208,7 @@ impl CollisionShape {
             | Self::Cone(_)
             | Self::ConvexHull(_) => true,
             Self::Compound(c) => c.is_convex(),
+            Self::UniformScaling(child, _) | Self::Convex2d(child) => child.is_convex(),
             Self::Plane(_) | Self::TriangleMesh(_) | Self::Heightfield(_) => false,
         }
     }
@@ -178,6 +225,8 @@ impl CollisionShape {
             Self::ConvexHull(h) => h.margin(),
             Self::Compound(c) => c.margin(),
             Self::Plane(p) => p.margin(),
+            Self::UniformScaling(child, f) => child.margin() * f,
+            Self::Convex2d(child) => child.margin(),
             Self::TriangleMesh(_) | Self::Heightfield(_) => 0.0,
         }
     }
@@ -194,6 +243,8 @@ impl CollisionShape {
             Self::ConvexHull(h) => h.local_aabb(),
             Self::Compound(c) => c.local_aabb(),
             Self::Plane(p) => p.local_aabb(),
+            Self::UniformScaling(child, f) => scaled_local_aabb(&child.local_aabb(), f),
+            Self::Convex2d(child) => child.local_aabb(),
             Self::TriangleMesh(m) => m.local_aabb(),
             Self::Heightfield(h) => h.local_aabb(),
         }
@@ -210,6 +261,8 @@ impl CollisionShape {
             Self::Cone(c) => c.support_local(dir),
             Self::ConvexHull(h) => h.support_local(dir),
             Self::Compound(c) => c.support_local(dir),
+            Self::UniformScaling(child, f) => child.support_local(dir) * f,
+            Self::Convex2d(child) => child.support_local(dir),
             // Planes, meshes, and heightfields are not convex and never reach
             // GJK support queries.
             Self::Plane(_) | Self::TriangleMesh(_) | Self::Heightfield(_) => Vector3::ZERO,
@@ -235,6 +288,8 @@ impl CollisionShape {
             Self::Cylinder(c) => c.core_support_local(dir),
             Self::Cone(c) => c.core_support_local(dir),
             // Margin-free shapes: the core is the full shape.
+            Self::UniformScaling(child, f) => child.core_support_local(dir) * f,
+            Self::Convex2d(child) => child.core_support_local(dir),
             other => other.support_local(dir),
         }
     }
@@ -278,6 +333,12 @@ impl CollisionShape {
             Self::ConvexHull(h) => h.world_aabb(position, orientation),
             Self::Compound(c) => c.world_aabb(position, orientation),
             Self::Plane(p) => p.world_aabb(position, orientation),
+            Self::UniformScaling(child, f) => scaled_world_aabb(
+                position,
+                &child.world_aabb(position, orientation),
+                f,
+            ),
+            Self::Convex2d(child) => child.world_aabb(position, orientation),
             Self::TriangleMesh(m) => m.world_aabb(position, orientation),
             Self::Heightfield(h) => h.world_aabb(position, orientation),
         }
@@ -312,10 +373,40 @@ impl CollisionShape {
             Self::ConvexHull(h) => h.local_inertia(mass),
             Self::Compound(c) => c.local_inertia(mass),
             Self::Plane(p) => p.local_inertia(mass),
+            Self::UniformScaling(child, f) => child.local_inertia(mass) * f,
+            Self::Convex2d(child) => child.local_inertia(mass),
             Self::TriangleMesh(m) => m.local_inertia(mass),
             Self::Heightfield(h) => h.local_inertia(mass),
         }
     }
+}
+
+/// Local AABB scaled by a uniform factor around the origin (the
+/// [`CollisionShape::UniformScaling`] wrapper): negative factors swap the
+/// corners (the shape flips through the origin).
+#[inline]
+fn scaled_local_aabb(aabb: &Aabb, f: &Real) -> Aabb {
+    let (min, max) = if *f >= 0.0 {
+        (aabb.min * *f, aabb.max * *f)
+    } else {
+        (aabb.max * *f, aabb.min * *f)
+    };
+    Aabb::new(min, max)
+}
+
+/// World AABB of a shape scaled by a uniform factor around `position` (the
+/// wrapper's child lives at the same pose): each endpoint maps to
+/// `position + (endpoint - position) · f`, with the corners swapped for a
+/// negative factor.
+#[inline]
+fn scaled_world_aabb(position: Vector3, aabb: &Aabb, f: &Real) -> Aabb {
+    let map = |p: Vector3| position + (p - position) * *f;
+    let (min, max) = if *f >= 0.0 {
+        (map(aabb.min), map(aabb.max))
+    } else {
+        (map(aabb.max), map(aabb.min))
+    };
+    Aabb::new(min, max)
 }
 
 /// AABB of a convex shape from its support projections along the three world
@@ -344,4 +435,126 @@ pub(crate) fn support_projected_aabb(
         position.z + support(uz).dot(uz),
     );
     Aabb::new(min, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// The uniform-scaling wrapper scales a sphere's support points, margin
+    /// (Bullet's `getMargin` multiplies), AABB and inertia by the factor —
+    /// and its core support (the scaled core, not the scaled full shape)
+    /// keeps the ball-Minkowski decomposition exact.
+    #[test]
+    fn uniform_scaling_scales_support_margin_and_inertia() {
+        let shape = CollisionShape::uniform_scaling(CollisionShape::sphere(0.5), 2.0);
+        assert!(shape.is_convex());
+        assert_eq!(shape.shape_type(), ShapeType::UniformScalingShape);
+        // Sphere margin is the full radius, so the wrapper margin is 1.0.
+        assert_relative_eq!(shape.margin(), 1.0);
+        // Support along +X: 0.5 -> 1.0.
+        assert_relative_eq!(shape.support_local(Vector3::X).x, 1.0);
+        // Core support is the point core scaled: still the origin.
+        assert_relative_eq!(shape.core_support_local(Vector3::X).length(), 0.0);
+        // Local AABB: +/- 1.
+        let aabb = shape.local_aabb();
+        assert_relative_eq!(aabb.min.x, -1.0);
+        assert_relative_eq!(aabb.max.x, 1.0);
+        // Inertia scales linearly (Bullet's own "not realistic" note).
+        assert_relative_eq!(shape.local_inertia(2.0).x, 0.4 * 2.0 * 0.25 * 2.0);
+        // The full shape is still exactly a radius-1 ball: core + margin.
+        assert_relative_eq!(
+            shape.core_support_local(Vector3::X).dot(Vector3::X) + shape.margin(),
+            1.0
+        );
+
+        // A box child: the fixed 0.04 margin scales to 0.04 * factor.
+        let boxed = CollisionShape::uniform_scaling(
+            CollisionShape::box_shape(Vector3::splat(0.5)),
+            3.0,
+        );
+        assert_relative_eq!(boxed.margin(), 0.12);
+
+        // A negative factor flips the shape through the origin (corners swap).
+        let flipped = CollisionShape::uniform_scaling(
+            CollisionShape::box_shape(Vector3::new(1.0, 2.0, 3.0)),
+            -1.0,
+        );
+        let aabb = flipped.local_aabb();
+        assert_relative_eq!(aabb.min.x, -1.0);
+        assert_relative_eq!(aabb.max.x, 1.0);
+        assert_relative_eq!(aabb.min.y, -2.0);
+        assert_relative_eq!(aabb.max.y, 2.0);
+    }
+
+    /// The convex-2d marker forwards every query to the child verbatim
+    /// (Bullet's wrapper only tags the type).
+    #[test]
+    fn convex_2d_forwards_to_the_child() {
+        let child = CollisionShape::box_shape(Vector3::new(1.0, 2.0, 0.5));
+        let shape = CollisionShape::convex_2d(child.clone());
+        assert!(shape.is_convex());
+        assert_eq!(shape.shape_type(), ShapeType::Convex2dShape);
+        assert_eq!(shape.margin(), child.margin());
+        assert_eq!(shape.support_local(Vector3::ONE), child.support_local(Vector3::ONE));
+        assert_eq!(shape.local_aabb(), child.local_aabb());
+        assert_eq!(shape.local_inertia(1.5), child.local_inertia(1.5));
+    }
+
+    /// The scaled triangle mesh constructor rescales the vertex stream and
+    /// rebuilds the derived structures: rays hit the scaled surface, and a
+    /// negative component flips the geometry through the origin.
+    #[test]
+    fn scaled_triangle_mesh_rescales_vertices_and_queries() {
+        // A flat 2x2 ground patch at y = 0, scaled 3x vertically.
+        let mesh = TriangleMesh::new(
+            vec![
+                Vector3::new(-1.0, 0.0, -1.0),
+                Vector3::new(1.0, 0.0, -1.0),
+                Vector3::new(1.0, 0.0, 1.0),
+                Vector3::new(-1.0, 0.0, 1.0),
+            ],
+            vec![[0, 2, 1], [0, 3, 2]],
+        );
+        let scaled = CollisionShape::scaled_triangle_mesh(mesh, Vector3::new(2.0, 3.0, 2.0));
+        assert!(!scaled.is_convex());
+        // AABB scales per component.
+        let aabb = scaled.local_aabb();
+        assert_relative_eq!(aabb.min.x, -2.0);
+        assert_relative_eq!(aabb.max.z, 2.0);
+        assert_relative_eq!(aabb.max.y, 0.0);
+
+        // A downward ray from above hits the scaled surface (still y = 0
+        // here) at a vertex-scaled horizontal offset that would miss the
+        // unscaled mesh.
+        let hit = scaled.world_aabb(Vector3::ZERO, Quaternion::IDENTITY);
+        assert_relative_eq!(hit.max.x, 2.0);
+
+        // Negative scaling flips through the origin.
+        let flipped =
+            CollisionShape::scaled_triangle_mesh(TriangleMesh::new(
+                vec![
+                    Vector3::new(-1.0, 0.0, -1.0),
+                    Vector3::new(1.0, 0.0, -1.0),
+                    Vector3::new(1.0, 0.0, 1.0),
+                ],
+                vec![[0, 2, 1]],
+            ), Vector3::new(-1.0, 1.0, -1.0));
+        let aabb = flipped.local_aabb();
+        assert_relative_eq!(aabb.min.x, -1.0);
+        assert_relative_eq!(aabb.max.x, 1.0);
+    }
+
+    /// The wrapper's world support sits at the scaled radius along any
+    /// direction (the full-shape pipeline: core support x factor + the
+    /// scaled margin).
+    #[test]
+    fn uniform_scaling_world_support_at_the_scaled_radius() {
+        let sphere = CollisionShape::uniform_scaling(CollisionShape::sphere(0.5), 2.0);
+        let support = sphere.support_world(Vector3::ZERO, Quaternion::IDENTITY, -Vector3::Y);
+        assert_relative_eq!(support.y, -1.0);
+        let core = sphere.core_support_world(Vector3::ZERO, Quaternion::IDENTITY, -Vector3::Y);
+        assert_relative_eq!(core.y, 0.0, epsilon = 1e-7);
+    }
 }

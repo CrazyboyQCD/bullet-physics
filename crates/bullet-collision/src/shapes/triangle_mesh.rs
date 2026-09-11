@@ -53,6 +53,20 @@ impl TriangleMesh {
         Self::from_parts(vec![TriangleMeshPart { vertices, indices }])
     }
 
+    /// A scaled copy (Bullet's `btScaledBvhTriangleMeshShape` semantics,
+    /// realized at construction time — see
+    /// [`CollisionShape::scaled_triangle_mesh`]): every vertex is multiplied
+    /// by `scaling` (negative components flip the winding exactly like the
+    /// wrapper's per-axis swap) and the BVH, triangle hulls and AABBs are
+    /// rebuilt from the scaled stream.
+    pub fn scaled(self, scaling: Vector3) -> Self {
+        let Self { mut vertices, indices, .. } = self;
+        for v in &mut vertices {
+            *v *= scaling;
+        }
+        Self::new(vertices, indices)
+    }
+
     /// Build a mesh from several independent parts (Bullet's
     /// `btTriangleIndexVertexArray` with `btIndexedMesh` entries): parts
     /// never share vertex buffers, so the vertices are concatenated and the
