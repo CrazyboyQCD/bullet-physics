@@ -145,6 +145,29 @@ pub struct ContactPointEvent {
     pub point: ContactPoint,
 }
 
+/// A per-pair contact-force event, drained every step (Rapier's
+/// `ContactForceEvent` model; Bullet has no counterpart — its
+/// `gContactAddedCallback` fires per contact point at detection time, not
+/// per pair with a solved impulse). Emitted after the solve for every
+/// rigid pair whose summed normal impulse, divided by the step time, is
+/// above [`PhysicsWorld::set_contact_force_event_threshold`], while
+/// [`PhysicsWorld::set_contact_force_events`] is enabled. Sensor pairs
+/// ([`CollisionFlags::NO_CONTACT_RESPONSE`]) solve no contact rows and
+/// never emit one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactForceEvent {
+    /// The lower rigid-body handle of the pair.
+    pub a: BodyHandle,
+    /// The higher rigid-body handle of the pair.
+    pub b: BodyHandle,
+    /// Sum of the pair's accumulated normal impulses this step (one entry
+    /// per solved contact row; a resting contact contributes roughly
+    /// `m·g·dt`).
+    pub total_impulse: Real,
+    /// `total_impulse / dt`: the step-average contact force.
+    pub total_force: Real,
+}
+
 /// One side of the tracked-pair id: a kind tag over the object's slot
 /// payload, ordered kind-first (bodies, then links, then soft bodies) so a
 /// pair canonically sorts as `(min, max)`.
@@ -270,6 +293,15 @@ pub struct PhysicsWorld {
     /// world-level equivalent of `gContactProcessedCallback` being
     /// installed).
     contact_point_events_enabled: bool,
+    /// Contact-force events of the last step, cleared at the start of each
+    /// step; collected only while `contact_force_events_enabled`.
+    contact_force_events: Vec<ContactForceEvent>,
+    /// Whether per-pair contact-force events are collected at all (Rapier's
+    /// `ContactForceEvent` opt-in; no Bullet counterpart).
+    contact_force_events_enabled: bool,
+    /// Force threshold of [`PhysicsWorld::contact_force_events`]: a pair
+    /// reports when its summed normal impulse over `dt` exceeds this.
+    contact_force_event_threshold: Real,
     /// Broad-phase proxy id for each rigid body (proxy ids are shared with
     /// the multibody link colliders, so they no longer coincide with body
     /// indices).
@@ -376,6 +408,9 @@ impl PhysicsWorld {
             contact_events: Vec::new(),
             contact_point_events: Vec::new(),
             contact_point_events_enabled: false,
+            contact_force_events: Vec::new(),
+            contact_force_events_enabled: false,
+            contact_force_event_threshold: 0.0,
             body_proxies: Vec::new(),
             collider_entries: Vec::new(),
             proxy_owners: Vec::new(),
@@ -700,6 +735,42 @@ impl PhysicsWorld {
     /// buffer empty.
     pub fn take_contact_point_events(&mut self) -> Vec<ContactPointEvent> {
         core::mem::take(&mut self.contact_point_events)
+    }
+
+    /// Enable per-pair contact-force event collection (Rapier's
+    /// `ContactForceEvent` as an opt-in world-level drain). While enabled,
+    /// every step reports each rigid pair whose summed normal impulse
+    /// divided by `dt` — the step-average contact force — exceeds
+    /// [`PhysicsWorld::set_contact_force_event_threshold`] (a resting 1 kg
+    /// contact under `g = 9.81` sits at ~9.81; impacts spike orders above).
+    /// Multibody and soft contacts carry no rigid contact rows and are not
+    /// reported; disabled, nothing is collected. The buffer is cleared at
+    /// the start of the next [`PhysicsWorld::step_simulation`] (or drained
+    /// immediately with [`PhysicsWorld::take_contact_force_events`]).
+    pub fn set_contact_force_events(&mut self, enabled: bool) {
+        self.contact_force_events_enabled = enabled;
+        if !enabled {
+            self.contact_force_events.clear();
+        }
+    }
+
+    /// The force threshold of [`PhysicsWorld::contact_force_events`]
+    /// (default 0.0: any pair that solved a positive normal impulse
+    /// reports).
+    pub fn set_contact_force_event_threshold(&mut self, threshold: Real) {
+        self.contact_force_event_threshold = threshold;
+    }
+
+    /// The contact-force events of the step that ran last (empty unless
+    /// [`PhysicsWorld::set_contact_force_events`] is enabled).
+    pub fn contact_force_events(&self) -> &[ContactForceEvent] {
+        &self.contact_force_events
+    }
+
+    /// Take the contact-force events of the last step, leaving the buffer
+    /// empty.
+    pub fn take_contact_force_events(&mut self) -> Vec<ContactForceEvent> {
+        core::mem::take(&mut self.contact_force_events)
     }
 
     /// The persistent overlap list of a body (the query surface of Bullet's

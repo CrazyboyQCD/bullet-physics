@@ -29,7 +29,7 @@ pub mod prelude {
     pub use bullet_collision::raycast::RayHit;
     pub use bullet_collision::shapes::CollisionShape;
     pub use bullet_dynamics::{
-        create_rope, BodyHandle, CollisionEvent, CollisionFlags, CollisionObject,
+        create_rope, BodyHandle, CollisionEvent, CollisionFlags, CollisionObject, ContactForceEvent,
         ContactPointEvent, ConstraintTag, DebugDrawFlags, DebugPrim, KinematicCharacterController,
         MotionState, MultiBody, MultiBodyConstraint, MultiBodyHandle, PhysicsWorld, RaycastVehicle,
         RigidBody, SoftBody, SoftBodyHandle, StepStage, StepTimings, VehicleTuning, STEP_STAGES,

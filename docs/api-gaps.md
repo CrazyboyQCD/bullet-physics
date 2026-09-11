@@ -51,16 +51,35 @@ S/M/L · **See** = existing notes.
     domain gating keeps quiet masks free.
   - Size: S. See: `api-usability.md` §2 (P3 rationale).
 
-- **P4 — callbacks**: `Started/Stopped` events, per-body opt-in and
-  trigger volumes are in. Still open:
-  - *Contact-force event*: after the impulse writeback (points carry
-    `point_index` into the manifold cache), sum normal impulses per
-    touching pair and emit when above a threshold — the events pipeline
-    (touch buffers, per-body opt-in, drain API) is reused as-is.
-    Files: `world.rs` writeback + `CollisionEvent` enum. Risk: threshold
-    semantics — accumulated impulse vs force (= impulse/dt); no Bullet
-    counterpart, so the choice must be documented in deviations §3.
-    Size: S–M.
+- **P4 — contact-force event** ✅ (2026-09-11): the callbacks sub-item lands
+  as a Rapier-style `ContactForceEvent` drain.
+  - Shipped: `world.contact_force_events()` / `take_contact_force_events()`
+    report per-pair `ContactForceEvent { a, b, total_impulse, total_force }`
+    after the solve (rows arrive grouped by pair; the sum walks this
+    step's rows once, including the ephemeral points the manifold
+    writeback skips). World-level opt-in (`set_contact_force_events`) +
+    force threshold (`set_contact_force_event_threshold`, default 0) —
+    the `ContactPointEvent` drain precedent rather than a per-body gate:
+    Bullet's callbacks are process-global, and a per-body gate would
+    couple the force surface to the `Started/Stopped` opt-in. Sensor
+    pairs solve no rows and never report; multibody/soft contacts carry
+    no rigid rows.
+  - Threshold semantics (deviations §3): `total_force` = summed **normal**
+    impulses / `dt` (step-average); a resting 1 kg contact sits at
+    ~m·g (~9.81), impacts spike orders above. No friction tangents, no
+    direction vector (Rapier sums friction and carries
+    `max_force_direction` / `max_force_magnitude` — not ported); no
+    Bullet counterpart.
+  - Files: `world.rs` (event struct + fields + drain API),
+    `world/step.rs` (post-writeback accumulation), both crate-root
+    re-exports. Default-off: the collection sits behind one `bool` gate,
+    zero parity impact (falling_box / composite_consumer f64 re-ran
+    ledger-identical). Tests: 2 (impact-vs-rest threshold split with
+    disabled silence, sensor-pair exclusion).
+  - Size: S.
+
+- **P4 — callbacks** (remaining): `Started/Stopped` events, per-body
+  opt-in and trigger volumes are in. Still open:
   - *Per-pair solver hooks*: map onto the existing
     `no_collision_pairs` / filter system (a pair allow/deny
     predicate at pair-acceptance time — same shape as the P6

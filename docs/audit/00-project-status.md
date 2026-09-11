@@ -125,7 +125,11 @@ consumer-API rounds landed 2026-09-09/10 and the third batch (additional
 damping, multi-part meshes, cluster-core verification) on 2026-09-10/11 —
 the cluster-core round reproduced and fixed the long-standing dead
 cluster-joint split channel (`terminate` parameter order; f64 bit-identical
-probe, regression test pinned). The remaining 1.0 item is the API freeze
+probe, regression test pinned). The fourth batch is in progress (user call,
+2026-09-11): contact-force events landed 2026-09-11 (Rapier-style
+`ContactForceEvent` drain, no Bullet counterpart — deviations §3);
+spinning friction and the scaled-shape wrappers remain. After the batch:
+the API freeze
 review. Known residual: the `cluster_pair` CL_SS chaos probe diverges
 qualitatively (pre-existing, tracked for a separate round).
 
@@ -188,8 +192,9 @@ coherence (all fixed and test-pinned, see In Progress above).
 - Optional semantic parity items (each triggers a parity re-record):
   `m_allowedCcdPenetration = 0.04`, implicit gyroscopic impulse, CCD
   rotation rewind / compound gate alignment (deviations §1 candidates).
-- Contact-force events, per-pair solver hooks, spinning friction (all
-  on-demand, `docs/api-gaps.md`).
+- Per-pair solver hooks, spinning friction (all
+  on-demand, `docs/api-gaps.md`); contact-force events landed 2026-09-11
+  (`docs/api-gaps.md` P4).
 
 ## Explicitly Out of Scope
 
@@ -217,8 +222,10 @@ exists:
 3. Adversarial correctness testing (done).
 4. Minimal debug draw (done, 2026-09-09).
 5. On-demand consumer-API rounds (done 2026-09-09/10; third batch +
-   cluster-core verification done 2026-09-10/11).
-6. 1.0 API freeze review (next).
+   cluster-core verification done 2026-09-10/11; fourth batch in progress —
+   contact-force events done 2026-09-11, spinning friction + scaled-shape
+   wrappers next).
+6. 1.0 API freeze review (after the fourth batch).
 7. IslandWork / parallel island solver.
 8. Further performance optimization.
 

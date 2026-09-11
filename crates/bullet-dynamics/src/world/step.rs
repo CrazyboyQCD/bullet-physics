@@ -82,6 +82,7 @@ impl PhysicsWorld {
         // rebuilds the buffer and the touching set from scratch.
         self.contact_events.clear();
         self.contact_point_events.clear();
+        self.contact_force_events.clear();
         self.touching.clear();
         self.rolling_rows.clear();
         // Joint-collision suppression is re-derived from the current
@@ -763,7 +764,37 @@ impl PhysicsWorld {
                 bucket.retain(|e| e.manifold.paired_at(stamp));
             }
         }
-                self.contact_rows = contact_rows;
+        // 6c. Contact-force events (Rapier's `ContactForceEvent`): sum the
+        // solved normal impulses per pair (rows arrive grouped by pair) and
+        // report the pairs whose step-average force exceeds the world
+        // threshold. The sum runs over this step's rows, including the
+        // ephemeral points the manifold writeback above skips; sensor pairs
+        // solve no rows and never report.
+        if self.contact_force_events_enabled {
+            let mut start = 0;
+            while start < contact_rows.len() {
+                let pair = (contact_rows[start].body_a, contact_rows[start].body_b);
+                let mut total = 0.0;
+                let mut end = start;
+                while end < contact_rows.len()
+                    && (contact_rows[end].body_a, contact_rows[end].body_b) == pair
+                {
+                    total += contact_rows[end].normal_impulse;
+                    end += 1;
+                }
+                let total_force = total * inv_dt;
+                if total_force > self.contact_force_event_threshold {
+                    self.contact_force_events.push(ContactForceEvent {
+                        a: BodyHandle::from_index(pair.0),
+                        b: BodyHandle::from_index(pair.1),
+                        total_impulse: total,
+                        total_force,
+                    });
+                }
+                start = end;
+            }
+        }
+        self.contact_rows = contact_rows;
         self.joint_rows = joint_rows;
 
         // 6bm. Multibody internal constraints: in the mixed path they were
@@ -2851,5 +2882,93 @@ mod tests {
             quiet.step_simulation(dt);
         }
         assert!(quiet.contact_point_events().is_empty());
+    }
+
+    /// With `set_contact_force_events` enabled, a pair reports after the
+    /// solve when its summed normal impulse over `dt` exceeds the world
+    /// threshold: a resting 1 kg contact (~9.81 N) stays under a 50 N
+    /// threshold while a 2 m drop impact spikes past it; the payload
+    /// carries the impulse/force pair and `a < b`. Disabled, nothing is
+    /// collected even on impact.
+    #[test]
+    fn contact_force_events_report_impacts_above_threshold() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        world.set_contact_force_events(true);
+        world.set_contact_force_event_threshold(50.0);
+        let ground = world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        ));
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 1.05, 0.0),
+            1.0,
+        ));
+        // Resting: the contact force sits at ~m·g, under the threshold.
+        for _ in 0..30 {
+            world.step_simulation(dt);
+        }
+        assert!(world.contact_force_events().is_empty());
+
+        // Drop from 2 m above the contact: the impact force crosses the
+        // threshold exactly once (zero restitution, no bounce).
+        world.set_body_transform(ball, Vector3::new(0.0, 3.0, 0.0), Quaternion::IDENTITY);
+        let mut events = 0;
+        for _ in 0..60 {
+            world.step_simulation(dt);
+            for ev in world.take_contact_force_events() {
+                events += 1;
+                assert_eq!(ev.a, ground);
+                assert_eq!(ev.b, ball);
+                // The two payloads agree: force is the step-average.
+                assert!((ev.total_impulse / dt - ev.total_force).abs() < 1e-3);
+                // m·(v_impact + g·dt) with v_impact = √(2·g·2): 3..12 N·s.
+                assert!(ev.total_impulse > 3.0, "impulse too low: {}", ev.total_impulse);
+                assert!(ev.total_impulse < 12.0, "impulse too high: {}", ev.total_impulse);
+            }
+        }
+        assert_eq!(events, 1, "expected exactly one impact event");
+
+        // Disabled: even the impact stays unreported.
+        let mut quiet = PhysicsWorld::new();
+        quiet.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        ));
+        quiet.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 3.0, 0.0),
+            1.0,
+        ));
+        for _ in 0..40 {
+            quiet.step_simulation(dt);
+        }
+        assert!(quiet.contact_force_events().is_empty());
+    }
+
+    /// Sensor pairs solve no contact rows, so they carry no impulse and
+    /// never report a contact-force event — not even at threshold 0.
+    #[test]
+    fn contact_force_events_skip_sensor_pairs() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::new();
+        world.set_contact_force_events(true);
+        world.set_contact_force_event_threshold(0.0);
+        let mut wall = RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.5, 2.0)),
+            Vector3::ZERO,
+        );
+        wall.collision_flags = CollisionFlags::NO_CONTACT_RESPONSE;
+        world.add_body(wall);
+        world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 1.05, 0.0),
+            1.0,
+        ));
+        for _ in 0..30 {
+            world.step_simulation(dt);
+        }
+        assert!(world.contact_force_events().is_empty());
     }
 }
