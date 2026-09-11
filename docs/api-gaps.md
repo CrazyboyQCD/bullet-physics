@@ -288,20 +288,20 @@ S/M/L · **See** = existing notes.
     Bullet installs in the same block) is not ported — same shape, on
     demand.
   - Size: S–M (the parity scene was the M half).
-- **Rigid-body property surface (remaining)**: anisotropic friction,
-  per-object contact stiffness/damping
-  (`CF_HAS_CONTACT_STIFFNESS_DAMPING`), the opt-in additional-damping
-  block, spinning friction.
-  - Impl: plain fields on `RigidBody` consumed in
-    `ContactConstraint::prepare` (anisotropic scaling inside the
-    effective-mass/friction setup; spinning friction adds one row
-    around the contact normal — the same torsional-row machinery the
-    rolling friction shipped); contact stiffness/damping replaces the
-    default erp/cfm route in row assembly.
+- **Rigid-body property surface**: anisotropic friction ✅ (2026-09-10),
+  per-object contact stiffness/damping ✅ (2026-09-10), the opt-in
+  additional-damping block ✅ (2026-09-10) — all three in, with parity
+  scenes (`anisotropic_friction` / `contact_soft` / `damped_stack`) and
+  the mb-contact scope cut recorded in deviations §1/§3.
+  Remaining: **spinning friction** (the same-axis row around the contact
+  normal — the torsional-row machinery the rolling friction shipped;
+  on demand).
+  - Impl: one extra row around the contact normal in
+    `ContactConstraint::prepare` (Bullet's `setupSpinningFrictionConstraint`).
   - Files: `body.rs`, `solver/sequential_impulse.rs`.
-  - Risk: each property is a solver-semantic change → parity re-record
-    for scenes using it (default-off keeps the rest bit-identical).
-  - Size: M per property.
+  - Risk: solver-semantic change → parity re-record for scenes using it
+    (default-off keeps the rest bit-identical).
+  - Size: S–M.
 - **Scaled-shape wrappers**: `btScaledBvhTriangleMeshShape`,
   `btUniformScalingShape`, `btConvex2DShape`.
   - Impl: new `CollisionShape` variants wrapping an inner shape + scale,
@@ -313,11 +313,13 @@ S/M/L · **See** = existing notes.
     architecture (deviations §1) — sphere/box cores stop being exact
     under scale.
   - Size: M.
-- **Multi-part triangle meshes**: `btTriangleIndexVertexArray` parts
-  (one vertex/index pair here).
-  - Impl: `TriangleMesh` accepts a part list; the BVH unions the parts'
-    triangles (the `tri_order` slice layout is unchanged — parts just
-    append).
+- **Multi-part triangle meshes** ✅ (2026-09-10): `TriangleMeshPart` +
+  `TriangleMesh::from_parts` (constructor-time concatenation with
+  per-part index offsets; a single triangle stream at runtime — BVH,
+  narrowphase, rays and inertia carry no per-part path; `new()`
+  delegates to `from_parts`). `CollisionShape::triangle_mesh_parts`.
+  Parity scene `mesh_parts` (seam-crossing box classifies the existing
+  mesh riding category).
   - Files: `bullet-collision/src/shapes/triangle_mesh.rs`.
   - Risk: low — construction-time only; no runtime path changes.
   - Size: M.
@@ -345,15 +347,11 @@ S/M/L · **See** = existing notes.
   - Files: new workspace crates, if ever.
   - Risk: L-scale algorithm ports with little parity surface.
   - Size: L each.
-- **Character controller API surface**: directional `jump(v)`,
-  `setInterpolateUp(false)`, `setMaxJumpHeight` (its only consumer is
-  commented-out dead code upstream).
-  - Impl: `jump_along(dir)` generalizes the existing `jump()` (which
-    already records `jump_axis`); the two toggles are fields on the
-    controller with the documented clamps.
-  - Files: `character.rs` (`jump` at L154 is the template).
-  - Risk: none; upstream defaults already verified (deviations §3).
-  - Size: S.
+- **Character controller API surface** ✅ (2026-09-10): directional
+  `jump_direction(v)` + `set_jump_axis` with the `m_SetjumpSpeed`
+  overwrite/restore semantics. `setInterpolateUp(false)` and
+  `setMaxJumpHeight` stay unexposed (the only upstream consumer of the
+  latter is commented-out dead code) — deviations §3.
 - **Soft-body cluster core** ✅ (2026-09-10/11): the full cluster-core
   lifecycle is ported and verified against real Bullet — the static
   `solveClusters(bodies)` pass (joints Prepare → `citerations` ×
