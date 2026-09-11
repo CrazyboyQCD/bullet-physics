@@ -362,6 +362,16 @@ S/M/L · **See** = existing notes.
     flip, world support at the scaled radius) + 1 world scene (a x2
     sphere rests at the scaled radius and sleeps; a 2d-wrapped box rests
     like the plain box).
+  - Parity (2026-09-11): scenes `uniform_scaling` (wrapped sphere x2 +
+    wrapped box x1.5 dropping onto a ground box) and `scaled_mesh`
+    (sphere + box on a rescaled plateau grid) recorded against real
+    Bullet in f32/f64 — free fall digit-identical; offsets classify as
+    the predicted-pose bounce transient (the wrapped sphere re-converges
+    and ends resting exactly at the scaled radius y = 1.0 in both
+    engines) and the mesh-rolling tumble class (`bullet-compare.md`).
+    scenes.json shape types `uniform_scaling` / `scaled_mesh` consumed
+    by both recorders (C++ builds `btUniformScalingShape` /
+    `btScaledBvhTriangleMeshShape`).
   - Size: M.
 - **Multi-part triangle meshes** ✅ (2026-09-10): `TriangleMeshPart` +
   `TriangleMesh::from_parts` (constructor-time concatenation with

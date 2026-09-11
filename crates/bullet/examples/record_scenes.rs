@@ -103,6 +103,44 @@ fn main() {
                     .collect();
                 CollisionShape::triangle_mesh(vertices, indices)
             }
+            ShapeSpec::UniformScaling(factor, kind, params) => {
+                // Uniform wrapper (btUniformScalingShape): kind 0 = sphere
+                // (params[0] = radius), kind 1 = box (params = half
+                // extents); the child scales with the factor through the
+                // dispatch layer.
+                let child = if kind == 0 {
+                    CollisionShape::sphere(params[0] as Real)
+                } else {
+                    CollisionShape::box_shape(Vector3::new(
+                        params[0] as Real,
+                        params[1] as Real,
+                        params[2] as Real,
+                    ))
+                };
+                CollisionShape::uniform_scaling(child, factor as Real)
+            }
+            ShapeSpec::ScaledMesh(verts, idx, scaling) => {
+                // btScaledBvhTriangleMeshShape semantics, realized at
+                // construction time (vertices scaled, BVH rebuilt).
+                let vertices: Vec<Vector3> = verts
+                    .chunks(3)
+                    .map(|c| Vector3::new(c[0] as Real, c[1] as Real, c[2] as Real))
+                    .collect();
+                let indices: Vec<[u32; 3]> = idx
+                    .chunks(3)
+                    .map(|t| [t[0], t[1], t[2]])
+                    .collect();
+                let mesh =
+                    bullet_collision::shapes::TriangleMesh::new(vertices, indices);
+                CollisionShape::scaled_triangle_mesh(
+                    mesh,
+                    Vector3::new(
+                        scaling[0] as Real,
+                        scaling[1] as Real,
+                        scaling[2] as Real,
+                    ),
+                )
+            }
             ShapeSpec::MeshParts(parts) => {
                 // Independent IndexedMesh buffers (seam vertices duplicated);
                 // from_parts concatenates them into one triangle stream in

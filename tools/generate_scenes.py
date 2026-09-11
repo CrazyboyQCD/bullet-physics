@@ -24,10 +24,12 @@ C_HEADER = os.path.join(ROOT, "tools", "bullet_scenes.h")
 RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "parity_scenes.rs")
 
 SHAPE_TYPES = {"box", "sphere", "capsule", "cylinder", "cone", "plane", "mesh",
-               "mesh_parts"}
+               "mesh_parts", "uniform_scaling", "scaled_mesh"}
 SHAPE_ENUM = {"box": "SHAPE_BOX", "sphere": "SHAPE_SPHERE", "capsule": "SHAPE_CAPSULE",
               "cylinder": "SHAPE_CYLINDER", "cone": "SHAPE_CONE", "plane": "SHAPE_PLANE",
-              "mesh": "SHAPE_MESH", "mesh_parts": "SHAPE_MESH_PARTS"}
+              "mesh": "SHAPE_MESH", "mesh_parts": "SHAPE_MESH_PARTS",
+              "uniform_scaling": "SHAPE_UNIFORM_SCALING",
+              "scaled_mesh": "SHAPE_SCALED_MESH"}
 
 
 def shape_params(shape):
@@ -37,6 +39,16 @@ def shape_params(shape):
     (single or multi-part) carry their geometry in a dedicated MeshSpec; the
     params array stays all-zero so the union layout still parses."""
     t = shape["type"]
+    if t == "uniform_scaling":
+        # params = [factor, child_kind, p0, p1, p2, 0]; kind 0 = sphere
+        # (p0 = radius), kind 1 = box (p0..p2 = half extents).
+        child = shape["child"]
+        f = shape["factor"]
+        if child["type"] == "sphere":
+            return t, [f, 0, child["radius"], 0.0, 0.0]
+        return t, [f, 1] + list(child["half_extents"])
+    if t == "scaled_mesh":
+        return t, list(shape["scaling"])
     if t == "box":
         return t, list(shape["half_extents"])
     if t == "sphere":
@@ -99,7 +111,7 @@ def gen_c(scenes):
         "",
         "#include \"btBulletDynamicsCommon.h\"",
         "",
-        "enum ShapeType { SHAPE_BOX, SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_CYLINDER, SHAPE_CONE, SHAPE_PLANE, SHAPE_MESH, SHAPE_MESH_PARTS };",
+        "enum ShapeType { SHAPE_BOX, SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_CYLINDER, SHAPE_CONE, SHAPE_PLANE, SHAPE_MESH, SHAPE_MESH_PARTS, SHAPE_UNIFORM_SCALING, SHAPE_SCALED_MESH };",
         "",
         "struct MeshSpec {",
         "  int num_vertices;",
@@ -159,7 +171,7 @@ def gen_c(scenes):
         # Emit mesh geometry first so the body specs can reference it.
         for b in sc["bodies"]:
             t = b["shape"]["type"]
-            if t == "mesh":
+            if t in ("mesh", "scaled_mesh"):
                 nx, nz, verts = mesh_vertices(b["shape"])
                 idx = mesh_indices(nx, nz)
                 vs = ", ".join(f"btScalar({fmt(x)})" for x in verts)
@@ -213,7 +225,8 @@ def gen_c(scenes):
             ccd_on = 1 if ccd else 0
             ccd_mt = ccd.get("motion_threshold", 0.0) if ccd else 0.0
             ccd_sr = ccd.get("swept_sphere_radius", 0.0) if ccd else 0.0
-            mesh_ref = f"&k{name}_{b['name']}_mesh" if t == "mesh" else "nullptr"
+            mesh_ref = (f"&k{name}_{b['name']}_mesh"
+                        if t in ("mesh", "scaled_mesh") else "nullptr")
             nmp = len(b["shape"]["parts"]) if t == "mesh_parts" else 0
             nmp_s = str(nmp)
             mp_ref = f"k{name}_{b['name']}_parts" if t == "mesh_parts" else "nullptr"
@@ -288,6 +301,8 @@ def gen_rs(scenes):
         "    Plane([f32; 4]),",
         "    Mesh(&'static [f32], &'static [u32]),",
         "    MeshParts(&'static [(&'static [f32], &'static [u32])]),",
+        "    UniformScaling(f32, i32, [f32; 3]),",
+        "    ScaledMesh(&'static [f32], &'static [u32], [f32; 3]),",
         "}",
         "",
         "pub struct BodySpec {",
@@ -355,13 +370,26 @@ def gen_rs(scenes):
                 shape = f"ShapeSpec::{cap}({fmt(params[0])}, {fmt(params[1])})"
             elif t == "plane":
                 shape = f"ShapeSpec::Plane([{', '.join(fmt(x) for x in params)}])"
-            elif t == "mesh":  # single-part mesh
+            elif t in ("mesh", "scaled_mesh"):  # single-part mesh
                 _, _, verts = mesh_vertices(b["shape"])
                 nx, nz = b["shape"]["grid"]
                 idx = mesh_indices(nx, nz)
                 vs = ", ".join(fmt(x) for x in verts)
                 is_ = ", ".join(str(i) for i in idx)
-                shape = f"ShapeSpec::Mesh(&[{vs}], &[{is_}])"
+                if t == "mesh":
+                    shape = f"ShapeSpec::Mesh(&[{vs}], &[{is_}])"
+                else:
+                    sx, sy, sz = b["shape"]["scaling"]
+                    shape = (f"ShapeSpec::ScaledMesh(&[{vs}], &[{is_}], "
+                             f"[{fmt(sx)}, {fmt(sy)}, {fmt(sz)}])")
+            elif t == "uniform_scaling":
+                f, k = b["shape"]["factor"], 0
+                child = b["shape"]["child"]
+                if child["type"] == "sphere":
+                    shape = f"ShapeSpec::UniformScaling({fmt(f)}, 0, [{fmt(child['radius'])}, 0.0, 0.0])"
+                else:
+                    he = ", ".join(fmt(x) for x in child["half_extents"])
+                    shape = f"ShapeSpec::UniformScaling({fmt(f)}, 1, [{he}])"
             else:  # mesh_parts
                 tuples = []
                 for part in b["shape"]["parts"]:

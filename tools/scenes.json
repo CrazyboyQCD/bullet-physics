@@ -1475,6 +1475,180 @@
         "ball_spin",
         "ball_plain"
       ]
+    },
+    "uniform_scaling": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 240,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              20,
+              0.5,
+              20
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "ball_us",
+          "shape": {
+            "type": "uniform_scaling",
+            "child": {
+              "type": "sphere",
+              "radius": 0.5
+            },
+            "factor": 2.0
+          },
+          "position": [
+            -3,
+            4,
+            0
+          ],
+          "mass": 1,
+          "restitution": 0.4
+        },
+        {
+          "name": "box_us",
+          "shape": {
+            "type": "uniform_scaling",
+            "child": {
+              "type": "box",
+              "half_extents": [
+                0.4,
+                0.3,
+                0.2
+              ]
+            },
+            "factor": 1.5
+          },
+          "position": [
+            3,
+            3,
+            0.1
+          ],
+          "mass": 1,
+          "restitution": 0.2
+        }
+      ],
+      "record": [
+        "ball_us",
+        "box_us"
+      ]
+    },
+    "scaled_mesh": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 300,
+      "iterations": 20,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "scaled_mesh",
+            "grid": [
+              4,
+              4
+            ],
+            "origin": [
+              -2.0,
+              -2.0
+            ],
+            "cell": [
+              1.0,
+              1.0
+            ],
+            "heights": [
+              0.0,
+              0.5,
+              0.5,
+              0.0,
+              0.5,
+              1.0,
+              1.0,
+              0.5,
+              0.5,
+              1.0,
+              1.0,
+              0.5,
+              0.0,
+              0.5,
+              0.5,
+              0.0
+            ],
+            "scaling": [
+              2.0,
+              0.5,
+              2.0
+            ]
+          },
+          "position": [
+            0,
+            -0.25,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "ball",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.4
+          },
+          "position": [
+            -2,
+            3,
+            -2
+          ],
+          "mass": 1,
+          "restitution": 0.3
+        },
+        {
+          "name": "box",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.3,
+              0.2,
+              0.4
+            ]
+          },
+          "position": [
+            -1,
+            2.5,
+            -1
+          ],
+          "mass": 1,
+          "restitution": 0.1
+        }
+      ],
+      "record": [
+        "ball",
+        "box"
+      ]
     }
   }
 }

@@ -21,6 +21,8 @@
 #include <vector>
 
 #include "btBulletDynamicsCommon.h"
+#include "BulletCollision/CollisionShapes/btScaledBvhTriangleMeshShape.h"
+#include "BulletCollision/CollisionShapes/btUniformScalingShape.h"
 #include "bullet_scenes.h"
 
 namespace {
@@ -52,7 +54,9 @@ class PairExcludeFilter : public btOverlapFilterCallback {
 
 btCollisionShape* make_shape(
     const BodySpec& b, std::vector<std::unique_ptr<btTriangleMesh>>& meshes,
-    std::vector<std::unique_ptr<btTriangleIndexVertexArray>>& mesh_arrays) {
+    std::vector<std::unique_ptr<btTriangleIndexVertexArray>>& mesh_arrays,
+    std::vector<std::unique_ptr<btBvhTriangleMeshShape>>& bvh_storage,
+    std::vector<std::unique_ptr<btConvexShape>>& child_storage) {
   const btScalar* p = b.params;
   switch (b.shape) {
     case SHAPE_BOX:
@@ -106,7 +110,40 @@ btCollisionShape* make_shape(
         iv->addIndexedMesh(im, PHY_INTEGER);
       }
       mesh_arrays.push_back(std::unique_ptr<btTriangleIndexVertexArray>(iv));
-      return new btBvhTriangleMeshShape(iv, true);
+    }
+    case SHAPE_UNIFORM_SCALING: {
+      // btUniformScalingShape over a convex child (kind 0 = sphere with
+      // p2 = radius, kind 1 = box with p2..p4 = half extents); the child
+      // is owned here, the wrapper references it.
+      btConvexShape* child;
+      if (static_cast<int>(p[1]) == 0) {
+        child = new btSphereShape(p[2]);
+      } else {
+        child = new btBoxShape(btVector3(p[2], p[3], p[4]));
+      }
+      child_storage.push_back(std::unique_ptr<btConvexShape>(child));
+      return new btUniformScalingShape(child, p[0]);
+    }
+    case SHAPE_SCALED_MESH: {
+      // Same child BVH as SHAPE_MESH, wrapped in
+      // btScaledBvhTriangleMeshShape with the per-axis scaling (p0..p2);
+      // p3..p5 stay zero. The wrapper does not own the child BVH.
+      btTriangleMesh* tm = new btTriangleMesh();
+      const btScalar* v = b.mesh->vertices;
+      const int* idx = b.mesh->indices;
+      for (int i = 0; i < b.mesh->num_triangles; ++i) {
+        const btScalar* a = v + 3 * idx[3 * i + 0];
+        const btScalar* c = v + 3 * idx[3 * i + 1];
+        const btScalar* e = v + 3 * idx[3 * i + 2];
+        tm->addTriangle(btVector3(a[0], a[1], a[2]),
+                        btVector3(c[0], c[1], c[2]),
+                        btVector3(e[0], e[1], e[2]));
+      }
+      meshes.push_back(std::unique_ptr<btTriangleMesh>(tm));
+      btBvhTriangleMeshShape* child_bvh = new btBvhTriangleMeshShape(tm, true);
+      bvh_storage.push_back(std::unique_ptr<btBvhTriangleMeshShape>(child_bvh));
+      return new btScaledBvhTriangleMeshShape(child_bvh,
+                                              btVector3(p[0], p[1], p[2]));
     }
   }
   return nullptr;
@@ -168,12 +205,15 @@ int main(int argc, char** argv) {
   std::vector<std::unique_ptr<btCollisionShape>> shapes;
   std::vector<std::unique_ptr<btTriangleMesh>> mesh_storage;
   std::vector<std::unique_ptr<btTriangleIndexVertexArray>> mesh_array_storage;
+  std::vector<std::unique_ptr<btBvhTriangleMeshShape>> bvh_storage;
+  std::vector<std::unique_ptr<btConvexShape>> child_shape_storage;
   std::vector<std::unique_ptr<btMotionState>> motions;
   std::vector<std::unique_ptr<btRigidBody>> bodies;
   for (int i = 0; i < spec->num_bodies; ++i) {
     const BodySpec& b = spec->bodies[i];
     shapes.push_back(std::unique_ptr<btCollisionShape>(
-        make_shape(b, mesh_storage, mesh_array_storage)));
+        make_shape(b, mesh_storage, mesh_array_storage,
+                   bvh_storage, child_shape_storage)));
     btCollisionShape* shape = shapes.back().get();
     motions.push_back(std::unique_ptr<btMotionState>(
         new btDefaultMotionState(btTransform(btQuaternion(0, 0, 0, 1),
