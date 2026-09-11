@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>bullet_physics — engine comparison (Rust rewrite vs ammo.js vs Rapier)</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+               background: #10141c; font-family: "Segoe UI", system-ui, sans-serif; }
+  #renderCanvas { width: 100%; height: 100%; display: block; outline: none; touch-action: none; }
+  #hud { position: absolute; top: 12px; left: 12px; color: #cfd8e3; user-select: none; }
+  #hud .title { font-size: 15px; font-weight: 600; letter-spacing: .3px; }
+  #hud .sub { font-size: 12px; opacity: .65; margin-top: 2px; }
+  #hud button { margin-right: 6px; margin-top: 10px; padding: 6px 14px; cursor: pointer;
+                border: 1px solid #3a4657; border-radius: 6px; background: #1b2330;
+                color: #cfd8e3; font-size: 13px; }
+  #hud button.active { background: #2d6cdf; border-color: #2d6cdf; color: #fff; }
+  #hud button.focus { margin-top: 6px; padding: 4px 10px; font-size: 12px; }
+  #stats { position: absolute; right: 12px; top: 12px; text-align: right; color: #9fb0c3;
+           font-size: 12px; line-height: 1.6; user-select: none; white-space: pre; }
+  #err { position: absolute; left: 12px; bottom: 12px; color: #ff7b72; font-size: 12px;
+         max-width: 70ch; white-space: pre-wrap; }
+</style>
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+</head>
+<body>
+<canvas id="renderCanvas"></canvas>
+<div id="hud">
+  <div class="title">physics engine comparison <span style="opacity:.55">— bullet_physics (Rust) vs ammo.js (upstream Bullet) vs Rapier</span></div>
+  <div class="sub">identical scene per engine, side by side &middot; left-drag orbit &middot; wheel zoom &middot; <b>click to shoot</b> (one ball per engine)</div>
+  <div>
+    <button id="btn0">Tower ×3</button>
+    <button id="btn1">Hinge chains ×3</button>
+    <button id="btn2">Wind flag ×2 (no softbody in Rapier)</button>
+  </div>
+  <div>
+    <span style="font-size:12px;opacity:.6;margin-right:4px">focus:</span>
+    <button class="focus" id="f0">All</button>
+    <button class="focus" id="f1">Rust</button>
+    <button class="focus" id="f2">Ammo</button>
+    <button class="focus" id="f3">Rapier</button>
+  </div>
+</div>
+<div id="stats"></div>
+<div id="err"></div>
+<script type="module">
+"use strict";
+
+// Placeholder replaced by tools/wasm-demo/build.py with the base64 wasm.
+const WASM_B64 = "@@WASM_B64@@";
+
+const POSE_STRIDE = 7, SPEC_STRIDE = 16;
+const KIND_BOX = 0, KIND_SPHERE = 1;
+const AMMO_URL = "https://cdn.jsdelivr.net/gh/kripken/ammo.js@main/builds/ammo.wasm.js";
+const AMMO_WASM_URL = "https://cdn.jsdelivr.net/gh/kripken/ammo.js@main/builds/ammo.wasm.wasm";
+const RAPIER_URL = "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.20.0/+esm";
+
+// Scene layout constants — mirror of tools/wasm-demo/src/lib.rs (one physics
+// world per engine at the origin; the renderer offsets each engine's meshes).
+const TOWER = { cols: 7, layers: 10, half: 0.5, step: 1.06,
+                ball: { x: 6, y: 20, z: 6, r: 1.1, mass: 30, vx: -4, vz: -4 } };
+const CHAINS = { xs: [-5, 0, 5], anchorY: 16, anchorHalf: 0.25, linkHalf: 0.32,
+                 links: 9, kick: 6,
+                 plate: { y: 2.5, hx: 2.5, hh: 0.3, hz: 2.5, v: 6, lim: 14 } };
+const CLOTH = { res: 18, half: 4, y: 9, mass: 9, wind: 0.9 };
+const SHOOT = { r: 0.5, mass: 4, speed: 30 };
+
+function hsv(h, s, v) {
+  const i = Math.floor(h * 6), f = h * 6 - i;
+  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+  const m = ((i % 6) + 6) % 6;
+  const rgb = [[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][m];
+  return rgb;
+}
+const boxColor = (layer) => hsv(layer * 0.11, 0.55, 0.95);
+const RED = [0.9, 0.35, 0.2], GREY = [0.42, 0.45, 0.5], PLATE = [0.95, 0.75, 0.2];
+
+let engine, scene, camera;
+let backends = [];      // { name, offset, group, api }
+let currentScene = 0;
+
+function b64ToU8(b64) {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+function showErr(msg) {
+  console.error("BOOT-FAIL " + ((msg && msg.stack) || String(msg)));
+  document.getElementById("err").textContent = (msg && msg.stack) || String(msg);
+}
+
+// ---------------------------------------------------------------------------
+// Renderer: one Babylon scene, per-backend mesh groups offset on X.
+// ---------------------------------------------------------------------------
+
+function setupBabylon() {
+  const canvas = document.getElementById("renderCanvas");
+  engine = new BABYLON.Engine(canvas, true, { stencil: true });
+  scene = new BABYLON.Scene(engine);
+  scene.clearColor = new BABYLON.Color4(0.063, 0.078, 0.11, 1);
+  camera = new BABYLON.ArcRotateCamera("cam", -Math.PI / 2.6, 1.15, 80,
+    new BABYLON.Vector3(0, 7, 0), scene);
+  camera.attachControl(canvas, true);
+  camera.lowerRadiusLimit = 6;
+  camera.upperRadiusLimit = 200;
+  camera.wheelDeltaPercentage = 0.01;
+  const hemi = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0.2, 1, 0.1), scene);
+  hemi.intensity = 0.55;
+  const sun = new BABYLON.DirectionalLight("sun", new BABYLON.Vector3(-0.4, -1, -0.3), scene);
+  sun.position = new BABYLON.Vector3(30, 60, 24);
+  sun.intensity = 1.15;
+  scene.metadata = { shadow: new BABYLON.ShadowGenerator(2048, sun) };
+  scene.metadata.shadow.useExponentialShadowMap = true;
+}
+
+function bodyMesh(spec, offset) {
+  const kind = spec[0];
+  const p = spec.slice(8, 11);
+  const c = spec.slice(11, 14);
+  let mesh;
+  if (kind === KIND_SPHERE) {
+    mesh = BABYLON.MeshBuilder.CreateSphere("b", { diameter: p[0] * 2, segments: 16 }, scene);
+  } else {
+    mesh = BABYLON.MeshBuilder.CreateBox("b", { width: p[0]*2, height: p[1]*2, depth: p[2]*2 }, scene);
+  }
+  mesh.position.set(spec[1] + offset, spec[2], spec[3]);
+  mesh.rotationQuaternion = new BABYLON.Quaternion(0, 0, 0, 1);
+  const mat = new BABYLON.StandardMaterial("m", scene);
+  mat.diffuseColor = new BABYLON.Color3(c[0], c[1], c[2]);
+  mat.specularColor = new BABYLON.Color3(0.08, 0.08, 0.08);
+  mesh.material = mat;
+  scene.metadata.shadow.addShadowCaster(mesh);
+  mesh.receiveShadows = true;
+  return mesh;
+}
+
+class Group {
+  constructor(offset) { this.offset = offset; this.meshes = []; this.softMeshes = []; this.bodyCount = 0; }
+  reset() { this.meshes.forEach(m => m.dispose()); this.meshes = [];
+            this.softMeshes.forEach(s => s.mesh.dispose()); this.softMeshes = []; this.bodyCount = 0; }
+  sync(api) {
+    const n = api.bodyCount();
+    if (n > this.bodyCount) {
+      const specs = api.specs();
+      for (let i = this.bodyCount; i < n; i++) {
+        this.meshes.push(bodyMesh(specs.subarray(i * SPEC_STRIDE, (i + 1) * SPEC_STRIDE), this.offset));
+      }
+      this.bodyCount = n;
+    }
+    const poses = api.poses();
+    for (let i = 0; i < n; i++) {
+      const o = i * POSE_STRIDE, m = this.meshes[i];
+      m.position.set(poses[o] + this.offset, poses[o + 1], poses[o + 2]);
+      m.rotationQuaternion.set(poses[o + 3], poses[o + 4], poses[o + 5], poses[o + 6]);
+    }
+    const soft = api.softInfo();
+    if (soft && soft.nodeTotal > 0 && this.softMeshes.length === 0) {
+      const meta = soft.meta();
+      const positions = new Float32Array(soft.nodes());
+      const indices = new Uint32Array(soft.faces());
+      const mesh = new BABYLON.Mesh("soft", scene);
+      const vd = new BABYLON.VertexData();
+      vd.positions = positions.slice();
+      vd.indices = indices;
+      vd.applyToMesh(mesh, true);
+      const mat = new BABYLON.StandardMaterial("sm", scene);
+      mat.diffuseColor = new BABYLON.Color3(0.35, 0.62, 0.95);
+      mat.specularColor = new BABYLON.Color3(0.25, 0.25, 0.25);
+      mat.backFaceCulling = false;
+      mat.twoSidedLighting = true;
+      mat.emissiveColor = new BABYLON.Color3(0.06, 0.10, 0.16);
+      mesh.material = mat;
+      mesh.receiveShadows = true;
+      scene.metadata.shadow.addShadowCaster(mesh);
+      this.softMeshes.push({ mesh, meta });
+    }
+    for (const s of this.softMeshes) {
+      const meta = s.meta();
+      const nodes = new Float32Array(soft.nodes());
+      const positions = s.mesh.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+      let off = 0;
+      for (let k = 0; k < meta[0]; k++) {
+        const nodeOff = meta[1 + k*4], nodeCount = meta[2 + k*4];
+        positions.set(nodes.subarray(nodeOff*3, (nodeOff+nodeCount)*3), off);
+        off += nodeCount * 3;
+      }
+      s.mesh.updateVerticesData(BABYLON.VertexBuffer.PositionKind, positions, false, false);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rust backend (C ABI wasm)
+// ---------------------------------------------------------------------------
+
+function makeRust(wasm) {
+  const api = {
+    name: "Rust", offset: -26, group: null, demo: 0, stepMs: 0,
+    async init() { return this; },
+    buildScene(id) {
+      if (this.demo) wasm.demo_free(this.demo);
+      this.demo = wasm.demo_new(id);
+    },
+    step(dt) {
+      const t0 = performance.now();
+      wasm.demo_step(this.demo, dt);
+      this.stepMs = this.stepMs * 0.95 + (performance.now() - t0) * 0.05;
+    },
+    bodyCount() { return wasm.demo_body_count(this.demo); },
+    specs() { return new Float32Array(wasm.memory.buffer, wasm.demo_body_specs(this.demo),
+                                      this.bodyCount() * SPEC_STRIDE); },
+    poses() { return new Float32Array(wasm.memory.buffer, wasm.demo_poses(this.demo),
+                                      this.bodyCount() * POSE_STRIDE); },
+    softInfo() {
+      const metaArr = new Uint32Array(wasm.memory.buffer, wasm.demo_soft_meta(this.demo), 1);
+      if (metaArr[0] === 0) return null;
+      const meta = new Uint32Array(wasm.memory.buffer, wasm.demo_soft_meta(this.demo),
+                                   1 + metaArr[0] * 4);
+      let n = 0, f = 0;
+      for (let k = 0; k < meta[0]; k++) { n += meta[2 + k*4]; f += meta[4 + k*4]; }
+      return {
+        meta: () => meta,
+        nodes: () => new Float32Array(wasm.memory.buffer, wasm.demo_soft_nodes(this.demo), n * 3),
+        faces: () => new Uint32Array(wasm.memory.buffer, wasm.demo_soft_faces(this.demo), f * 3),
+        nodeTotal: n,
+      };
+    },
+    shoot(ox, oy, oz, dx, dy, dz) {
+      wasm.demo_shoot(this.demo, ox - this.offset, oy, oz, dx, dy, dz);
+    },
+    dispose() { if (this.demo) wasm.demo_free(this.demo); this.demo = 0; },
+  };
+  return api;
+}
+
+// ---------------------------------------------------------------------------
+// ammo.js backend (upstream Bullet, Emscripten)
+// ---------------------------------------------------------------------------
+
+// ammo.js ships a UMD build (no ESM export): inject a script tag and use
+// the global factory.
+function loadAmmo() {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = AMMO_URL;
+    s.onload = () => resolve(window.Ammo({ locateFile: () => AMMO_WASM_URL }));
+    s.onerror = () => reject(new Error("failed to load ammo.js from CDN"));
+    document.head.appendChild(s);
+  });
+}
+
+function makeAmmo(Ammo) {
+  const api = {
+    name: "Ammo", offset: 0, group: null, stepMs: 0,
+    world: null, bodies: [], specsArr: [], tmpV: null, tmpT: null, tmpQ: null,
+    posesArr: null, soft: null, plate: null, helpers: null, collisionCfg: null,
+    async init() {
+      const cfg = this.collisionCfg = new Ammo.btDefaultCollisionConfiguration();
+      const dispatcher = new Ammo.btCollisionDispatcher(cfg);
+      const broadphase = new Ammo.btDbvtBroadphase();
+      const solver = new Ammo.btSequentialImpulseConstraintSolver();
+      this.world = new Ammo.btDiscreteDynamicsWorld(dispatcher, broadphase, solver, cfg);
+      this.world.setGravity(new Ammo.btVector3(0, -9.81, 0));
+      this.helpers = new Ammo.btSoftBodyHelpers();
+      this.tmpV = new Ammo.btVector3(0, 0, 0);
+      this.tmpT = new Ammo.btTransform();
+      this.tmpT.setIdentity();
+      this.tmpQ = this.tmpT.getRotation();
+      return this;
+    },
+    spec(kind, x, y, z, p0, p1, p2, color) {
+      this.specsArr.push(kind, x, y, z, 0, 0, 0, 1, p0, p1, p2, color[0], color[1], color[2], 0, 0);
+    },
+    rigid(shape, x, y, z, mass, friction, restitution) {
+      if (mass > 0) shape.calculateLocalInertia(mass, this.tmpV);
+      else this.tmpV.setValue(0, 0, 0);
+      this.tmpT.setOrigin(new Ammo.btVector3(x, y, z));
+      const ms = new Ammo.btDefaultMotionState(this.tmpT);
+      const info = new Ammo.btRigidBodyConstructionInfo(mass, ms, shape, this.tmpV);
+      const body = new Ammo.btRigidBody(info);
+      body.setFriction(friction);
+      body.setRestitution(restitution);
+      this.world.addRigidBody(body);
+      return body;
+    },
+    addBox(x, y, z, hx, hy, hz, mass, color, friction = 0.5, restitution = 0.1) {
+      const body = this.rigid(new Ammo.btBoxShape(new Ammo.btVector3(hx, hy, hz)),
+                              x, y, z, mass, friction, restitution);
+      this.spec(KIND_BOX, x, y, z, hx, hy, hz, color);
+      this.bodies.push(body);
+      return body;
+    },
+    addSphere(x, y, z, r, mass, color, friction = 0.4, restitution = 0.3) {
+      const body = this.rigid(new Ammo.btSphereShape(r), x, y, z, mass, friction, restitution);
+      this.spec(KIND_SPHERE, x, y, z, r, 0, 0, color);
+      this.bodies.push(body);
+      return body;
+    },
+    hinge(a, b, pa, aa, pb, ab) {
+      // C++/WebIDL argument order: (rbA, rbB, pivotInA, pivotInB, axisInA, axisInB).
+      this.world.addConstraint(new Ammo.btHingeConstraint(
+        a, b,
+        new Ammo.btVector3(pa[0], pa[1], pa[2]), new Ammo.btVector3(pb[0], pb[1], pb[2]),
+        new Ammo.btVector3(aa[0], aa[1], aa[2]), new Ammo.btVector3(ab[0], ab[1], ab[2])));
+    },
+    buildScene(id) {
+      // Drop the previous world entirely (cheap and leak-safe for a demo).
+      if (this.world) Ammo.destroy(this.world);
+      this.bodies = []; this.specsArr = []; this.soft = null; this.plate = null;
+      const cfg = this.collisionCfg = new Ammo.btDefaultCollisionConfiguration();
+      const dispatcher = new Ammo.btCollisionDispatcher(cfg);
+      const broadphase = new Ammo.btDbvtBroadphase();
+      const solver = new Ammo.btSequentialImpulseConstraintSolver();
+      const softCfg = new Ammo.btSoftBodyRigidBodyCollisionConfiguration();
+      const world = this.world = new Ammo.btSoftRigidDynamicsWorld(
+        dispatcher, broadphase, solver, softCfg, new Ammo.btDefaultSoftBodySolver());
+      world.setGravity(new Ammo.btVector3(0, -9.81, 0));
+      world.getWorldInfo().m_gravity.setValue(0, -9.81, 0);
+
+      this.addBox(0, -1, 0, 45, 1, 45, 0, GREY); // ground
+
+      if (id === 0) {
+        for (let layer = 0; layer < TOWER.layers; layer++) {
+          const color = boxColor(layer);
+          for (let ix = 0; ix < TOWER.cols; ix++) for (let iz = 0; iz < TOWER.cols; iz++) {
+            const x = (ix - 3) * TOWER.step, z = (iz - 3) * TOWER.step;
+            const y = 0.5 + layer * TOWER.step + TOWER.half;
+            this.addBox(x, y, z, TOWER.half, TOWER.half, TOWER.half, 1, color);
+          }
+        }
+        const ball = this.addSphere(TOWER.ball.x, TOWER.ball.y, TOWER.ball.z,
+                                    TOWER.ball.r, TOWER.ball.mass, RED);
+        ball.setLinearVelocity(new Ammo.btVector3(TOWER.ball.vx, 0, TOWER.ball.vz));
+      } else if (id === 1) {
+        for (let chain = 0; chain < 3; chain++) {
+          const x = CHAINS.xs[chain];
+          const color = boxColor(chain * 0.3 + 0.05);
+          const anchor = this.addBox(x, CHAINS.anchorY, 0, CHAINS.anchorHalf, CHAINS.anchorHalf,
+                                     CHAINS.anchorHalf, 0, [0.3, 0.3, 0.35]);
+          let prev = anchor, prevPivot = [0, -CHAINS.anchorHalf, 0];
+          const kicked = [];
+          for (let i = 0; i < CHAINS.links; i++) {
+            const y = CHAINS.anchorY - CHAINS.anchorHalf - CHAINS.linkHalf - i * CHAINS.linkHalf * 2;
+            const h = this.addBox(x, y, 0, CHAINS.linkHalf * 0.6, CHAINS.linkHalf,
+                                  CHAINS.linkHalf * 0.6, 0.8, color);
+            if (chain === 1) kicked.push(h);
+            this.hinge(prev, h, prevPivot, [1, 0, 0], [0, CHAINS.linkHalf, 0], [1, 0, 0]);
+            prev = h; prevPivot = [0, -CHAINS.linkHalf, 0];
+          }
+          const yTail = CHAINS.anchorY - CHAINS.anchorHalf - CHAINS.links * CHAINS.linkHalf * 2 - 0.9;
+          const ball = this.addSphere(x, yTail, 0, 0.9, 6, color);
+          this.hinge(prev, ball, prevPivot, [1, 0, 0], [0, 0.9, 0], [1, 0, 0]);
+          for (const h of kicked) h.setLinearVelocity(new Ammo.btVector3(CHAINS.kick, 0, 0));
+        }
+        this.plate = this.addBox(0, CHAINS.plate.y, 0, CHAINS.plate.hx, CHAINS.plate.hh,
+                                 CHAINS.plate.hz, 0, PLATE);
+        this.plate.setCollisionFlags(this.plate.getCollisionFlags() | 2); // KINEMATIC
+        this.plate.setLinearVelocity(new Ammo.btVector3(CHAINS.plate.v, 0, 0));
+      } else {
+        const R = CLOTH.res, H = CLOTH.half;
+        const soft = this.helpers.CreatePatch(
+          this.world.getWorldInfo(),
+          new Ammo.btVector3(-H, CLOTH.y, -H), new Ammo.btVector3(H, CLOTH.y, -H),
+          new Ammo.btVector3(-H, CLOTH.y, H), new Ammo.btVector3(H, CLOTH.y, H),
+          R, R, 0, false);
+        soft.setTotalMass(CLOTH.mass);
+        // Pin the top two corners the way the Rust side does (im = 0).
+        soft.setMass(0, 0);
+        soft.setMass(R - 1, 0);
+        this.world.addSoftBody(soft);
+        this.soft = { body: soft, res: R };
+      }
+    },
+    softMeta() {
+      const s = this.soft;
+      return new Uint32Array([1, 0, s.res * s.res, 0, s.res * s.res * 2]);
+    },
+    step(dt) {
+      const t0 = performance.now();
+      if (this.plate) {
+        // Kinematic plate sweep with edge reversal, mirroring the Rust side.
+        const ms = this.plate.getMotionState();
+        ms.getWorldTransform(this.tmpT);
+        const px = this.tmpT.getOrigin().x();
+        const vx = this.plate.getLinearVelocity().x();
+        if ((px > CHAINS.plate.lim && vx > 0) || (px < -CHAINS.plate.lim && vx < 0)) {
+          this.plate.setLinearVelocity(new Ammo.btVector3(-vx, 0, 0));
+        }
+      }
+      if (this.soft) {
+        const t = performance.now() * 0.001;
+        const gust = Math.sin(t * 1.7) * 0.6 + 0.4;
+        // Per-node lateral force, mirroring the Rust wind model.
+        this.tmpV.setValue(CLOTH.wind * gust * 0.024, 0,
+                           Math.cos(t * 1.1) * CLOTH.wind * 0.007);
+        const nodes = this.soft.body.get_m_nodes();
+        const n = nodes.size();
+        for (let i = 0; i < n; i++) {
+          if (nodes.at(i).get_m_im() > 0) this.soft.body.addForce(this.tmpV, i);
+        }
+      }
+      this.world.stepSimulation(dt, 1, dt);
+      this.stepMs = this.stepMs * 0.95 + (performance.now() - t0) * 0.05;
+    },
+    bodyCount() { return this.specsArr.length / SPEC_STRIDE; },
+    specs() { return new Float32Array(this.specsArr); },
+    poses() {
+      const n = this.bodyCount();
+      if (!this.posesArr || this.posesArr.length !== n * POSE_STRIDE) {
+        this.posesArr = new Float32Array(n * POSE_STRIDE);
+      }
+      for (let i = 0; i < n; i++) {
+        const ms = this.bodies[i].getMotionState();
+        if (ms) ms.getWorldTransform(this.tmpT);
+        else this.tmpT.setIdentity();
+        const o = this.tmpT.getOrigin(), q = this.tmpT.getRotation();
+        const j = i * POSE_STRIDE;
+        this.posesArr[j] = o.x(); this.posesArr[j+1] = o.y(); this.posesArr[j+2] = o.z();
+        this.posesArr[j+3] = q.x(); this.posesArr[j+4] = q.y();
+        this.posesArr[j+5] = q.z(); this.posesArr[j+6] = q.w();
+      }
+      return this.posesArr;
+    },
+    softInfo() {
+      if (!this.soft) return null;
+      const body = this.soft.body;
+      const R = this.soft.res;
+      const nodes = body.get_m_nodes();
+      const nodeTotal = nodes.size();
+      const buf = new Float32Array(nodeTotal * 3);
+      for (let i = 0; i < nodeTotal; i++) {
+        const p = nodes.at(i).get_m_x();
+        buf[i*3] = p.x(); buf[i*3+1] = p.y(); buf[i*3+2] = p.z();
+      }
+      // CreatePatch topology (btSoftBodyHelpers.cpp row-major IDX, two faces
+      // per cell) — Node references carry no index, so the renderer's face
+      // indices are generated from the same rule the C++ helper uses.
+      const faceTotal = (R - 1) * (R - 1) * 2;
+      const fbuf = new Uint32Array(faceTotal * 3);
+      const idx = (x, y) => y * R + x;
+      let k = 0;
+      for (let y = 0; y < R - 1; y++) for (let x = 0; x < R - 1; x++) {
+        fbuf[k++] = idx(x, y); fbuf[k++] = idx(x + 1, y); fbuf[k++] = idx(x, y + 1);
+        fbuf[k++] = idx(x + 1, y); fbuf[k++] = idx(x + 1, y + 1); fbuf[k++] = idx(x, y + 1);
+      }
+      return {
+        meta: () => new Uint32Array([1, 0, nodeTotal, 0, faceTotal]),
+        nodes: () => buf, faces: () => fbuf, nodeTotal,
+      };
+    },
+    shoot(ox, oy, oz, dx, dy, dz) {
+      const lx = ox - this.offset;
+      const d = new Ammo.btVector3(dx, dy, dz); d.normalize();
+      const body = this.addSphere(lx + d.x() * 1.5, oy + d.y() * 1.5, oz + d.z() * 1.5,
+                                  SHOOT.r, SHOOT.mass, boxColor(performance.now() * 0.0007 % 1));
+      const v = d.scale(SHOOT.speed);
+      body.setLinearVelocity(v);
+      body.setCcdMotionThreshold(1.0);
+      body.setCcdSweptSphereRadius(SHOOT.r);
+    },
+    dispose() {},
+  };
+  return api;
+}
+
+// ---------------------------------------------------------------------------
+// Rapier backend
+// ---------------------------------------------------------------------------
+
+async function loadRapier() {
+  return await import(RAPIER_URL);
+}
+
+function makeRapier(RAPIER) {
+  const api = {
+    name: "Rapier", offset: 26, group: null, stepMs: 0,
+    world: null, bodies: [], specsArr: [], posesArr: null, plate: null,
+    async init() {
+      await RAPIER.init();
+      this.world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+      this.world.timestep = 1 / 60;
+      // Bullet's default solver iteration count, for a fair comparison.
+      this.world.integrationParameters.numSolverIterations = 10;
+      return this;
+    },
+    spec(kind, x, y, z, p0, p1, p2, color) {
+      this.specsArr.push(kind, x, y, z, 0, 0, 0, 1, p0, p1, p2, color[0], color[1], color[2], 0, 0);
+    },
+    rigid(desc, colliderDesc, x, y, z, kind, p0, p1, p2, color) {
+      const body = this.world.createRigidBody(desc.setTranslation(x, y, z));
+      this.world.createCollider(colliderDesc, body);
+      this.spec(kind, x, y, z, p0, p1, p2, color);
+      this.bodies.push(body);
+      return body;
+    },
+    addBox(x, y, z, hx, hy, hz, mass, color, friction = 0.5, restitution = 0.1) {
+      return this.rigid(
+        mass > 0 ? RAPIER.RigidBodyDesc.dynamic() : RAPIER.RigidBodyDesc.fixed(),
+        RAPIER.ColliderDesc.cuboid(hx, hy, hz).setFriction(friction).setRestitution(restitution),
+        x, y, z, KIND_BOX, hx, hy, hz, color);
+    },
+    addSphere(x, y, z, r, mass, color, friction = 0.4, restitution = 0.3, ccd = false) {
+      const desc = mass > 0 ? RAPIER.RigidBodyDesc.dynamic() : RAPIER.RigidBodyDesc.fixed();
+      if (ccd) desc.setCcdEnabled(true);
+      return this.rigid(desc,
+        RAPIER.ColliderDesc.ball(r).setFriction(friction).setRestitution(restitution),
+        x, y, z, KIND_SPHERE, r, 0, 0, color);
+    },
+    hinge(a, b, pa, axis, pb) {
+      const jd = RAPIER.JointData.revolute(
+        { x: pa[0], y: pa[1], z: pa[2] }, { x: pb[0], y: pb[1], z: pb[2] },
+        { x: axis[0], y: axis[1], z: axis[2] });
+      this.world.createImpulseJoint(jd, a, b, true);
+    },
+    buildScene(id) {
+      if (this.world) this.world.free();
+      this.bodies = []; this.specsArr = []; this.plate = null;
+      this.world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+      this.world.timestep = 1 / 60;
+      this.world.integrationParameters.numSolverIterations = 10;
+
+      this.addBox(0, -1, 0, 45, 1, 45, 0, GREY);
+
+      if (id === 0) {
+        for (let layer = 0; layer < TOWER.layers; layer++) {
+          const color = boxColor(layer);
+          for (let ix = 0; ix < TOWER.cols; ix++) for (let iz = 0; iz < TOWER.cols; iz++) {
+            const x = (ix - 3) * TOWER.step, z = (iz - 3) * TOWER.step;
+            const y = 0.5 + layer * TOWER.step + TOWER.half;
+            this.addBox(x, y, z, TOWER.half, TOWER.half, TOWER.half, 1, color);
+          }
+        }
+        const ball = this.addSphere(TOWER.ball.x, TOWER.ball.y, TOWER.ball.z,
+                                    TOWER.ball.r, TOWER.ball.mass, RED, 0.4, 0.3, true);
+        ball.setLinvel({ x: TOWER.ball.vx, y: 0, z: TOWER.ball.vz }, true);
+      } else if (id === 1) {
+        for (let chain = 0; chain < 3; chain++) {
+          const x = CHAINS.xs[chain];
+          const color = boxColor(chain * 0.3 + 0.05);
+          const anchor = this.addBox(x, CHAINS.anchorY, 0, CHAINS.anchorHalf, CHAINS.anchorHalf,
+                                     CHAINS.anchorHalf, 0, [0.3, 0.3, 0.35]);
+          let prev = anchor, prevPivot = [0, -CHAINS.anchorHalf, 0];
+          const kicked = [];
+          for (let i = 0; i < CHAINS.links; i++) {
+            const y = CHAINS.anchorY - CHAINS.anchorHalf - CHAINS.linkHalf - i * CHAINS.linkHalf * 2;
+            const h = this.addBox(x, y, 0, CHAINS.linkHalf * 0.6, CHAINS.linkHalf,
+                                  CHAINS.linkHalf * 0.6, 0.8, color);
+            if (chain === 1) kicked.push(h);
+            this.hinge(prev, h, prevPivot, [1, 0, 0], [0, CHAINS.linkHalf, 0]);
+            prev = h; prevPivot = [0, -CHAINS.linkHalf, 0];
+          }
+          const yTail = CHAINS.anchorY - CHAINS.anchorHalf - CHAINS.links * CHAINS.linkHalf * 2 - 0.9;
+          const ball = this.addSphere(x, yTail, 0, 0.9, 6, color);
+          this.hinge(prev, ball, prevPivot, [1, 0, 0], [0, 0.9, 0]);
+          for (const h of kicked) h.setLinvel({ x: CHAINS.kick, y: 0, z: 0 }, true);
+        }
+        // Velocity-driven kinematic body (matches the other engines).
+        this.plate = this.world.createRigidBody(
+          RAPIER.RigidBodyDesc.kinematicVelocityBased().setTranslation(0, CHAINS.plate.y, 0));
+        this.world.createCollider(
+          RAPIER.ColliderDesc.cuboid(CHAINS.plate.hx, CHAINS.plate.hh, CHAINS.plate.hz), this.plate);
+        this.spec(KIND_BOX, 0, CHAINS.plate.y, 0, CHAINS.plate.hx, CHAINS.plate.hh, CHAINS.plate.hz, PLATE);
+        this.bodies.push(this.plate);
+        this.plate.setLinvel({ x: CHAINS.plate.v, y: 0, z: 0 }, true);
+      } else {
+        // Rapier has no soft bodies — flag scene renders ground only.
+        this.softAbsent = true;
+      }
+    },
+    step(dt) {
+      const t0 = performance.now();
+      if (this.plate) {
+        const p = this.plate.translation();
+        const v = this.plate.linvel();
+        if ((p.x > CHAINS.plate.lim && v.x > 0) || (p.x < -CHAINS.plate.lim && v.x < 0)) {
+          this.plate.setLinvel({ x: -v.x, y: 0, z: 0 }, true);
+        }
+      }
+      this.world.step();
+      this.stepMs = this.stepMs * 0.95 + (performance.now() - t0) * 0.05;
+    },
+    bodyCount() { return this.specsArr.length / SPEC_STRIDE; },
+    specs() { return new Float32Array(this.specsArr); },
+    poses() {
+      const n = this.bodyCount();
+      if (!this.posesArr || this.posesArr.length !== n * POSE_STRIDE) {
+        this.posesArr = new Float32Array(n * POSE_STRIDE);
+      }
+      for (let i = 0; i < n; i++) {
+        const b = this.bodies[i];
+        const p = b.translation(), q = b.rotation();
+        const j = i * POSE_STRIDE;
+        this.posesArr[j] = p.x; this.posesArr[j+1] = p.y; this.posesArr[j+2] = p.z;
+        this.posesArr[j+3] = q.x; this.posesArr[j+4] = q.y;
+        this.posesArr[j+5] = q.z; this.posesArr[j+6] = q.w;
+      }
+      return this.posesArr;
+    },
+    softInfo() { return null; },
+    shoot(ox, oy, oz, dx, dy, dz) {
+      const l = Math.hypot(dx, dy, dz) || 1;
+      const body = this.addSphere(ox - this.offset + dx / l * 1.5, oy + dy / l * 1.5,
+                                  oz + dz / l * 1.5, SHOOT.r, SHOOT.mass,
+                                  boxColor(performance.now() * 0.0007 % 1), 0.4, 0.3, true);
+      body.setLinvel({ x: dx / l * SHOOT.speed, y: dy / l * SHOOT.speed,
+                       z: dz / l * SHOOT.speed }, true);
+    },
+    dispose() {},
+  };
+  return api;
+}
+
+// ---------------------------------------------------------------------------
+// App shell
+// ---------------------------------------------------------------------------
+
+async function boot() {
+  try {
+    const wasm = (await WebAssembly.instantiate(b64ToU8(WASM_B64), {})).instance.exports;
+    const [rust, ammo, rapier] = await Promise.all([
+      makeRust(wasm).init(),
+      loadAmmo().then(A => makeAmmo(A).init()),
+      loadRapier().then(R => makeRapier(R).init()),
+    ]);
+    backends = [rust, ammo, rapier];
+    setupBabylon();
+    for (const b of backends) b.group = new Group(b.offset);
+
+    const canvas = document.getElementById("renderCanvas");
+    canvas.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      const pick = scene.pick(ev.clientX, ev.clientY);
+      const ray = pick && pick.ray ? pick.ray : camera.getForwardRay();
+      for (const b of backends) b.shoot(ray.origin.x, ray.origin.y, ray.origin.z,
+                                        ray.direction.x, ray.direction.y, ray.direction.z);
+    });
+
+    const loadScene = (id) => {
+      for (const b of backends) {
+        b.group.reset();
+        b.buildScene(id);
+        b.group.sync(b);
+      }
+      currentScene = id;
+      for (let i = 0; i < 3; i++) {
+        document.getElementById("btn" + i).classList.toggle("active", i === id);
+      }
+    };
+    document.getElementById("btn0").onclick = () => loadScene(0);
+    document.getElementById("btn1").onclick = () => loadScene(1);
+    document.getElementById("btn2").onclick = () => loadScene(2);
+
+    const focusBtns = ["f0", "f1", "f2", "f3"];
+    const setFocus = (i) => {
+      if (i === 0) { camera.setTarget(new BABYLON.Vector3(0, 7, 0)); camera.radius = 80; }
+      else {
+        const b = backends[i - 1];
+        camera.setTarget(new BABYLON.Vector3(b.offset, 7, 0));
+        camera.radius = 32;
+      }
+      focusBtns.forEach((f, k) => document.getElementById(f).classList.toggle("active", k === i));
+    };
+    focusBtns.forEach((f, i) => document.getElementById(f).onclick = () => setFocus(i));
+
+    loadScene(0);
+    setFocus(0);
+
+    const stats = document.getElementById("stats");
+    engine.runRenderLoop(() => {
+      const dt = 1 / 60;
+      for (const b of backends) { b.step(dt); b.group.sync(b); }
+      scene.render();
+      stats.textContent =
+        backends.map(b => `${b.name}: ${b.stepMs.toFixed(2)} ms/step`).join("\n") +
+        `\nrender ${engine.getFps().toFixed(0)} fps`;
+    });
+    window.addEventListener("resize", () => engine.resize());
+  } catch (e) {
+    showErr(e);
+  }
+}
+
+boot();
+</script>
+</body>
+</html>

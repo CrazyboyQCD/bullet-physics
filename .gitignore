@@ -21,3 +21,6 @@
 
 # Local agent handoff notes, not part of the published repo
 /HANDOFF.md
+
+# Browser demo build output (regenerate with tools/wasm-demo/build.py)
+/tools/wasm-demo/dist/
