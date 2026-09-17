@@ -8,7 +8,7 @@
 //! exported once per scene so the JS side can build meshes without
 //! mirroring scene layout.
 
-use bullet::dynamics::Constraint;
+use bullet::dynamics::{body::ActivationState, Constraint};
 use bullet::math::{Real, Vector3};
 use bullet::prelude::*;
 
@@ -241,10 +241,10 @@ impl Demo {
         self.kinematic_pusher = Some(plate);
     }
 
-    /// Flag cloth: pinned at the top two corners, driven by wind. Matches the
-    /// ammo.js comparison layout (CreatePatch's fixeds bitmask is 32-bit, so
-    /// the far corners' node indices cannot be encoded there — both engines
-    /// pin the same two nodes for a fair side-by-side).
+    /// Flag cloth: pinned along one full edge, driven by wind. Both engines
+    /// pin the same edge node-by-node for a fair side-by-side (CreatePatch's
+    /// fixeds bitmask covers corners only, so the edge is pinned manually —
+    /// corner-only pins let the sheet whip through the pin line and spike).
     fn scene_cloth(&mut self) {
         self.ground();
         let res = 18;
@@ -260,8 +260,9 @@ impl Demo {
             0.0,
         );
         cloth.set_total_mass(9.0);
-        cloth.nodes[0].im = 0.0;
-        cloth.nodes[res - 1].im = 0.0;
+        for n in &mut cloth.nodes[..res] {
+            n.im = 0.0;
+        }
         let node_off = self.soft_pos.len() / 3;
         let node_count = cloth.nodes.len();
         let face_off = self.soft_faces.len() / 3;
@@ -439,6 +440,30 @@ pub unsafe extern "C" fn demo_shoot(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn demo_set_wind(demo: *mut Demo, wind: f32) {
     unsafe { (*demo).wind = wind };
+}
+
+/// # Safety
+/// `demo` must be a live pointer from `demo_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn demo_idle(demo: *mut Demo) -> u32 {
+    unsafe {
+        let demo = &*demo;
+        // Soft bodies never sleep: a cloth scene is never idle.
+        if !demo.softs.is_empty() {
+            return 0;
+        }
+        for h in &demo.handles {
+            match demo.world.body(*h).activation_state() {
+                // Asleep or sim-disabled (static bodies start as
+                // IslandSleeping, so they do not block idling).
+                ActivationState::IslandSleeping | ActivationState::DisableSimulation => {}
+                // Active / WantsDeactivation / DisableDeactivation (kinematic)
+                // keep the demo busy.
+                _ => return 0,
+            }
+        }
+        1
+    }
 }
 
 /// # Safety

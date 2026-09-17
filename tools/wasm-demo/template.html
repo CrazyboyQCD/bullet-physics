@@ -50,8 +50,14 @@ const WASM_B64 = "@@WASM_B64@@";
 
 const POSE_STRIDE = 7, SPEC_STRIDE = 16;
 const KIND_BOX = 0, KIND_SPHERE = 1;
-const AMMO_URL = "https://cdn.jsdelivr.net/gh/kripken/ammo.js@main/builds/ammo.wasm.js";
-const AMMO_WASM_URL = "https://cdn.jsdelivr.net/gh/kripken/ammo.js@main/builds/ammo.wasm.wasm";
+// Spawn-table body flags (mirror of src/lib.rs): 0 dynamic, 1 static, 2 kinematic.
+const FLAG_STATIC = 1;
+// ammo.js pinned to a commit: @main moved underneath us once already (its
+// soft-world destroy path started crashing mid-session). jsdelivr serves
+// any rev, so pin for reproducibility.
+const AMMO_REV = "7dec46e35e0233514e4ed72a79e65e706ac20208";
+const AMMO_URL = "https://cdn.jsdelivr.net/gh/kripken/ammo.js@" + AMMO_REV + "/builds/ammo.wasm.js";
+const AMMO_WASM_URL = "https://cdn.jsdelivr.net/gh/kripken/ammo.js@" + AMMO_REV + "/builds/ammo.wasm.wasm";
 const RAPIER_URL = "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.20.0/+esm";
 
 // Scene layout constants — mirror of tools/wasm-demo/src/lib.rs (one physics
@@ -101,6 +107,14 @@ function setupBabylon() {
   camera = new BABYLON.ArcRotateCamera("cam", -Math.PI / 2.6, 1.15, 80,
     new BABYLON.Vector3(0, 7, 0), scene);
   camera.attachControl(canvas, true);
+  // Orbit only on Shift+drag: strip Babylon's default pointer-orbit input
+  // (wheel zoom stays); the custom handler below drives alpha/beta.
+  for (const key of Object.keys(camera.inputs.attached)) {
+    const inp = camera.inputs.attached[key];
+    if (inp.getClassName && inp.getClassName() === "ArcRotateCameraPointersInput") {
+      camera.inputs.remove(inp);
+    }
+  }
   camera.lowerRadiusLimit = 6;
   camera.upperRadiusLimit = 200;
   camera.wheelDeltaPercentage = 0.01;
@@ -109,8 +123,42 @@ function setupBabylon() {
   const sun = new BABYLON.DirectionalLight("sun", new BABYLON.Vector3(-0.4, -1, -0.3), scene);
   sun.position = new BABYLON.Vector3(30, 60, 24);
   sun.intensity = 1.15;
-  scene.metadata = { shadow: new BABYLON.ShadowGenerator(2048, sun) };
-  scene.metadata.shadow.useExponentialShadowMap = true;
+  // Shadows are cosmetic here: 1024 ESM refreshed every other frame keeps
+  // the shadow pass from dominating the frame at ~1.5k meshes.
+  const shadow = new BABYLON.ShadowGenerator(1024, sun);
+  shadow.useExponentialShadowMap = true;
+  shadow.getShadowMap().refreshRate =
+    BABYLON.RenderTargetTexture.REFRESHRATE_RENDER_ONEVERYTWOFRAMES;
+  scene.metadata = { shadow };
+}
+
+// One shared material per unique color: the tower scene has ~1.5k meshes and
+// a per-mesh material would mean that many state changes per render pass.
+const matCache = new Map();
+function sharedMat(c) {
+  const key = c[0].toFixed(3) + "," + c[1].toFixed(3) + "," + c[2].toFixed(3);
+  let mat = matCache.get(key);
+  if (!mat) {
+    mat = new BABYLON.StandardMaterial("m", scene);
+    mat.diffuseColor = new BABYLON.Color3(c[0], c[1], c[2]);
+    mat.specularColor = new BABYLON.Color3(0.08, 0.08, 0.08);
+    matCache.set(key, mat);
+  }
+  return mat;
+}
+
+// Soft-body material: a single instance reused across scene rebuilds.
+let softMat = null;
+function getSoftMat() {
+  if (!softMat) {
+    softMat = new BABYLON.StandardMaterial("sm", scene);
+    softMat.diffuseColor = new BABYLON.Color3(0.35, 0.62, 0.95);
+    softMat.specularColor = new BABYLON.Color3(0.25, 0.25, 0.25);
+    softMat.backFaceCulling = false;
+    softMat.twoSidedLighting = true;
+    softMat.emissiveColor = new BABYLON.Color3(0.06, 0.10, 0.16);
+  }
+  return softMat;
 }
 
 function bodyMesh(spec, offset) {
@@ -125,12 +173,15 @@ function bodyMesh(spec, offset) {
   }
   mesh.position.set(spec[1] + offset, spec[2], spec[3]);
   mesh.rotationQuaternion = new BABYLON.Quaternion(0, 0, 0, 1);
-  const mat = new BABYLON.StandardMaterial("m", scene);
-  mat.diffuseColor = new BABYLON.Color3(c[0], c[1], c[2]);
-  mat.specularColor = new BABYLON.Color3(0.08, 0.08, 0.08);
-  mesh.material = mat;
-  scene.metadata.shadow.addShadowCaster(mesh);
+  mesh.material = sharedMat(c);
   mesh.receiveShadows = true;
+  if (spec[14] === FLAG_STATIC) {
+    // Static bodies never move: freeze the world matrix; they receive but
+    // need not cast shadows.
+    mesh.freezeWorldMatrix();
+  } else {
+    scene.metadata.shadow.addShadowCaster(mesh);
+  }
   return mesh;
 }
 
@@ -155,7 +206,8 @@ class Group {
     }
     const soft = api.softInfo();
     if (soft && soft.nodeTotal > 0 && this.softMeshes.length === 0) {
-      const meta = soft.meta();
+      // Store the accessor itself — Group.sync calls it every frame.
+      const meta = soft.meta;
       const positions = new Float32Array(soft.nodes());
       const indices = new Uint32Array(soft.faces());
       const mesh = new BABYLON.Mesh("soft", scene);
@@ -163,13 +215,10 @@ class Group {
       vd.positions = positions.slice();
       vd.indices = indices;
       vd.applyToMesh(mesh, true);
-      const mat = new BABYLON.StandardMaterial("sm", scene);
-      mat.diffuseColor = new BABYLON.Color3(0.35, 0.62, 0.95);
-      mat.specularColor = new BABYLON.Color3(0.25, 0.25, 0.25);
-      mat.backFaceCulling = false;
-      mat.twoSidedLighting = true;
-      mat.emissiveColor = new BABYLON.Color3(0.06, 0.10, 0.16);
-      mesh.material = mat;
+      mesh.material = getSoftMat();
+      // Soft vertices arrive in engine-local coordinates; shift the whole
+      // mesh into this backend's column (no-op for offset 0).
+      mesh.position.x = this.offset;
       mesh.receiveShadows = true;
       scene.metadata.shadow.addShadowCaster(mesh);
       this.softMeshes.push({ mesh, meta });
@@ -228,6 +277,7 @@ function makeRust(wasm) {
     shoot(ox, oy, oz, dx, dy, dz) {
       wasm.demo_shoot(this.demo, ox - this.offset, oy, oz, dx, dy, dz);
     },
+    idle() { return wasm.demo_idle(this.demo) === 1; },
     dispose() { if (this.demo) wasm.demo_free(this.demo); this.demo = 0; },
   };
   return api;
@@ -254,6 +304,7 @@ function makeAmmo(Ammo) {
     name: "Ammo", offset: 0, group: null, stepMs: 0,
     world: null, bodies: [], specsArr: [], tmpV: null, tmpT: null, tmpQ: null,
     posesArr: null, soft: null, plate: null, helpers: null, collisionCfg: null,
+    idleTick: 0, idleCache: false, simT: 0,
     async init() {
       const cfg = this.collisionCfg = new Ammo.btDefaultCollisionConfiguration();
       const dispatcher = new Ammo.btCollisionDispatcher(cfg);
@@ -274,6 +325,10 @@ function makeAmmo(Ammo) {
     rigid(shape, x, y, z, mass, friction, restitution) {
       if (mass > 0) shape.calculateLocalInertia(mass, this.tmpV);
       else this.tmpV.setValue(0, 0, 0);
+      // tmpT is shared across every body build AND every poses() read:
+      // reset it fully or new bodies inherit the last-read body's rotation
+      // (scene switches then spawn visibly tilted plates/boxes).
+      this.tmpT.setIdentity();
       this.tmpT.setOrigin(new Ammo.btVector3(x, y, z));
       const ms = new Ammo.btDefaultMotionState(this.tmpT);
       const info = new Ammo.btRigidBodyConstructionInfo(mass, ms, shape, this.tmpV);
@@ -305,8 +360,16 @@ function makeAmmo(Ammo) {
     },
     buildScene(id) {
       // Drop the previous world entirely (cheap and leak-safe for a demo).
-      if (this.world) Ammo.destroy(this.world);
+      // destroy() crashes on soft worlds in current ammo.js builds ("null
+      // function" in the wasm destructor table) — swallow and leak the old
+      // world instead of leaving the backends on different scenes.
+      try {
+        if (this.world) Ammo.destroy(this.world);
+      } catch (e) {
+        console.warn("ammo world destroy failed (leaking old world)", e);
+      }
       this.bodies = []; this.specsArr = []; this.soft = null; this.plate = null;
+      this.idleTick = 0; this.idleCache = false; this.simT = 0;
       const cfg = this.collisionCfg = new Ammo.btDefaultCollisionConfiguration();
       const dispatcher = new Ammo.btCollisionDispatcher(cfg);
       const broadphase = new Ammo.btDbvtBroadphase();
@@ -364,9 +427,8 @@ function makeAmmo(Ammo) {
           new Ammo.btVector3(-H, CLOTH.y, H), new Ammo.btVector3(H, CLOTH.y, H),
           R, R, 0, false);
         soft.setTotalMass(CLOTH.mass);
-        // Pin the top two corners the way the Rust side does (im = 0).
-        soft.setMass(0, 0);
-        soft.setMass(R - 1, 0);
+        // Pin the whole first row, mirroring the Rust side (im = 0).
+        for (let i = 0; i < R; i++) soft.setMass(i, 0);
         this.world.addSoftBody(soft);
         this.soft = { body: soft, res: R };
       }
@@ -388,7 +450,8 @@ function makeAmmo(Ammo) {
         }
       }
       if (this.soft) {
-        const t = performance.now() * 0.001;
+        this.simT += dt; // simulation-time clock, matches the Rust side's
+        const t = this.simT;
         const gust = Math.sin(t * 1.7) * 0.6 + 0.4;
         // Per-node lateral force, mirroring the Rust wind model.
         this.tmpV.setValue(CLOTH.wind * gust * 0.024, 0,
@@ -451,12 +514,23 @@ function makeAmmo(Ammo) {
     shoot(ox, oy, oz, dx, dy, dz) {
       const lx = ox - this.offset;
       const d = new Ammo.btVector3(dx, dy, dz); d.normalize();
+      // ammo.js btVector3 has no scalar scale() — build the scaled vector.
+      const v = new Ammo.btVector3(d.x() * SHOOT.speed, d.y() * SHOOT.speed, d.z() * SHOOT.speed);
       const body = this.addSphere(lx + d.x() * 1.5, oy + d.y() * 1.5, oz + d.z() * 1.5,
                                   SHOOT.r, SHOOT.mass, boxColor(performance.now() * 0.0007 % 1));
-      const v = d.scale(SHOOT.speed);
       body.setLinearVelocity(v);
       body.setCcdMotionThreshold(1.0);
       body.setCcdSweptSphereRadius(SHOOT.r);
+    },
+    idle() {
+      // isActive() crosses the wasm boundary per body — poll, don't spam.
+      // Bullet static bodies stay ACTIVE_TAG forever (they never sleep), so
+      // only mass > 0 bodies count; the kinematic plate keeps scene 1 busy.
+      if (this.idleTick++ % 30 === 0) {
+        this.idleCache = !this.soft && !this.plate &&
+          !this.bodies.some(b => b.getMass() > 0 && b.isActive());
+      }
+      return this.idleCache;
     },
     dispose() {},
   };
@@ -494,16 +568,25 @@ function makeRapier(RAPIER) {
       return body;
     },
     addBox(x, y, z, hx, hy, hz, mass, color, friction = 0.5, restitution = 0.1) {
+      // Rapier derives body mass from collider density — convert the desired
+      // mass so bodies match the Bullet engines (a default density of 1
+      // would make the tower boxes and wrecking ball several times lighter).
+      const vol = 8 * hx * hy * hz;
       return this.rigid(
         mass > 0 ? RAPIER.RigidBodyDesc.dynamic() : RAPIER.RigidBodyDesc.fixed(),
-        RAPIER.ColliderDesc.cuboid(hx, hy, hz).setFriction(friction).setRestitution(restitution),
+        RAPIER.ColliderDesc.cuboid(hx, hy, hz)
+          .setDensity(mass > 0 ? mass / vol : 1)
+          .setFriction(friction).setRestitution(restitution),
         x, y, z, KIND_BOX, hx, hy, hz, color);
     },
     addSphere(x, y, z, r, mass, color, friction = 0.4, restitution = 0.3, ccd = false) {
       const desc = mass > 0 ? RAPIER.RigidBodyDesc.dynamic() : RAPIER.RigidBodyDesc.fixed();
       if (ccd) desc.setCcdEnabled(true);
+      const vol = 4 / 3 * Math.PI * r * r * r;
       return this.rigid(desc,
-        RAPIER.ColliderDesc.ball(r).setFriction(friction).setRestitution(restitution),
+        RAPIER.ColliderDesc.ball(r)
+          .setDensity(mass > 0 ? mass / vol : 1)
+          .setFriction(friction).setRestitution(restitution),
         x, y, z, KIND_SPHERE, r, 0, 0, color);
     },
     hinge(a, b, pa, axis, pb) {
@@ -605,6 +688,12 @@ function makeRapier(RAPIER) {
       body.setLinvel({ x: dx / l * SHOOT.speed, y: dy / l * SHOOT.speed,
                        z: dz / l * SHOOT.speed }, true);
     },
+    idle() {
+      // The velocity-driven kinematic plate never idles (scene 1); only
+      // dynamic bodies can sleep.
+      if (this.plate) return false;
+      return !this.bodies.some(b => b.isDynamic() && !b.isSleeping());
+    },
     dispose() {},
   };
   return api;
@@ -625,17 +714,46 @@ async function boot() {
     backends = [rust, ammo, rapier];
     setupBabylon();
     for (const b of backends) b.group = new Group(b.offset);
+    // Debug/testing handle (console: __demo.backends[i].bodies.length etc).
+    window.__demo = { backends, engine: () => engine };
 
     const canvas = document.getElementById("renderCanvas");
+    let lastShot = 0;
     canvas.addEventListener("pointerdown", (ev) => {
+      wake();
+      if (ev.shiftKey) return; // Shift+drag orbits the camera, not a shot
       if (ev.button !== 0) return;
+      // Swallow bounced/duplicated clicks: some mice double-fire pointerdown
+      // a few ms apart, which used to look like one click firing two balls.
+      const now = performance.now();
+      if (now - lastShot < 250) return;
+      lastShot = now;
       const pick = scene.pick(ev.clientX, ev.clientY);
       const ray = pick && pick.ray ? pick.ray : camera.getForwardRay();
       for (const b of backends) b.shoot(ray.origin.x, ray.origin.y, ray.origin.z,
                                         ray.direction.x, ray.direction.y, ray.direction.z);
     });
 
+    // Camera: orbit only while Shift is held. Plain mouse movement neither
+    // rotates the view nor wakes the idle render loop; wheel zoom still does.
+    let orbiting = false, lastX = 0, lastY = 0;
+    canvas.addEventListener("pointerdown", (ev) => {
+      if (ev.shiftKey) { orbiting = true; lastX = ev.clientX; lastY = ev.clientY; }
+    });
+    canvas.addEventListener("pointermove", (ev) => {
+      if (!orbiting || !ev.shiftKey) return;
+      wake();
+      const k = 0.005;
+      camera.alpha -= (ev.clientX - lastX) * k;
+      camera.beta = Math.max(0.05, Math.min(Math.PI - 0.05,
+        camera.beta - (ev.clientY - lastY) * k));
+      lastX = ev.clientX; lastY = ev.clientY;
+    });
+    window.addEventListener("pointerup", () => { orbiting = false; });
+    canvas.addEventListener("wheel", () => wake());
+
     const loadScene = (id) => {
+      wake();
       for (const b of backends) {
         b.group.reset();
         b.buildScene(id);
@@ -652,6 +770,7 @@ async function boot() {
 
     const focusBtns = ["f0", "f1", "f2", "f3"];
     const setFocus = (i) => {
+      wake();
       if (i === 0) { camera.setTarget(new BABYLON.Vector3(0, 7, 0)); camera.radius = 80; }
       else {
         const b = backends[i - 1];
@@ -662,19 +781,67 @@ async function boot() {
     };
     focusBtns.forEach((f, i) => document.getElementById(f).onclick = () => setFocus(i));
 
-    loadScene(0);
-    setFocus(0);
-
     const stats = document.getElementById("stats");
-    engine.runRenderLoop(() => {
-      const dt = 1 / 60;
-      for (const b of backends) { b.step(dt); b.group.sync(b); }
+    // Wall-clock accumulator: physics advances in fixed 1/60 s steps at
+    // simulation rate, not display rate (a 144 Hz monitor must not drive
+    // the three engines 144 times per second). Time beyond MAX_SUBSTEPS is
+    // dropped, so returning from a background tab cannot burst the CPU.
+    //
+    // Idle unload: while every engine reports all bodies asleep, stepping
+    // is skipped; after IDLE_QUIET_MS without interaction the render loop
+    // stops entirely (a static scene would otherwise keep redrawing ~1.5k
+    // meshes every frame). Any pointer/button activity wakes it again.
+    // SIM_SPEED scales simulation time against wall time: 1 = real time,
+    // 0.5 = half-speed slow motion. Physics still steps at fixed 1/60 s, so
+    // per-step behavior and the engine-to-engine comparison stay identical.
+    const SIM_SPEED = 0.5;
+    const STEP_DT = 1 / 60, MAX_SUBSTEPS = 3, IDLE_QUIET_MS = 2000, IDLE_POLL = 30;
+    let accum = 0, last = performance.now();
+    let idle = false, lastInteraction = performance.now();
+    let tick = 0, allAsleep = false;
+    const renderFrame = () => {
+      const now = performance.now();
+      accum = Math.min(accum + ((now - last) / 1000) * SIM_SPEED, MAX_SUBSTEPS * STEP_DT);
+      last = now;
+      if (tick++ % IDLE_POLL === 0) allAsleep = backends.every(b => b.idle());
+      if (allAsleep) {
+        accum = 0;
+      } else {
+        while (accum >= STEP_DT) {
+          for (const b of backends) b.step(STEP_DT);
+          accum -= STEP_DT;
+        }
+      }
+      for (const b of backends) b.group.sync(b);
       scene.render();
+      if (allAsleep && now - lastInteraction > IDLE_QUIET_MS) {
+        idle = true;
+        // Stop from OUTSIDE the rAF callback: stopping synchronously here
+        // dirties Babylon's frame-chain state and a later runRenderLoop
+        // would never schedule a new frame.
+        setTimeout(() => engine.stopRenderLoop(), 0);
+      }
       stats.textContent =
         backends.map(b => `${b.name}: ${b.stepMs.toFixed(2)} ms/step`).join("\n") +
         `\nrender ${engine.getFps().toFixed(0)} fps`;
-    });
-    window.addEventListener("resize", () => engine.resize());
+    };
+    const wake = () => {
+      lastInteraction = performance.now();
+      if (idle) {
+        idle = false;
+        tick = 0;
+        allAsleep = false;
+        accum = 0;
+        last = performance.now();
+        engine.stopRenderLoop();           // clear any half-dead chain state
+        engine.runRenderLoop(renderFrame); // start a fresh frame chain
+      }
+    };
+    engine.runRenderLoop(renderFrame);
+    window.addEventListener("resize", () => { wake(); engine.resize(); });
+
+    loadScene(0);
+    setFocus(0);
   } catch (e) {
     showErr(e);
   }
