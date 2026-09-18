@@ -333,11 +333,48 @@ static void scene_cluster_joints(int frames)
 	}
 }
 
+// Diagnostic variant of scene_cluster_pair with a light touch: the
+// ellipsoids start 0.3 m apart (inside the 0.5 combined-margin band, no
+// deep overlap), isolating the large-overlap blow-up regime.
+static void scene_cluster_pair_soft(int frames)
+{
+	btSoftRigidDynamicsWorld* world = makeWorld();
+	addGround(world);
+	btSoftBody* a = btSoftBodyHelpers::CreateEllipsoid(world->getWorldInfo(),
+	                                                   btVector3(-1.15, 1.5, 0),
+	                                                   btVector3(1, 0.8, 1), 64);
+	btSoftBody* b = btSoftBodyHelpers::CreateEllipsoid(world->getWorldInfo(),
+	                                                   btVector3(1.15, 1.5, 0),
+	                                                   btVector3(1, 0.8, 1), 64);
+	for (btSoftBody* psb : {a, b})
+	{
+		psb->m_cfg.piterations = 4;
+		psb->m_cfg.collisions = btSoftBody::fCollision::CL_RS | btSoftBody::fCollision::CL_SS;
+		psb->setTotalMass(20, true);
+		psb->generateBendingConstraints(2);
+		psb->generateClusters(16, 32);
+		psb->m_materials[0]->m_kLST = btScalar(0.5);
+		for (int i = 0; i < psb->m_clusters.size(); ++i)
+		{
+			psb->m_clusters[i]->m_matching = btScalar(0.35);
+		}
+		world->addSoftBody(psb);
+	}
+	for (int f = 0; f < frames; ++f)
+	{
+		world->stepSimulation(DT, 1, DT);
+		const btVector3 ca = centerOfMass(a);
+		const btVector3 cb = centerOfMass(b);
+		printf("%d %.6f %.6f %.6f\n", f, (ca - cb).length(),
+		       btMin(minY(a), minY(b)), ca.x());
+	}
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
 	{
-		fprintf(stderr, "usage: %s <rope_pendulum|rope_ground|cloth_plane|patch_catenary|soft_soft_vf|ellipsoid_ground|cluster_pair|cluster_joints|rope_ball_tunnel> [frames]\n", argv[0]);
+		fprintf(stderr, "usage: %s <rope_pendulum|rope_ground|cloth_plane|patch_catenary|soft_soft_vf|ellipsoid_ground|cluster_pair|cluster_pair_soft|cluster_joints|rope_ball_tunnel> [frames]\n", argv[0]);
 		return 1;
 	}
 	const char* scene = argv[1];
@@ -356,6 +393,8 @@ int main(int argc, char** argv)
 		scene_ellipsoid_ground(frames);
 	else if (!strcmp(scene, "cluster_pair"))
 		scene_cluster_pair(frames);
+	else if (!strcmp(scene, "cluster_pair_soft"))
+		scene_cluster_pair_soft(frames);
 	else if (!strcmp(scene, "cluster_joints"))
 		scene_cluster_joints(frames);
 	else if (!strcmp(scene, "rope_ball_tunnel"))

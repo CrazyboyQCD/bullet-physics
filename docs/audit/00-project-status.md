@@ -133,8 +133,13 @@ contact normal, inside the rolling-friction branch — upstream gate kept
 verbatim) and the scaled-shape wrappers landed 2026-09-11
 (`scaled_triangle_mesh` construction-time equivalent + the
 `uniform_scaling` / `convex_2d` wrapper variants). The batch is complete:
-the next stage is the 1.0 API freeze review. Known residual: the `cluster_pair` CL_SS chaos probe diverges
-qualitatively (pre-existing, tracked for a separate round).
+the next stage is the 1.0 API freeze review. The `cluster_pair` CL_SS
+qualitative divergence was root-caused 2026-09-18 as a composite of three
+already-classified factors (large-overlap blow-up — both engines,
+Bullet's tunneled triangulated plane at explosion speed, quickhull
+vertex-order scatter; the `cluster_pair_soft` light-touch variant agrees
+qualitatively) — no port bug, closed with no code change (see
+`bullet-compare.md` Phase D).
 
 ## Known Deviations
 

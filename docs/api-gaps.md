@@ -428,9 +428,14 @@ S/M/L · **See** = existing notes.
   parameter order (the split channel had been silently dead since the
   first port); the regression test
   `linear_joint_drift_split_reaches_nodes` pins it.
-  Known residual: the `cluster_pair` CL_SS chaos probe still diverges
-  qualitatively from Bullet (pre-existing, unrelated to the split
-  channel — first frame already off; tracked for a separate round).
+  The `cluster_pair` CL_SS qualitative divergence was root-caused
+  2026-09-18 — no port bug: a composite of the large-overlap blow-up
+  regime (both engines inject pseudo-energy through the full-overlap
+  `CJoint` drift, Bullet's own weak spot), Bullet's tunneled
+  triangulated-plane band at explosion speed (free fall to −9.65 vs our
+  analytic plane settling at 0.25), and the quickhull vertex-order
+  scatter. The new `cluster_pair_soft` light-touch probe variant (both
+  engines) agrees qualitatively. See `bullet-compare.md` Phase D.
   Files: `softbody/cluster.rs`, `softbody/joints.rs`, `softbody/solver.rs`.
 - **Collision-event sources** ✅ (2026-09-07): multibody-collider and
   soft-body pairs joined the rigid pairs as event sources.

@@ -1027,6 +1027,30 @@ hull + `setTotalMass(mass, true)` + `generateBendingConstraints(2)` +
 | ellipsoid_ground f32 | 22 | min_y 0.350 / com 1.312 / half 0.980 | min_y 0.228 / com 1.192 / half 0.995 | Volumetric ball onto the plane through CL_RS clusters. The first 21 frames (free fall) match within 1e-4; the divergence starts while still airborne — the quickhull **vertex ordering** differs from Bullet's `HullLibrary` (same vertex set, different link/face append order), so the PBD solve order diverges and the cluster matching amplifies it (the pre-recorded deviations §11 scatter class). Settle differs +122 mm: Bullet's plane route triangulates into extruded hulls (triangle margin 0.04 counted on both sides plus the rigid shape margin → effective band ~0.35) while our analytic plane distance keeps the hull at margin 0.25 − slop — the rope_ground SDF class, cluster edition. Shape character matches (squash/recover half-height 0.98 vs 0.995, settle stable, no tunneling) |
 | ellipsoid_ground f64 | 43 | min_y 0.350 / com 1.334 / half 0.997 | min_y 0.226 / com 1.201 / half 0.984 | Same pattern as f32 (settle +124 mm, divergence pre-contact) — f32 = f64 → structural, not precision |
 | cluster_pair f32/f64 | 0 | separation 79.8, **min_y −223 (Bullet explodes through the ground)** | separation 32.9, min_y 0.229 (settled in band) | Two overlapping cluster ellipsoids pushing apart through CL_SS. Frame 0 already differs ~3.7 cm: the pair starts inside the 0.5 contact band, and the first-touch joint impulses differ through the hull-vertex-order/mass-share scatter. After that **Bullet's own CL_SS goes numerically unstable on the large initial overlap** (nodes driven to y = −223 m) — the same "Bullet's own weak spot" family as `gimpact_stack_100` (both engines diverge, Bullet worse); our pair separates smoothly and settles on the plane. Behavioral fork makes the ratio meaningless; the conclusion is recorded in deviations instead |
+| cluster_pair_soft f64 (2026-09-18 diagnostic variant, centers ±1.15 = 0.3 m apart) | 0 (2.8 mm) | separation 5.330 / min_y 0.350 / com_x −2.778 | separation 5.311 / min_y 0.251 / com_x −2.691 | **Qualitative agreement**: both engines slide apart smoothly and settle — no blow-up, no tunneling. Residuals are exactly the two classified classes: the Bullet plane-triangulated band (min_y 0.350 vs 0.251, the `ellipsoid_ground` settle class) plus the quickhull vertex-order scatter (2.8 mm → 0.1 m chaotic growth). Isolates the original scene's divergence to the large-overlap blow-up regime |
+
+cluster_pair root cause (2026-09-18, closes the residual): the qualitative
+divergence is a composite of three already-classified factors with **no
+port bug in the CL_SS path**. (1) The scene starts ~0.2 m inside the 0.5
+combined-margin band; the `CJoint` drift correction carries the full
+overlap each step (erp = 1), so **both engines inject pseudo-energy and
+blow apart** (f64 @100 frames: separation 2.03 → 20.9 Bullet / 17.2 ours —
+same explosion, scatter-level difference; the ledger's −223 record is the
+same regime at a longer horizon). (2) At separation the nodes carry
+~6–10 m/s; Bullet's triangulated static-plane route (finite extruded
+triangle pieces, band ~0.35) is tunneled through — from ~f50 the Bullet
+min_y falls in pure free fall (measured accel ≈ g, no contact force left)
+to −9.65 — while our analytic infinite plane keeps catching the band
+(min_y settles at 0.25). This is the `ellipsoid_ground` plane-band class
+amplified by the explosion. (3) Throughout, the quickhull vertex-order /
+cluster-partition scatter (`ellipsoid_ground` class) feeds the chaos.
+Evidence: `CollideCL_SS::Process` / `ClusterBase::SolveContact`
+(btSoftBodyInternals.h 1551–1602 / 1440–1480) match `collide_cluster_soft`
+/ `solve_cluster_contact` line-by-line; the `cluster_joints` probe is f64
+bit-identical (2026-09-11); and the `cluster_pair_soft` variant row above
+shows qualitative agreement at light touch. The original scene's
+behavioral fork therefore stays classified (Bullet weak spot + plane band
++ hull-order scatter); no code change.
 
 ### Phase F probes (2026-09-01): rope_ball_tunnel
 

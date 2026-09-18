@@ -26,6 +26,7 @@ fn main() {
         "soft_soft_vf" => scene_soft_soft_vf(dt, frames),
         "ellipsoid_ground" => scene_ellipsoid_ground(dt, frames),
         "cluster_pair" => scene_cluster_pair(dt, frames),
+        "cluster_pair_soft" => scene_cluster_pair_soft(dt, frames),
         "cluster_joints" => scene_cluster_joints(dt, frames),
         "rope_ball_tunnel" => scene_rope_ball_tunnel(dt, frames),
         other => {
@@ -253,6 +254,54 @@ fn scene_cluster_pair(dt: Real, frames: usize) {
     let b = setup_cluster_ellipsoid(
         &mut world,
         Vector3::new(0.9, 1.5, 0.0),
+        Vector3::new(1.0, 0.8, 1.0),
+        64,
+        SoftCollision::CL_RS.union(SoftCollision::CL_SS),
+        20.0,
+    );
+    for f in 0..frames {
+        world.step_simulation(dt);
+        let (ca, min_a) = {
+            let sb = world.soft_body(a);
+            (
+                sb.get_center_of_mass(),
+                sb.nodes.iter().map(|n| n.x.y).fold(Real::INFINITY, Real::min),
+            )
+        };
+        let (cb, min_b) = {
+            let sb = world.soft_body(b);
+            (
+                sb.get_center_of_mass(),
+                sb.nodes.iter().map(|n| n.x.y).fold(Real::INFINITY, Real::min),
+            )
+        };
+        println!(
+            "{f} {:.6} {:.6} {:.6}",
+            (ca - cb).length(),
+            min_a.min(min_b),
+            ca.x
+        );
+    }
+}
+
+/// Diagnostic variant of `cluster_pair` with a light touch: the ellipsoids
+/// start 0.3 m apart (inside the 0.5 combined-margin band, no deep
+/// overlap), isolating the large-overlap blow-up regime of the original
+/// scene.
+fn scene_cluster_pair_soft(dt: Real, frames: usize) {
+    let mut world = make_world();
+    add_ground(&mut world);
+    let a = setup_cluster_ellipsoid(
+        &mut world,
+        Vector3::new(-1.15, 1.5, 0.0),
+        Vector3::new(1.0, 0.8, 1.0),
+        64,
+        SoftCollision::CL_RS.union(SoftCollision::CL_SS),
+        20.0,
+    );
+    let b = setup_cluster_ellipsoid(
+        &mut world,
+        Vector3::new(1.15, 1.5, 0.0),
         Vector3::new(1.0, 0.8, 1.0),
         64,
         SoftCollision::CL_RS.union(SoftCollision::CL_SS),

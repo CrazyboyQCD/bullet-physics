@@ -326,7 +326,10 @@ order → settle-class scatter (deviations §11-⑤).
   122mm = Bullet's plane-triangulated band vs the analytic band — the cluster-scale
   rope_ground class; f32=f64 structural), cluster_pair (**Bullet's own CL_SS numerically
   explodes on large-overlap first contact, tunneling to −223m**; we push apart steadily and
-  settle — the gimpact_stack class of "Bullet's own weakness"; the behavioral divergence is
+  settle — the gimpact_stack class of "Bullet's own weakness"; root-caused 2026-09-18 as
+  blow-up regime + Bullet's tunneled triangulated plane at explosion speed + hull-order
+  scatter, no port bug — the `cluster_pair_soft` light-touch variant agrees qualitatively,
+  see `bullet-compare.md` Phase D; the behavioral divergence is
   recorded in deviations). Tests +6 (quickhull 3 + ellipsoid topology/volume, face-area/tetra
   volume mass, bending count, cluster master/connectivity, per-face fallback, polar rotation
   recovery, pose rotation tracking, CL_RS settle, CL_SS separation, hull interior-point
