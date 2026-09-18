@@ -101,7 +101,14 @@ fn main() {
                     .chunks(3)
                     .map(|t| [t[0], t[1], t[2]])
                     .collect();
-                CollisionShape::triangle_mesh(vertices, indices)
+                let mut mesh =
+                    bullet_collision::shapes::TriangleMesh::new(vertices, indices);
+                if b.internal_edges {
+                    // Mesh-opt-in (btGenerateInternalEdgeInfo): edge-contact
+                    // normals get the adjacent-triangle-aware adjustment.
+                    mesh.generate_internal_edge_info();
+                }
+                CollisionShape::TriangleMesh(mesh)
             }
             ShapeSpec::UniformScaling(factor, kind, params) => {
                 // Uniform wrapper (btUniformScalingShape): kind 0 = sphere

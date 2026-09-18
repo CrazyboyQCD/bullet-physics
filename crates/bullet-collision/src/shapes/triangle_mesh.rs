@@ -3,6 +3,7 @@ use bullet_math::{Aabb, Quaternion, Real, Vector3};
 use alloc::vec::Vec;
 
 use super::bvh::Bvh;
+use super::internal_edges::TriangleInfoMap;
 use super::CollisionShape;
 
 /// One indexed triangle soup of a mesh part (Bullet's `btIndexedMesh`): an
@@ -45,6 +46,10 @@ pub struct TriangleMesh {
     /// Cached local AABB over all vertices (hot: the contact-breaking
     /// threshold of every convex-vs-mesh pair reads it).
     local_bounds: Aabb,
+    /// Internal-edge adjacency info (Bullet's triangle info map), built on
+    /// demand by [`TriangleMesh::generate_internal_edge_info`]; `None`
+    /// means the feature is off and the narrow phase is untouched.
+    internal_edges: Option<TriangleInfoMap>,
 }
 
 impl TriangleMesh {
@@ -58,7 +63,9 @@ impl TriangleMesh {
     /// [`CollisionShape::scaled_triangle_mesh`]): every vertex is multiplied
     /// by `scaling` (negative components flip the winding exactly like the
     /// wrapper's per-axis swap) and the BVH, triangle hulls and AABBs are
-    /// rebuilt from the scaled stream.
+    /// rebuilt from the scaled stream. Internal-edge info is dropped
+    /// (non-uniform scaling changes the dihedral angles) — regenerate it on
+    /// the scaled mesh if the feature is in use.
     pub fn scaled(self, scaling: Vector3) -> Self {
         let Self { mut vertices, indices, .. } = self;
         for v in &mut vertices {
@@ -111,6 +118,7 @@ impl TriangleMesh {
             tri_hulls,
             tri_aabbs,
             local_bounds,
+            internal_edges: None,
         }
     }
 
@@ -143,6 +151,33 @@ impl TriangleMesh {
         let mut out = Vec::new();
         self.bvh.triangles_in_aabb(aabb, &mut out);
         out
+    }
+
+    /// Build the internal-edge adjacency info (Bullet's
+    /// `btGenerateInternalEdgeInfo`): from then on, convex-vs-mesh contact
+    /// normals landing on a shared edge are rotated onto the
+    /// adjacent-triangle-aware direction, removing the edge/corner popping
+    /// on interior mesh edges. Idempotent (Bullet returns early when the
+    /// map already exists); a mesh scaled afterwards drops the info —
+    /// regenerate it there.
+    pub fn generate_internal_edge_info(&mut self) {
+        if self.internal_edges.is_some() {
+            return;
+        }
+        self.internal_edges = Some(TriangleInfoMap::build(
+            &self.vertices,
+            &self.indices,
+            &self.tri_aabbs,
+            &self.bvh,
+        ));
+    }
+
+    /// The internal-edge info map, if [`TriangleMesh::generate_internal_edge_info`]
+    /// has run (Bullet's `getTriangleInfoMap`). The threshold fields are
+    /// pub — tune them before bodies hit the mesh.
+    #[inline]
+    pub fn internal_edge_info(&self) -> Option<&TriangleInfoMap> {
+        self.internal_edges.as_ref()
     }
 
     /// Append triangle-index pairs `(this, other)` whose node boxes may

@@ -21,9 +21,28 @@
 #include <vector>
 
 #include "btBulletDynamicsCommon.h"
-#include "BulletCollision/CollisionShapes/btScaledBvhTriangleMeshShape.h"
+#include "BulletCollision/CollisionDispatch/btInternalEdgeUtility.h"
+#include "BulletCollision/CollisionDispatch/btManifoldResult.h"
+#include "BulletCollision/CollisionShapes/btScaledBvhTriangleMeshShape.h"       
 #include "BulletCollision/CollisionShapes/btUniformScalingShape.h"
 #include "bullet_scenes.h"
+
+extern ContactAddedCallback gContactAddedCallback;
+
+// The contact-added callback the internal-edge utility rides on (Bullet's
+// btManifoldResult hook; only bodies carrying CF_CUSTOM_MATERIAL_CALLBACK
+// reach it). All real upstream callers hand the triangle side as colObj0:
+// the manifold's body0 is the convex, so the triangle is colObj1 and the
+// (partId, index) that index the triangle info map are partId1/index1.
+bool internal_edge_contact_callback(btManifoldPoint& cp,
+                                    const btCollisionObjectWrapper* col_obj0_wrap,
+                                    int /*part_id0*/, int /*index0*/,
+                                    const btCollisionObjectWrapper* col_obj1_wrap,
+                                    int part_id1, int index1) {
+  btAdjustInternalEdgeContacts(cp, col_obj1_wrap, col_obj0_wrap, part_id1,
+                               index1);
+  return true;
+}
 
 namespace {
 
@@ -197,6 +216,9 @@ int main(int argc, char** argv) {
   btContactSolverInfo& info = world.getSolverInfo();
   info.m_solverMode &= ~SOLVER_RANDMIZE_ORDER;
   info.m_numIterations = spec->iterations;
+  // The internal-edge utility hook: inert unless a body carries
+  // CF_CUSTOM_MATERIAL_CALLBACK (only the internal_edge scene's mesh does).
+  gContactAddedCallback = internal_edge_contact_callback;
 
   const btScalar dt = btScalar(spec->dt_num) / btScalar(spec->dt_den);
 
@@ -241,6 +263,16 @@ int main(int argc, char** argv) {
     if (b.no_contact_response) {
       body->setCollisionFlags(body->getCollisionFlags() |
                               btCollisionObject::CF_NO_CONTACT_RESPONSE);
+    }
+    if (b.internal_edges) {
+      // Mesh-opt-in: build the triangle info map (btGenerateInternalEdgeInfo
+      // also stores it on the shape) and arm the callback gate flag.
+      if (b.shape == SHAPE_MESH) {
+        btGenerateInternalEdgeInfo(
+            static_cast<btBvhTriangleMeshShape*>(shape), new btTriangleInfoMap());
+      }
+      body->setCollisionFlags(body->getCollisionFlags() |
+                              btCollisionObject::CF_CUSTOM_MATERIAL_CALLBACK);
     }
     // Per-body gravity: detach from world propagation first (the addRigidBody
     // sync and world setGravity respect the flag), then set the body's own

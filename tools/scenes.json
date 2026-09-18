@@ -1649,6 +1649,76 @@
         "ball",
         "box"
       ]
+    },
+    "internal_edge": {
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 240,
+      "iterations": 20,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "mesh",
+            "grid": [
+              5,
+              2
+            ],
+            "origin": [
+              -2,
+              -0.5
+            ],
+            "cell": [
+              1.0,
+              1.0
+            ],
+            "heights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "mass": 0,
+          "internal_edges": true
+        },
+        {
+          "name": "sphere",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            0,
+            2,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "restitution": 0.0
+        }
+      ],
+      "record": [
+        "sphere"
+      ]
     }
   }
 }

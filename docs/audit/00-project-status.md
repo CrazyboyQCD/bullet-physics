@@ -139,7 +139,12 @@ already-classified factors (large-overlap blow-up — both engines,
 Bullet's tunneled triangulated plane at explosion speed, quickhull
 vertex-order scatter; the `cluster_pair_soft` light-touch variant agrees
 qualitatively) — no port bug, closed with no code change (see
-`bullet-compare.md` Phase D).
+`bullet-compare.md` Phase D). The full feature-surface audit (2026-09-18)
+landed 19 Open rows in `docs/api-priorities.md`; the top-priority row
+(internal edge utility) shipped the same day — `TriangleMesh::
+generate_internal_edge_info()` + the convex-vs-mesh normal fix, parity
+scene `internal_edge` (x/z exactly 0 on both engines), scope cuts in
+deviations §1 (see `docs/design/internal-edges.md`).
 
 ## Known Deviations
 

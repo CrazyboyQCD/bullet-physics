@@ -141,6 +141,7 @@ def gen_c(scenes):
         "  int no_contact_response;  // CF_NO_CONTACT_RESPONSE: trigger/sensor",
         "  int group, mask;  // collision filter; addRigidBody(body, group, mask)",
         "  const MeshSpec* mesh;  // non-null only for SHAPE_MESH",
+        "  int internal_edges;  // btGenerateInternalEdgeInfo opt-in (mesh bodies)",
         "  int num_mesh_parts;  // > 0 only for SHAPE_MESH_PARTS",
         "  const MeshSpec* mesh_parts;  // non-null only for SHAPE_MESH_PARTS",
         "};",
@@ -237,6 +238,7 @@ def gen_c(scenes):
             dwg = 1 if bg else 0
             bg_s = ", ".join(f"btScalar({fmt(x)})" for x in (bg if bg else [0.0, 0.0, 0.0]))
             ncr = 1 if b.get("no_contact_response") else 0
+            ie = 1 if b.get("internal_edges") else 0
             grp = b.get("group", 1)
             msk = b.get("mask", -1)
             lines.append(f"  {{\"{b['name']}\", {SHAPE_ENUM[t]}, {{{p}}}, {{{pos}}}, "
@@ -245,7 +247,7 @@ def gen_c(scenes):
                          f"{{{aniso_s}}}, btScalar({cks_s}), btScalar({ckd}), {cks_set}, {st}, "
                          f"{{{vel_s}}}, {{{ang_s}}}, {ccd_on}, btScalar({fmt(ccd_mt)}), "
                          f"btScalar({fmt(ccd_sr)}), {{{bg_s}}}, {dwg}, {ncr}, {grp}, {msk}, "
-                         f"{mesh_ref}, {nmp_s}, {mp_ref}}},")
+                         f"{mesh_ref}, {ie}, {nmp_s}, {mp_ref}}},")
         lines.append("};")
         lines.append("")
         rec = ", ".join(f"\"{r}\"" for r in sc["record"])
@@ -332,6 +334,7 @@ def gen_rs(scenes):
         "    pub no_contact_response: bool,",
         "    pub group: u16,",
         "    pub mask: u16,",
+        "    pub internal_edges: bool,",
         "}",
         "",
         "pub struct RaySpec {",
@@ -430,6 +433,7 @@ def gen_rs(scenes):
             dwg = "true" if bg else "false"
             bg_s = ", ".join(fmt(x) for x in (bg if bg else [0.0, 0.0, 0.0]))
             ncr = "true" if b.get("no_contact_response") else "false"
+            ie = "true" if b.get("internal_edges") else "false"
             grp = b.get("group", 1) & 0xFFFF
             msk = b.get("mask", -1) & 0xFFFF
             lines.append(f"            BodySpec {{ name: \"{b['name']}\", shape: {shape}, "
@@ -443,7 +447,8 @@ def gen_rs(scenes):
                          f"ccd_motion_threshold: {fmt(ccd_mt)}, "
                          f"ccd_swept_sphere_radius: {fmt(ccd_sr)}, "
                          f"body_gravity: [{bg_s}], disable_world_gravity: {dwg}, "
-                         f"no_contact_response: {ncr}, group: {grp}u16, mask: {msk}u16 }},")
+                         f"no_contact_response: {ncr}, group: {grp}u16, mask: {msk}u16, "
+                         f"internal_edges: {ie} }},")
         lines.append("        ],")
         rec = ", ".join(f"\"{r}\"" for r in sc["record"])
         dt_num, dt_den = sc["dt"]

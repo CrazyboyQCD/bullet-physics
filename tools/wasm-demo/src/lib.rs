@@ -1,7 +1,12 @@
+// Browser-only cdylib: the wasm32 target is the only supported build (the
+// workspace's host-side `cargo test/clippy --workspace` runs see an empty
+// crate, so precision features forwarded to `bullet` never touch this code).
+#![cfg(target_arch = "wasm32")]
+
 //! C ABI bindings that drive the `bullet` engine from a browser (the
-//! renderer and UI live in `template.html` on the JS side, Babylon.js).
+//! renderer and UI live in `template.html` on the JS side, Babylon.js).        
 //!
-//! The physics library stays untouched; this is a thin harness: build a
+//! The physics library stays untouched; this is a thin harness: build a        
 //! demo scene, step it at a fixed dt, and stream rigid-body poses and
 //! soft-body node positions back through wasm linear memory as plain
 //! float buffers. Body/soft metadata (spawn table, face topology) is
@@ -358,9 +363,9 @@ impl Demo {
         if self.wind.abs() > 0.0 {
             let gust = (self.time * 1.7).sin() * 0.6 + 0.4;
             let force = Vector3::new(
-                self.wind * gust * 0.024,
+                (self.wind * gust * 0.024) as Real,
                 0.0,
-                (self.time * 1.1).cos() * self.wind * 0.007,
+                ((self.time * 1.1).cos() * self.wind * 0.007) as Real,
             );
             for r in &self.softs {
                 let soft = self.world.soft_body_mut(r.handle);
@@ -377,8 +382,8 @@ impl Demo {
     }
 
     fn shoot(&mut self, ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32) {
-        let dir = Vector3::new(dx, dy, dz).normalize_or_zero();
-        let pos = Vector3::new(ox, oy, oz) + dir * 1.5;
+        let dir = Vector3::new(dx as Real, dy as Real, dz as Real).normalize_or_zero();
+        let pos = Vector3::new(ox as Real, oy as Real, oz as Real) + dir * 1.5;
         let color = hsv(self.time.fract() * 0.7, 0.7, 1.0);
         let body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), pos, 4.0)
             .friction(0.4)

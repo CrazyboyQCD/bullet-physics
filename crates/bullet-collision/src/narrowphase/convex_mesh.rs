@@ -12,6 +12,7 @@ use bullet_math::{math, Aabb, Quaternion, Real, Vector3};
 use crate::manifold::{ContactManifold, ContactPoint};
 use crate::narrowphase::convex_convex::convex_convex;
 use crate::narrowphase::epa::EpaScratch;
+use crate::shapes::internal_edges;
 use crate::shapes::{CollisionShape, TriangleMesh};
 
 /// Contact between a convex shape and a static triangle mesh.
@@ -53,6 +54,10 @@ pub fn convex_mesh(
 
     let mut manifold = ContactManifold::new();
     let query = Aabb::new(local_min, local_max);
+    // Internal-edge normal fix (Bullet's `btAdjustInternalEdgeContacts`,
+    // fed by the triangle info map): only runs when the mesh generated the
+    // info — `None` short-circuits and the loop below is untouched.
+    let edge_info = mesh.internal_edge_info();
 
     // Sphere fast path (Bullet's `btSphereTriangleCollisionAlgorithm` /
     // `SphereTriangleDetector`): an analytic closest-point test per
@@ -68,8 +73,23 @@ pub fn convex_mesh(
             if let Some((point_local, normal_local, penetration)) =
                 sphere_triangle_contact(center, s.radius, threshold, a, b, c)
             {
-                // The detector's normal points toward the sphere center;
-                // this module reports it from the convex toward the mesh.
+                // The detector's normal points toward the sphere center —
+                // Bullet's mesh → convex `m_normalWorldOnB` direction, which
+                // is exactly what the edge fix consumes; flip back to our
+                // convex → mesh convention afterwards.
+                let (point_local, normal_local) = match edge_info {
+                    Some(map) => match internal_edges::adjust_internal_edge_contacts(
+                        map,
+                        t as usize,
+                        (a, b, c),
+                        point_local,
+                        normal_local,
+                    ) {
+                        Some(adjusted) => (point_local, adjusted),
+                        None => (point_local, normal_local),
+                    },
+                    None => (point_local, normal_local),
+                };
                 manifold.points.push(ContactPoint::new(
                     position_mesh + orientation_mesh * point_local,
                     orientation_mesh * -normal_local,
@@ -99,7 +119,25 @@ pub fn convex_mesh(
                 threshold,
                 scratch,
             ) {
-                manifold.points.extend(m.points);
+                for mut point in m.points {
+                    if let Some(map) = edge_info {
+                        // Bullet's `m_normalWorldOnB` points mesh → convex on
+                        // this path; feed the fix in that convention and flip
+                        // the result back to our convex → mesh normal.
+                        let local_point = inv_m * (point.position - position_mesh);
+                        let local_normal = inv_m * -point.normal;
+                        if let Some(adjusted) = internal_edges::adjust_internal_edge_contacts(
+                            map,
+                            t as usize,
+                            mesh.triangle(t as usize),
+                            local_point,
+                            local_normal,
+                        ) {
+                            point.normal = -(orientation_mesh * adjusted);
+                        }
+                    }
+                    manifold.points.push(point);
+                }
             }
         }
     }
@@ -439,6 +477,75 @@ mod tests {
         let p = m.points[0];
         assert_relative_eq!(p.normal.y, -1.0, epsilon = 1e-3);
         assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-3);
+    }
+
+    /// Internal-edge fix: a sphere pressing the shared seam of two coplanar
+    /// triangles gets its edge-contact normal snapped to the face normal;
+    /// without the info the normal points at the seam (toward the sphere
+    /// center, hence tilted by the sphere's x offset). Both runs report the
+    /// same penetration.
+    #[test]
+    fn seam_contact_normal_snaps_with_edge_info() {
+        let build = |generate: bool| {
+            // Two cells sharing the x = 0 seam (vertices 0–1), all normals +Y.
+            let mut ground = TriangleMesh::new(
+                vec![
+                    Vector3::new(0.0, 0.0, -1.0),
+                    Vector3::new(0.0, 0.0, 1.0),
+                    Vector3::new(-1.0, 0.0, -1.0),
+                    Vector3::new(-1.0, 0.0, 1.0),
+                    Vector3::new(1.0, 0.0, -1.0),
+                    Vector3::new(1.0, 0.0, 1.0),
+                ],
+                vec![[0, 3, 1], [0, 1, 5], [0, 5, 4]],
+            );
+            if generate {
+                ground.generate_internal_edge_info();
+            }
+            ground
+        };
+        let sphere = CollisionShape::sphere(0.5);
+        // Sphere center past the seam (x = 0) but within the edge-distance
+        // threshold: the closest point lies on the shared edge.
+        let center = Vector3::new(-0.05, 0.45, 0.0);
+        let tilted = convex_mesh(
+            &sphere,
+            center,
+            Quaternion::IDENTITY,
+            &build(false),
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            None,
+            t(&sphere),
+            &mut EpaScratch::default(),
+        )
+        .unwrap();
+        assert!(
+            tilted.points.iter().any(|p| p.normal.x > 0.01),
+            "unfixed run keeps a normal leaning over the seam"
+        );
+
+        let fixed = convex_mesh(
+            &sphere,
+            center,
+            Quaternion::IDENTITY,
+            &build(true),
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            None,
+            t(&sphere),
+            &mut EpaScratch::default(),
+        )
+        .unwrap();
+        for point in &fixed.points {
+            assert_relative_eq!(point.normal.x, 0.0, epsilon = 1e-5);
+            assert_relative_eq!(point.normal.y, -1.0, epsilon = 1e-5);
+        }
+        assert_relative_eq!(
+            tilted.points[0].penetration,
+            fixed.points[0].penetration,
+            epsilon = 1e-5
+        );
     }
 
     /// A box straddling four heightfield cells yields one contact per touched
