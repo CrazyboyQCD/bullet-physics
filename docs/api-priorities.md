@@ -27,6 +27,36 @@
 | **Soft cluster core (CLinks)** | ★☆ | S | **Done** | Clusters are niche; completeness-only. Shipped/verified 2026-09-10/11: the `PSolve_CLinks`/`VSolve_CLinks` half of this row was a phantom entry (no such symbols in bullet3 master); the real cluster core (static `solveClusters` pass + `applyClusters`/`dampClusters` + LJoint/AJoint/CJoint with the drift split) was already ported and now reproduces the `cluster_joints` probe bit-for-bit in f64 after the `terminate` parameter-order fix. The `cluster_pair` CL_SS residual was root-caused 2026-09-18 (no port bug — blow-up regime + Bullet's tunneled triangulated plane at explosion speed + hull-order scatter; the `cluster_pair_soft` light-touch variant agrees qualitatively — see `bullet-compare.md` Phase D). |
 | **Extras decomposition toolbox** | ★★★ | **L+** | Won't do | VHACD is library-scale work; industry practice is offline decomposition with runtime consumption of ConvexHull + Compound (already supported) — point the docs at it. |
 
+## Full-surface audit additions (2026-09-18)
+
+Rows below come from the first full feature-surface audit against
+`refs/bullet3/src` (all missing functionality not already carrying a
+verdict above). All rows are **Open** — the verdicts are the maintainer's
+call during the 1.0 API freeze review; the rationale states the ported
+replacement, if any.
+
+| Item | Frequency | Size | Verdict | Rationale |
+|---|---|---|---|---|
+| **Internal edge utility** (`btInternalEdgeUtility` + `btTriangleInfoMap`) | ★★★ | M | **Open** | The standard fix for false contacts on interior mesh edges/corner popping for concave meshes — rolling/sliding terrain quality; Bullet's own demos install it by default. Adjacency is built once at mesh finalize; the contact-normal adjustment joins the manifold refresh. |
+| **`btContactSolverInfo` parameter surface** | ★★★ | M | **Open** | The solver runs hardcoded constants today (`erp 0.2`, `slop 0.005`, split impulse always on with `erp2 0.2` / `turnErp 0.1`); upstream exposes ~20 knobs (globalCfm, frictionERP/CFM, warmstartingFactor, solverMode flags, the splitImpulse switch — default **off** upstream, we run always-on, deviations §4). A config struct with Bullet defaults keeps parity. |
+| **`stepSimulation(dt, maxSubSteps, fixedTimeStep)` accumulator** | ★★★ | M | **Open** | The fixed-timestep accumulator + interpolation mode; only single-step `step_simulation(dt)` exists (the motion-state blend deviation is the same gap, deviations §3). |
+| **Rigid `btGearConstraint`** | ★☆ | S | **Open** | Rigid-body gear coupling between two rotation axes; the multibody variant (`MultiBodyGearConstraint`) is already ported. |
+| **`btGeneric6DofSpring2Constraint`** | ★☆ | M | **Open** | Spring axes / soft limits (the game-standard rewrite); the elastic limit behavior is not reproducible with plain 6DOF rows. |
+| **`btMultiSphereShape`** | ★☆ | S–M | **Open** | Multi-sphere compound convex (metaballs, simplified proxies); GJK support = farthest center + radius; upstream has analytic inertia. No hull blow-up alternative. |
+| **Heightfield up-axis / flip options** | ★☆ | S | **Open** | Fixed Y-up today; upstream supports X/Z up, `flipQuadEdges` and the right/left-handed winding toggle. |
+| **Per-triangle materials** (`btMaterial` + `btMultimaterialTriangleMeshShape` + `btTriangleIndexVertexMaterialArray`) | ★ | M | **Open** | Per-triangle friction/restitution on triangle meshes. `TriangleMesh` has parts but no per-triangle material dispatch. |
+| **Soft helpers leftovers** (`write_vtk`, `CreateFromVtk`, `CreateFromTetGenData`, `pointNeighbors`) | ★ | S | **Open** | VTK debug export is the most-used helper still missing; the rest are file-format conveniences. |
+| **`btHinge2Constraint` / `btUniversalConstraint`** | ★ | S | **Open** | Convenience specializations of 6DOF (wheel/universal joints); reproducible by hand today — API-surface gap, not behavior. |
+| **`btConvexHullComputer` / `btGeometryUtil`** | ★☆ | S | **Open** | Adjacency-carrying hull (decomposition tooling input) and plane-equation utilities; LinearMath conveniences, the ported quickhull covers runtime needs. |
+| **`BulletInverseDynamics` (MultiBodyTree)** | ★ | L | **Open** | Inverse dynamics (q/qd/qdd → generalized forces; robot feed-forward control). Forward ABA is ported; the entire inverse tree is untouched. Propose Out-of-Scope unless a robotics consumer appears. |
+| **Hull/shadow shape variants** (`btConvexPointCloudShape`, `btTetrahedronShape`, `btConvexTriangleMeshShape`) | ☆ | S | **Open (propose Won't do)** | Functionally covered by `ConvexHull` constructors (API convenience only — Bullet validates nothing either); propose documenting the equivalence instead of porting. |
+| **`btMPRPenetration`** | ☆ | S | **Open (propose Won't do)** | An alternative penetration-depth solver; EPA covers the pipeline. Only reaches consumers who disable EPA. |
+| **`btMinkowskiSumShape` / `btEmptyShape`** | ☆ | S | **Open (propose Won't do)** | Niche: compound ≈ Minkowski sum for physics purposes; an empty `Compound` fills the empty-shape slot. |
+| **2D shapes & algorithms** (`btBox2dShape` + `btBox2dBox2dCollisionAlgorithm`) | ☆ | M | **Open (propose Won't do)** | `convex_2d` is already a forwarding marker; true 2D is achievable by plane-constraining a 3D scene (Rapier ships a separate 2D crate — out of proportion here). |
+| **`btSdfCollisionShape` / MiniSDF** | ☆ | M | **Open (propose Won't do)** | Grid-SDF collision shapes; heightfield + meshes cover terrain uses. The deformable system's dependency does not apply (out of scope). |
+| **`Bullet 3.x` GPU pipeline** (`Bullet3OpenCL` / `Bullet3Collision` / `Bullet3Dynamics` / `Bullet3Serialize` / clew) | — | — | **Open (propose Won't do)** | Independent GPU product line (the `b3*` classes, OpenCL/CUDA); not a port target for a CPU-only Rust rewrite. Propose recording it in `00-project-status.md` Out of Scope explicitly. |
+| **Rigid API minutiae** (`setContactProcessingThreshold`, `setAnisotropicRollingFrictionDirection`) | ☆ | S | **Open** | Manifold-point admission threshold and rolling-friction anisotropy direction; tiny surface additions riding the body flags. |
+
 ## Suggested order
 
 ~~kinematic → compound child transforms (same round) → ghost list → rolling
@@ -38,7 +68,10 @@ manifold extras, btShapeHull, character directional jump~~ — shipped
 friction, contact stiffness/damping~~ — shipped 2026-09-10 (second on-demand
 batch, parity scenes `anisotropic_friction` / `contact_soft`). Remaining
 rows are a Defer or Won't-do verdict; the project milestone is the **1.0 API
-freeze review**.
+freeze review**. The audit-additions rows below the table stay **Open**
+until the maintainer rules on them in that review (proposals included
+per row); rows ruled Won't-do there move to Out of Scope, rows accepted
+join this table as planned work.
 
 ## Key observation
 
