@@ -344,7 +344,15 @@ int main(int argc, char** argv) {
   }
 
   for (int frame = 1; frame <= spec->frames; ++frame) {
-    world.stepSimulation(dt, 1, dt);
+    // A scene-level substeps spec drives the fixed-timestep accumulator
+    // (stepSimulation(dt, maxSubSteps, fixedTimeStep)); the default is
+    // exactly one dt-sized substep.
+    if (spec->substeps) {
+      world.stepSimulation(dt, spec->substeps->max_sub_steps,
+                           spec->substeps->fixed_dt);
+    } else {
+      world.stepSimulation(dt, 1, dt);
+    }
     for (int r = 0; r < spec->num_record; ++r) {
       const btTransform& t = bodies[record_idx[r]]->getCenterOfMassTransform();
       const btVector3& p = t.getOrigin();

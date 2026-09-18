@@ -166,6 +166,11 @@ def gen_c(scenes):
         "  btScalar damping;",
         "};",
         "",
+        "struct SubstepsSpec {  // stepSimulation(dt, maxSubSteps, fixedTimeStep) overrides",
+        "  int max_sub_steps;",
+        "  btScalar fixed_dt;",
+        "};",
+        "",
         "struct SceneSpec {",
         "  const char* name;",
         "  int num_bodies;",
@@ -180,6 +185,7 @@ def gen_c(scenes):
         "  int num_rays;",
         "  const RaySpec* rays;",
         "  const SolverInfoSpec* solver_info;  // non-null overrides getSolverInfo()",
+        "  const SubstepsSpec* substeps;  // non-null drives stepSimulation with the accumulator",
         "};",
         "",
     ]
@@ -313,10 +319,16 @@ def gen_c(scenes):
                 vals.append(str(int(v)) if is_int else fmt(v))
             lines.append(f"static const SolverInfoSpec k{name}_si = {{ {', '.join(vals)} }};")
         si_ref = f"&k{name}_si" if si else "nullptr"
+        ss = sc.get("substeps")
+        if ss:
+            fnum, fden = ss["fixed_dt"]
+            lines.append(f"static const SubstepsSpec k{name}_ss = "
+                         f"{{ {int(ss['max_sub_steps'])}, btScalar({fnum}) / btScalar({fden}) }};")
+        ss_ref = f"&k{name}_ss" if ss else "nullptr"
         lines.append(f"static const SceneSpec k{name} = {{\"{name}\", {len(sc['bodies'])}, k{name}_bodies, "
                      f"{len(sc['record'])}, k{name}_record, {dt_num}, {dt_den}, "
                      f"{sc['frames']}, {sc['iterations']}, {{{g}}}, "
-                     f"{pf_ref}, {len(rays)}, {rays_ref}, {si_ref}}};")
+                     f"{pf_ref}, {len(rays)}, {rays_ref}, {si_ref}, {ss_ref}}};")
         lines.append("")
     lines.append("static const SceneSpec* kScenes[] = {")
     for name in scenes:
@@ -396,6 +408,13 @@ def gen_rs(scenes):
         "    pub pair_filter: Option<(&'static str, &'static str)>,",
         "    pub rays: &'static [RaySpec],",
         "    pub solver_info: Option<SolverInfoSpec>,",
+        "    pub substeps: Option<SubstepsSpec>,",
+        "}",
+        "",
+        "#[derive(Clone, Copy)]",
+        "pub struct SubstepsSpec {",
+        "    pub max_sub_steps: u32,",
+        "    pub fixed_dt: f32,",
         "}",
         "",
         "#[derive(Clone, Copy)]",
@@ -559,6 +578,13 @@ def gen_rs(scenes):
             lines.append(f"        solver_info: Some(SolverInfoSpec {{ {', '.join(parts)} }}),")
         else:
             lines.append("        solver_info: None,")
+        ss = sc.get("substeps")
+        if ss:
+            fnum, fden = ss["fixed_dt"]
+            lines.append("        substeps: Some(SubstepsSpec { "
+                         f"max_sub_steps: {int(ss['max_sub_steps'])}u32, fixed_dt: {fmt(fnum)} / {fmt(fden)} }}),")
+        else:
+            lines.append("        substeps: None,")
         lines.append("    }),")
     lines.append("];")
     lines.append("")

@@ -65,6 +65,75 @@ pub(crate) fn split_pose(pose: Transform) -> (Vector3, Quaternion) {
     }
 }
 
+/// Angular-motion clamp of the interpolation (Bullet's
+/// `ANGULAR_MOTION_THRESHOLD = 0.5 * SIMD_HALF_PI` in `btTransformUtil.h`).
+#[cfg(not(feature = "f64"))]
+const ANGULAR_MOTION_THRESHOLD: Real = core::f32::consts::FRAC_PI_4;
+#[cfg(feature = "f64")]
+const ANGULAR_MOTION_THRESHOLD: Real = core::f64::consts::FRAC_PI_4;
+
+/// Small-angle Taylor coefficient of the interpolation (Bullet's literal
+/// `0.020833333333` ≈ 1/48 in `btTransformUtil::integrateTransform`; kept
+/// at the upstream precision per scalar width).
+#[cfg(not(feature = "f64"))]
+const TAYLOR_COEFFICIENT: Real = 0.020_833_333;
+#[cfg(feature = "f64")]
+const TAYLOR_COEFFICIENT: Real = 0.020_833_333_333;
+
+/// Extrapolate a pose linearly along the given velocities (Bullet's
+/// `btTransformUtil::integrateTransform`, verbatim including the small-angle
+/// Taylor branch, the `ANGULAR_MOTION_THRESHOLD` clamp and the
+/// degenerate-orientation fallback). `dt` is the extrapolation span — the
+/// motion-state interpolation passes a *negative* remainder (the fixed-step
+/// render pose trails the last simulation snapshot), which the axis-angle
+/// formula handles symmetrically.
+pub(crate) fn interpolate_pose(
+    position: Vector3,
+    orientation: Quaternion,
+    linear_velocity: Vector3,
+    angular_velocity: Vector3,
+    dt: Real,
+) -> (Vector3, Quaternion) {
+    let new_position = position + linear_velocity * dt;
+    let angle_sqr = angular_velocity.length_squared();
+    let mut angle = 0.0;
+    if angle_sqr > Real::EPSILON {
+        angle = math::sqrt(angle_sqr);
+    }
+    // Limit the angular motion.
+    if angle * dt > ANGULAR_MOTION_THRESHOLD {
+        angle = ANGULAR_MOTION_THRESHOLD / dt;
+    }
+    let axis = if angle < 0.001 {
+        // Taylor expansion of sin(fAngle) / fAngle around zero.
+        angular_velocity
+            * (0.5 * dt - (dt * dt * dt) * TAYLOR_COEFFICIENT * angle * angle)
+    } else {
+        // sin(fAngle) / fAngle.
+        angular_velocity * (math::sin(0.5 * angle * dt) / angle)
+    };
+    let dorn = Quaternion::from_xyzw(
+        axis.x,
+        axis.y,
+        axis.z,
+        math::cos(angle * dt * 0.5),
+    );
+    let predicted = dorn * orientation;
+    // `safeNormalize`: a degenerate product (length² under EPSILON) yields
+    // the zero quaternion, which the caller gate below rejects.
+    let length_sqr = predicted.length_squared();
+    let predicted = if length_sqr < Real::EPSILON {
+        Quaternion::from_xyzw(0.0, 0.0, 0.0, 0.0)
+    } else {
+        predicted / math::sqrt(length_sqr)
+    };
+    if predicted.length_squared() > Real::EPSILON {
+        (new_position, predicted)
+    } else {
+        (new_position, orientation)
+    }
+}
+
 /// Rigid-body activation state (Bullet's `btCollisionObject::ActivationState`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationState {
@@ -291,6 +360,12 @@ pub struct RigidBody {
     ccd_motion_threshold: Real,
     /// CCD: radius of the swept sphere (Bullet's `m_ccdSweptSphereRadius`).
     ccd_swept_sphere_radius: Real,
+    /// Hit fraction of the last step's CCD motion clamp (Bullet's
+    /// `m_hitFraction`, reset to 1 at the start of every integration and
+    /// set to 0 on a clamped hit): the motion-state interpolation factor
+    /// scales with it, so a clamped body's render pose freezes at the
+    /// pre-integration snapshot until the impact is resolved.
+    pub hit_fraction: Real,
     /// Split-impulse positional correction accumulated by the solver this
     /// step (Bullet's `m_pushVelocity` / `m_turnVelocity`): a pseudo velocity
     /// that moves the body out of deep penetration without changing its real
@@ -344,6 +419,7 @@ impl RigidBody {
             angular_sleeping_threshold: 1.0,
             ccd_motion_threshold: 0.0,
             ccd_swept_sphere_radius: 0.0,
+            hit_fraction: 1.0,
             push_linear: Vector3::ZERO,
             push_angular: Vector3::ZERO,
             motion_state: None,
@@ -409,6 +485,7 @@ impl RigidBody {
             angular_sleeping_threshold: 1.0,
             ccd_motion_threshold: 0.0,
             ccd_swept_sphere_radius: 0.0,
+            hit_fraction: 1.0,
             push_linear: Vector3::ZERO,
             push_angular: Vector3::ZERO,
             motion_state: None,

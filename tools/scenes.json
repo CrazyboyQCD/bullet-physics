@@ -1,5 +1,5 @@
 {
-  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/src/parity_scenes.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant), mesh(grid[nx,nz], origin[x0,z0], cell[dx,dz], heights[nx*nz] in z-major order; indices derived with the falling_mesh winding), mesh_parts(parts[], each a mesh spec; parts are independent IndexedMesh buffers — seams duplicate vertices — concatenated into one triangle stream in part order). Body fields: mass (0 = static), friction, restitution, position, optional velocity[vx,vy,vz] (initial linear velocity), angular_velocity[vx,vy,vz], damping fields linear_damping/angular_damping/additional_damping (the flag is Bullet's m_additionalDamping opt-in) and ccd{motion_threshold, swept_sphere_radius}. Consumer-API body fields (all optional): gravity[x,y,z] (implies DISABLE_WORLD_GRAVITY: the body keeps its own gravity detached from world propagation), no_contact_response (true = trigger/sensor, CF_NO_CONTACT_RESPONSE), group/mask (collision filter group & mask, -1 = all; default group 1 / mask -1). Consumer-API scene fields (optional): pair_filter [nameA, nameB] (this pair is excluded from collision, btOverlapFilterCallback style), rays [{from, to, mode 'all'|'closest', group, mask}] (probed once after the last frame, recorded to <scene>_rays_*.csv: ray_idx body_idx fraction, sorted by fraction).",
+  "comment": "Single source of truth for parity scenes. tools/generate_scenes.py turns this into tools/bullet_scenes.h (C++) and crates/bullet/src/parity_scenes.rs (Rust); do not edit the generated files. Scenes must be reproducible: fixed dt (as a fraction), fixed iterations, deterministic shapes/poses. 'record' lists the bodies whose trajectories are compared. Shape types: box(half_extents), sphere(radius), capsule/cylinder/cone(radius, half_height), plane(normal, constant), mesh(grid[nx,nz], origin[x0,z0], cell[dx,dz], heights[nx*nz] in z-major order; indices derived with the falling_mesh winding), mesh_parts(parts[], each a mesh spec; parts are independent IndexedMesh buffers \u2014 seams duplicate vertices \u2014 concatenated into one triangle stream in part order). Body fields: mass (0 = static), friction, restitution, position, optional velocity[vx,vy,vz] (initial linear velocity), angular_velocity[vx,vy,vz], damping fields linear_damping/angular_damping/additional_damping (the flag is Bullet's m_additionalDamping opt-in) and ccd{motion_threshold, swept_sphere_radius}. Consumer-API body fields (all optional): gravity[x,y,z] (implies DISABLE_WORLD_GRAVITY: the body keeps its own gravity detached from world propagation), no_contact_response (true = trigger/sensor, CF_NO_CONTACT_RESPONSE), group/mask (collision filter group & mask, -1 = all; default group 1 / mask -1). Consumer-API scene fields (optional): pair_filter [nameA, nameB] (this pair is excluded from collision, btOverlapFilterCallback style), rays [{from, to, mode 'all'|'closest', group, mask}] (probed once after the last frame, recorded to <scene>_rays_*.csv: ray_idx body_idx fraction, sorted by fraction).",
   "scenes": {
     "falling_box": {
       "dt": [
@@ -1721,7 +1721,7 @@
       ]
     },
     "solver_erp2": {
-      "comment": "solver-info variant: erp2=0.1 (upstream default 0.2) — the contact Baumgarte factor halves, so the first-impact penetration recovers more slowly; the recorded cube's impact/settle curve tracks the parameter through both engines.",
+      "comment": "solver-info variant: erp2=0.1 (upstream default 0.2) \u2014 the contact Baumgarte factor halves, so the first-impact penetration recovers more slowly; the recorded cube's impact/settle curve tracks the parameter through both engines.",
       "dt": [
         1,
         60
@@ -1779,7 +1779,7 @@
       ]
     },
     "solver_split_off": {
-      "comment": "solver-info variant: split impulse off (Bullet's constructor default; this engine's default is on) — the deep first-touch penetration is corrected by the velocity solve (Baumgarte bias), producing the larger, pre-split impact transient.",
+      "comment": "solver-info variant: split impulse off (Bullet's constructor default; this engine's default is on) \u2014 the deep first-touch penetration is corrected by the velocity solve (Baumgarte bias), producing the larger, pre-split impact transient.",
       "dt": [
         1,
         60
@@ -1837,7 +1837,7 @@
       ]
     },
     "solver_restitution": {
-      "comment": "solver-info variant: restitution_velocity_threshold=0.2 (upstream default; this engine's default is 1.0) — the tail of the bouncing ball keeps the sub-1 m/s bounces the engine default suppresses.",
+      "comment": "solver-info variant: restitution_velocity_threshold=0.2 (upstream default; this engine's default is 1.0) \u2014 the tail of the bouncing ball keeps the sub-1 m/s bounces the engine default suppresses.",
       "dt": [
         1,
         60
@@ -1851,6 +1851,122 @@
       ],
       "solver_info": {
         "restitution_velocity_threshold": 0.2
+      },
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              25,
+              0.5,
+              25
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "ball",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            0,
+            3,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.3,
+          "restitution": 0.8
+        }
+      ],
+      "record": [
+        "ball"
+      ]
+    },
+    "substeps": {
+      "comment": "fixed-timestep accumulator: dt=1/60 frames over a 1/120 fixed step (two substeps per call, max 4) -- the ball's impact/settle curve tracks stepSimulation(dt, maxSubSteps, fixedTimeStep) through both engines.",
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 300,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "substeps": {
+        "max_sub_steps": 4,
+        "fixed_dt": [
+          1,
+          120
+        ]
+      },
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              25,
+              0.5,
+              25
+            ]
+          },
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "mass": 0
+        },
+        {
+          "name": "ball",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.5
+          },
+          "position": [
+            0,
+            3,
+            0
+          ],
+          "mass": 1,
+          "friction": 0.3,
+          "restitution": 0.8
+        }
+      ],
+      "record": [
+        "ball"
+      ]
+    },
+    "substeps_clamped": {
+      "comment": "fixed-timestep accumulator under clamp: dt=1/30 frames over a 1/60 fixed step with max_sub_steps=1 -- every call demands two substeps but runs one, so the world advances at half real time (Bullet's clampedSimulationSteps) and the ball's trajectory is the 1/60-step simulation stretched over the recorded frames.",
+      "dt": [
+        1,
+        30
+      ],
+      "frames": 300,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "substeps": {
+        "max_sub_steps": 1,
+        "fixed_dt": [
+          1,
+          60
+        ]
       },
       "bodies": [
         {

@@ -44,24 +44,6 @@ fn main() {
         spec.gravity[2] as Real,
     ));
     world.solver_info_mut().num_iterations = spec.iterations;
-    // Scene solver-info overrides (the generated table fills every field, so
-    // both engines read the same 12 values).
-    if let Some(si) = spec.solver_info {
-        let info = world.solver_info_mut();
-        info.erp = si.erp as Real;
-        info.erp2 = si.erp2 as Real;
-        info.linear_slop = si.linear_slop as Real;
-        info.restitution_velocity_threshold = si.restitution_velocity_threshold as Real;
-        info.split_impulse = si.split_impulse;
-        info.split_impulse_penetration_threshold =
-            si.split_impulse_penetration_threshold as Real;
-        info.split_impulse_turn_erp = si.split_impulse_turn_erp as Real;
-        info.warmstarting_factor = si.warmstarting_factor as Real;
-        info.friction_erp = si.friction_erp as Real;
-        info.global_cfm = si.global_cfm as Real;
-        info.sor = si.sor as Real;
-        info.damping = si.damping as Real;
-    }
 
     // Pair filter (optional): exclude the named pair from collision, same
     // one-layer gate (group & mask, then the exclusion) as the C++ recorder's
@@ -261,7 +243,14 @@ fn main() {
     }
 
     for frame in 1..=spec.frames {
-        world.step_simulation(dt);
+        // A scene-level substeps spec drives the fixed-timestep accumulator
+        // (`step_simulation_fixed`); the default is exactly one dt-sized
+        // step.
+        if let Some(ss) = spec.substeps {
+            world.step_simulation_fixed(dt, ss.max_sub_steps, ss.fixed_dt as Real);
+        } else {
+            world.step_simulation(dt);
+        }
         let line = format!("{:.6}", frame as Real * dt);
         for (k, &i) in record_idx.iter().enumerate() {
             let p = world.body(i).position;

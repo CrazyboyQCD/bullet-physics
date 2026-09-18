@@ -512,3 +512,42 @@ S/M/L · **See** = existing notes.
   `btContinuousDynamicsWorld` — deliberately not ported. No action.
 - **Deformable system**: `btDeformable*` (NeoHookean, reduced volumes)
   — explicitly out of scope, tracked in `design/softbody.md` §11. No action.
+- **`stepSimulation(dt, maxSubSteps, fixedTimeStep)` accumulator** ✅ (2026-09-18):
+  the fixed-timestep driving loop with render interpolation (Bullet's
+  `btDiscreteDynamicsWorld::stepSimulation`).
+  - Shipped: `PhysicsWorld::step_simulation_fixed(dt, max_sub_steps,
+    fixed_dt) -> u32` — the persistent accumulator (`m_localTime`; the
+    variable-step branch of either step API resets it, so mixing the two
+    APIs keeps the upstream timeline), the unclamped-demand / clamped-run
+    split, and `btFuzzyZero` on the variable branch (`Real::EPSILON`).
+    Per-call semantics: forces expire once per call (every substep of the
+    call consumes the applied force — `clearForces` after the substep
+    loop) and the event buffers drain once per call (intermediate substeps
+    maintain the touch baseline without emitting, so between-substep
+    churn never reports). Motion states synchronize after every substep,
+    interpolated along the pre-integration snapshot (`world.interp_poses`
+    — the `proceedToTransform` snapshot — plus the full
+    `btTransformUtil::integrateTransform` formula with the Taylor branch,
+    the `ANGULAR_MOTION_THRESHOLD` clamp and the degenerate fallback),
+    factor `remainder − fixed_dt` in the default latency mode or
+    `remainder × hit_fraction` otherwise (`RigidBody.hit_fraction` is the
+    `m_hitFraction` analog: reset per integration, zero on a CCD clamp;
+    `set_latency_motion_state_interpolation` is the upstream toggle with
+    its default true). `step_simulation(dt)` keeps its recorded
+    final-pose semantics (the recorded baseline; upstream's variable-step
+    latency default would regress consumers). Deviations: no redundant
+    post-loop `synchronizeMotionStates` (duplicate callback, same value);
+    no `saveKinematicState` (kinematic velocity is user-authoritative —
+    §1). 10 unit tests including a bit-for-bit degenerate-anchor test
+    (`fixed_dt == dt`, `max = 1` ≡ `step_simulation`).
+  - Files: `world.rs` (accumulator + interpolation state, latency API),
+    `world/step.rs` (`internal_step(dt, frame, interp)` parameterization,
+    `step_simulation_fixed`, `sync_motion_states`), `body.rs`
+    (`hit_fraction`, `interpolate_pose`), recorders (`generate_scenes.py`
+    `SubstepsSpec` + both recorders' per-call dispatch), scenes.json
+    (`substeps` scene field).
+  - Parity: `substeps` (1/60 s frames over a 1/120 s fixed step, two
+    substeps per call) and `substeps_clamped` (1/30 s frames clamped to
+    one 1/60 s substep — half real-time advance); both classified as the
+    predicted-pose impact-transient class, f32 = f64 digit-for-digit.
+  - Size: M.

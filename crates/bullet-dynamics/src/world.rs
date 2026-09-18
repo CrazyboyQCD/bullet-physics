@@ -260,6 +260,28 @@ pub struct PhysicsWorld {
     settled_speeds: Vec<Real>,
     /// Monotonic step counter stamping the manifold-cache lifecycle prune.
     step_counter: u32,
+    /// Leftover fixed-timestep accumulator of [`PhysicsWorld::step_simulation_fixed`]
+    /// (Bullet's `m_localTime`): the wall-clock remainder carried between calls,
+    /// spent by later calls once it adds up to a full fixed step.
+    step_accumulator: Real,
+    /// Fixed step of the last [`PhysicsWorld::step_simulation_fixed`] call
+    /// (Bullet's `m_fixedTimeStep`, zero after a variable-step call): gates
+    /// the motion-state interpolation factor branch.
+    fixed_time_step: Real,
+    /// Motion-state interpolation mode (Bullet's
+    /// `m_latencyMotionStateInterpolation`, default true): when set, the
+    /// fixed-timestep render pose trails the last simulation snapshot by the
+    /// full fixed step minus the remainder (never extrapolates into the
+    /// future); when cleared, it advances by `accumulator × hit_fraction`,
+    /// showing a partially predicted pose.
+    latency_motion_state_interpolation: bool,
+    /// Pose snapshot each body was integrated from during the last
+    /// interpolated step (Bullet's per-body
+    /// `m_interpolationWorldTransform`): no-substep frames keep blending the
+    /// render pose along these, so motion states advance smoothly across a
+    /// stretch of skipped fixed steps. Lazily grown; only used while the
+    /// interpolation actually runs.
+    interp_poses: Vec<(Vector3, Quaternion)>,
     /// Scratch buffer for [`PersistentManifold::refresh`] output, pooled
     /// across steps.
     refresh_out: Vec<bullet_collision::manifold::ContactPoint>,
@@ -392,6 +414,10 @@ impl PhysicsWorld {
             predicted_poses: Vec::new(),
             settled_speeds: Vec::new(),
             step_counter: 0,
+            step_accumulator: 0.0,
+            fixed_time_step: 0.0,
+            latency_motion_state_interpolation: true,
+            interp_poses: Vec::new(),
             refresh_out: Vec::new(),
             prev_simulate: false,
             pair_filter: None,
@@ -452,6 +478,28 @@ impl PhysicsWorld {
     /// `None` (the default) restores the standard semantics.
     pub fn set_pair_filter(&mut self, filter: Option<Box<PairFilter>>) {
         self.pair_filter = filter;
+    }
+
+    /// Pick the motion-state interpolation mode of
+    /// [`PhysicsWorld::step_simulation_fixed`] (Bullet's
+    /// `setLatencyMotionStateInterpolation`, default **true**).
+    ///
+    /// Latency mode: the render pose trails the last simulated substep by
+    /// `fixed_dt - remainder` seconds — it never shows a pose the
+    /// simulation has not reached yet, at the cost of that delay.
+    /// Non-latency mode: the pose advances by
+    /// `remainder × hit_fraction` seconds from the snapshot instead —
+    /// closer to "now" but partially predicted, and a body the CCD clamp
+    /// froze this step stays pinned at its snapshot (its hit fraction
+    /// collapses to zero, Bullet's `m_hitFraction` semantics).
+    pub fn set_latency_motion_state_interpolation(&mut self, latency: bool) {
+        self.latency_motion_state_interpolation = latency;
+    }
+
+    /// The current motion-state interpolation mode; see
+    /// [`PhysicsWorld::set_latency_motion_state_interpolation`].
+    pub fn latency_motion_state_interpolation(&self) -> bool {
+        self.latency_motion_state_interpolation
     }
 
     pub fn gravity(&self) -> Vector3 {

@@ -6,6 +6,21 @@ use super::*;
 
 use super::multibody_pass::side_active_owner;
 
+/// Motion-state interpolation context of a fixed-timestep call (Bullet's
+/// `m_localTime` / `m_fixedTimeStep` / `m_latencyMotionStateInterpolation`
+/// read at the point of the call): the render pose extrapolates the last
+/// pre-integration snapshot by `local - fixed` in the latency mode, or
+/// `local × hit_fraction` otherwise.
+#[derive(Clone, Copy)]
+struct InterpCtx {
+    /// The post-deduction accumulator remainder (Bullet's `m_localTime`).
+    local: Real,
+    /// The call's fixed step (Bullet's `m_fixedTimeStep`; non-zero).
+    fixed: Real,
+    /// The latency mode (Bullet's `m_latencyMotionStateInterpolation`).
+    latency: bool,
+}
+
 impl PhysicsWorld {
 
     /// Binary-search the manifold cache: `Ok(index)` when the pair has a
@@ -74,15 +89,207 @@ impl PhysicsWorld {
     }
 
 
-    /// Advance the simulation by `dt` seconds.
+    /// Advance the simulation by `dt` seconds as a single variable step.
+    ///
+    /// This is the single-step convenience API: one `dt`-sized step, motion
+    /// states receive the step's final pose. For Bullet's
+    /// `stepSimulation(dt, maxSubSteps, fixedTimeStep)` — the fixed-timestep
+    /// accumulator with render interpolation — see
+    /// [`PhysicsWorld::step_simulation_fixed`]; `step_simulation_fixed(dt, 0, _)`
+    /// is exactly this call.
     pub fn step_simulation(&mut self, dt: Real) {
+        // Bullet's variable-step branch resets the accumulator state
+        // (`m_localTime` to the latency-gated remainder, `m_fixedTimeStep`
+        // to zero) even though this API never reads it back: mixing the two
+        // step APIs keeps the upstream timeline.
+        self.step_accumulator = if self.latency_motion_state_interpolation { 0.0 } else { dt };
+        self.fixed_time_step = 0.0;
+        self.internal_step(dt, true, None);
+    }
+
+    /// Advance the simulation with Bullet's fixed-timestep accumulator
+    /// (`stepSimulation(timeStep, maxSubSteps, fixedTimeStep)`).
+    ///
+    /// The caller's wall-clock span `dt` feeds a persistent accumulator
+    /// (Bullet's `m_localTime`) that is spent in `fixed_dt`-sized substeps —
+    /// at most `max_sub_steps` per call, so a slow frame slows the
+    /// simulation down instead of spiraling. The return value is the
+    /// **unclamped** substep count the accumulator demanded, like Bullet's.
+    /// `max_sub_steps == 0` runs one variable `dt`-sized step and is
+    /// exactly [`PhysicsWorld::step_simulation`].
+    ///
+    /// Per-frame semantics differ from a plain substep loop: collision /
+    /// contact-point / contact-force events and the applied-force clear run
+    /// once per *call*, after the last substep — a pair touching only
+    /// between two substeps of one call never churns `Started`/`Stopped`,
+    /// and a force applied between calls feeds every substep of the next
+    /// one (Bullet runs `clearForces` once per `stepSimulation`). Motion
+    /// states synchronize after every substep, extrapolated along the
+    /// pre-integration pose snapshot (Bullet's `synchronizeMotionStates`
+    /// inside the substep loop): in the default latency mode the render
+    /// pose trails the last simulated substep by `fixed_dt - remainder`
+    /// seconds, and frames that skip their substep keep advancing it
+    /// smoothly. Set
+    /// [`latency_motion_state_interpolation(false)`](PhysicsWorld::set_latency_motion_state_interpolation)
+    /// to extrapolate by `remainder × hit_fraction` instead (partially
+    /// predicted; a CCD-clamped body freezes at its snapshot).
+    pub fn step_simulation_fixed(&mut self, dt: Real, max_sub_steps: u32, fixed_dt: Real) -> u32 {
+        let num_sub_steps;
+        // The substep length: the fixed step, or the wall-clock span itself
+        // in the variable-step branch.
+        let mut step_dt = fixed_dt;
+        if max_sub_steps != 0 {
+            // Fixed timestep with interpolation (Bullet's accumulator).
+            self.fixed_time_step = fixed_dt;
+            self.step_accumulator += dt;
+            if self.step_accumulator >= fixed_dt {
+                num_sub_steps = (self.step_accumulator / fixed_dt) as u32;
+                self.step_accumulator -= num_sub_steps as Real * fixed_dt;
+            } else {
+                num_sub_steps = 0;
+            }
+        } else {
+            // Variable timestep: one dt-sized step (Bullet's
+            // `maxSubSteps == 0` branch; the accumulator state resets even
+            // though this path never reads it back).
+            step_dt = dt;
+            self.step_accumulator = if self.latency_motion_state_interpolation { 0.0 } else { dt };
+            self.fixed_time_step = 0.0;
+            if dt.abs() <= Real::EPSILON {
+                // `btFuzzyZero`: nothing to simulate, but the render poses
+                // still synchronize and the applied forces are dropped
+                // (Bullet's else branch + the unconditional clearForces).
+                self.sync_motion_states(None);
+                self.clear_frame_forces();
+                return 0;
+            }
+            num_sub_steps = 1;
+        }
+
+        if num_sub_steps == 0 {
+            // A skipped frame: no simulation ran, but the motion states
+            // keep blending along the last snapshots and the applied
+            // forces expire (Bullet's else branch + clearForces).
+            let interp = InterpCtx {
+                local: self.step_accumulator,
+                fixed: self.fixed_time_step,
+                latency: self.latency_motion_state_interpolation,
+            };
+            self.sync_motion_states(Some(interp));
+            self.clear_frame_forces();
+            return 0;
+        }
+
+        // Clamp the substep count so a slow frame cannot grind the
+        // simulation down (Bullet's `clampedSimulationSteps`); the
+        // unclamped count is the return value.
+        let clamped = num_sub_steps.min(max_sub_steps);
+        let interp = Some(InterpCtx {
+            local: self.step_accumulator,
+            fixed: self.fixed_time_step,
+            latency: self.latency_motion_state_interpolation,
+        });
+        for i in 0..clamped {
+            // Events and the force clear run once per call: the last
+            // substep is the frame step.
+            let frame = i + 1 == clamped;
+            self.internal_step(step_dt, frame, interp);
+        }
+        num_sub_steps
+    }
+
+    /// Drop the applied forces (Bullet's `clearForces` over the non-static
+    /// list: no activity gate — a force expires once per external call
+    /// even when the call skipped its substeps).
+    fn clear_frame_forces(&mut self) {
+        for body in &mut self.bodies {
+            body.clear_forces();
+        }
+    }
+
+    /// Hand the render pose to the motion states (Bullet's
+    /// `synchronizeMotionStates`): active non-static/kinematic bodies only —
+    /// a sleeping body's pose did not change, static bodies have no motion
+    /// to report (the `synchronizeSingleMotionState` gate).
+    ///
+    /// Without `interp` (the single-step API) the pose is the step's final
+    /// value. With the fixed-timestep context the pose extrapolates the
+    /// last pre-integration snapshot along the solved velocities by the
+    /// interpolation factor: `local - fixed` in the default latency mode
+    /// (always behind the snapshot), `local × hit_fraction` otherwise
+    /// (zero for a body the CCD clamp froze this step).
+    fn sync_motion_states(&mut self, interp: Option<InterpCtx>) {
+        if !self.bodies.iter().any(|b| b.motion_state.is_some()) {
+            return;
+        }
+        let Some(ctx) = interp else {
+            for body in &mut self.bodies {
+                if !body.is_active()
+                    || body.is_static_or_kinematic()
+                    || body.motion_state.is_none()
+                {
+                    continue;
+                }
+                let pose = crate::body::pose_transform(body.position, body.orientation);
+                body.motion_state
+                    .as_mut()
+                    .expect("motion state checked above")
+                    .synchronize(&pose);
+            }
+            return;
+        };
+        let factor = if ctx.latency { ctx.local - ctx.fixed } else { 0.0 };
+        let interp_poses = &self.interp_poses;
+        for (i, body) in self.bodies.iter_mut().enumerate() {
+            if !body.is_active() || body.is_static_or_kinematic() || body.motion_state.is_none() {
+                continue;
+            }
+            let factor = if ctx.latency { factor } else { ctx.local * body.hit_fraction };
+            // Bodies without a snapshot yet (added after the last
+            // interpolated substep, or a skipped frame before any substep
+            // ran) blend from their current pose — the same final-pose
+            // fallback the variable-step API uses.
+            let Some(&(snapshot_pos, snapshot_ori)) = interp_poses.get(i) else {
+                let pose = crate::body::pose_transform(body.position, body.orientation);
+                body.motion_state
+                    .as_mut()
+                    .expect("motion state checked above")
+                    .synchronize(&pose);
+                continue;
+            };
+            let (position, orientation) = crate::body::interpolate_pose(
+                snapshot_pos,
+                snapshot_ori,
+                body.linear_velocity,
+                body.angular_velocity,
+                factor,
+            );
+            let pose = crate::body::pose_transform(position, orientation);
+            body.motion_state
+                .as_mut()
+                .expect("motion state checked above")
+                .synchronize(&pose);
+        }
+    }
+
+    /// The single-step pipeline shared by [`PhysicsWorld::step_simulation`]
+    /// and [`PhysicsWorld::step_simulation_fixed`]. `frame` marks the last
+    /// substep of an external call (the only one that emits events and
+    /// clears the applied forces); `interp` carries the motion-state
+    /// interpolation context of a fixed-timestep call (`None` keeps the
+    /// single-step final-pose semantics).
+    fn internal_step(&mut self, dt: Real, frame: bool, interp: Option<InterpCtx>) {
         let inv_dt = 1.0 / dt;
         let mut clk = StepClock::new(self.step_timings.enabled, self.step_clock_fn);
-        // Collision events are per-step (Rapier's drain): the new step
-        // rebuilds the buffer and the touching set from scratch.
-        self.contact_events.clear();
-        self.contact_point_events.clear();
-        self.contact_force_events.clear();
+        // Collision events are per-frame (Rapier's drain): the new frame
+        // rebuilds the event buffers. A non-frame substep leaves them
+        // alone — its touching pass below only maintains the diff
+        // baseline, so between-substep churn is never reported.
+        if frame {
+            self.contact_events.clear();
+            self.contact_point_events.clear();
+            self.contact_force_events.clear();
+        }
         self.touching.clear();
         self.rolling_rows.clear();
         // Joint-collision suppression is re-derived from the current
@@ -550,7 +757,7 @@ impl PhysicsWorld {
                         self.touching
                             .push((ContactKey::body(i.min(j)), ContactKey::body(i.max(j))));
                     }
-                    if self.contact_point_events_enabled {
+                    if frame && self.contact_point_events_enabled {
                         for cp in &self.refresh_out {
                             self.contact_point_events.push(ContactPointEvent {
                                 a: BodyHandle::from_index(i),
@@ -617,7 +824,7 @@ impl PhysicsWorld {
                     self.touching
                         .push((ContactKey::body(i.min(j)), ContactKey::body(i.max(j))));
                 }
-                if self.contact_point_events_enabled {
+                if frame && self.contact_point_events_enabled {
                     for cp in &self.refresh_out {
                         self.contact_point_events.push(ContactPointEvent {
                             a: BodyHandle::from_index(i),
@@ -638,60 +845,69 @@ impl PhysicsWorld {
         // an opted-in side are tracked, so scenes without listeners keep
         // both sets empty; a pair skipped because its island sleeps carries
         // its state over instead of churning.
-        self.touching.sort_unstable();
-        let prev = core::mem::take(&mut self.prev_touching);
-        let cur = core::mem::take(&mut self.touching);
-        let (mut pi, mut ci) = (0usize, 0usize);
-        while pi < prev.len() || ci < cur.len() {
-            // Both sets are sorted: walk the smaller key forward each round
-            // (an Equal key is the surviving pair, emitted by neither side).
-            let order = match (prev.get(pi), cur.get(ci)) {
-                (Some(p), Some(c)) => p.cmp(c),
-                (Some(_), None) => core::cmp::Ordering::Less,
-                (None, Some(_)) => core::cmp::Ordering::Greater,
-                (None, None) => break,
-            };
-            let (pair, started) = match order {
-                core::cmp::Ordering::Less => {
-                    let pair = prev[pi];
-                    pi += 1;
-                    (pair, false)
-                }
-                core::cmp::Ordering::Greater => {
-                    let pair = cur[ci];
-                    ci += 1;
-                    (pair, true)
-                }
-                core::cmp::Ordering::Equal => {
-                    pi += 1;
-                    ci += 1;
+        //
+        // The diff — and the baseline update — run on the frame step only:
+        // an intermediate substep rebuilds `touching` (the next substep
+        // clears it again) but never consumes the previous *frame's*
+        // baseline, so a pair that touched between two substeps of one
+        // call and separated again never emits a `Started`/`Stopped` pair.
+        if frame {
+            self.touching.sort_unstable();
+            let prev = core::mem::take(&mut self.prev_touching);
+            let cur = core::mem::take(&mut self.touching);
+            let (mut pi, mut ci) = (0usize, 0usize);
+            while pi < prev.len() || ci < cur.len() {
+                // Both sets are sorted: walk the smaller key forward each
+                // round (an Equal key is the surviving pair, emitted by
+                // neither side).
+                let order = match (prev.get(pi), cur.get(ci)) {
+                    (Some(p), Some(c)) => p.cmp(c),
+                    (Some(_), None) => core::cmp::Ordering::Less,
+                    (None, Some(_)) => core::cmp::Ordering::Greater,
+                    (None, None) => break,
+                };
+                let (pair, started) = match order {
+                    core::cmp::Ordering::Less => {
+                        let pair = prev[pi];
+                        pi += 1;
+                        (pair, false)
+                    }
+                    core::cmp::Ordering::Greater => {
+                        let pair = cur[ci];
+                        ci += 1;
+                        (pair, true)
+                    }
+                    core::cmp::Ordering::Equal => {
+                        pi += 1;
+                        ci += 1;
+                        continue;
+                    }
+                };
+                let (a, b) = pair;
+                // Pairs tracked only for their overlap list (neither side
+                // opted into events) emit nothing: events stay per-side
+                // opt-in, the list is the sensor query surface.
+                if !self.pair_opted_in(a, b) {
                     continue;
                 }
-            };
-            let (a, b) = pair;
-            // Pairs tracked only for their overlap list (neither side
-            // opted into events) emit nothing: events stay per-side
-            // opt-in, the list is the sensor query surface.
-            if !self.pair_opted_in(a, b) {
-                continue;
+                let sensor = self.pair_sensor(a, b);
+                let event = if started {
+                    CollisionEvent::Started {
+                        a: a.object(),
+                        b: b.object(),
+                        sensor,
+                    }
+                } else {
+                    CollisionEvent::Stopped {
+                        a: a.object(),
+                        b: b.object(),
+                        sensor,
+                    }
+                };
+                self.contact_events.push(event);
             }
-            let sensor = self.pair_sensor(a, b);
-            let event = if started {
-                CollisionEvent::Started {
-                    a: a.object(),
-                    b: b.object(),
-                    sensor,
-                }
-            } else {
-                CollisionEvent::Stopped {
-                    a: a.object(),
-                    b: b.object(),
-                    sensor,
-                }
-            };
-            self.contact_events.push(event);
+            self.prev_touching = cur;
         }
-        self.prev_touching = cur;
 
         // 5a. Joint rows: flatten every enabled joint of an awake island
         // into its solver rows from the current (pre-integration) poses,
@@ -780,8 +996,9 @@ impl PhysicsWorld {
         // report the pairs whose step-average force exceeds the world
         // threshold. The sum runs over this step's rows, including the
         // ephemeral points the manifold writeback above skips; sensor pairs
-        // solve no rows and never report.
-        if self.contact_force_events_enabled {
+        // solve no rows and never report. Frame step only: the force of a
+        // frame is the force of its last substep.
+        if frame && self.contact_force_events_enabled {
             let mut start = 0;
             while start < contact_rows.len() {
                 let pair = (contact_rows[start].body_a, contact_rows[start].body_b);
@@ -920,7 +1137,27 @@ impl PhysicsWorld {
             })
             .collect();
 
+        // Snapshot the pre-integration poses for the motion-state
+        // interpolation (Bullet's `proceedToTransform` storing the previous
+        // transform in `m_interpolationWorldTransform`); a skipped frame
+        // keeps blending along these.
+        if interp.is_some() {
+            if self.interp_poses.len() != self.bodies.len() {
+                self.interp_poses
+                    .resize(self.bodies.len(), (Vector3::ZERO, Quaternion::IDENTITY));
+            }
+            for (snapshot, body) in self.interp_poses.iter_mut().zip(self.bodies.iter()) {
+                *snapshot = (body.position, body.orientation);
+            }
+        }
+
         for (i, body) in self.bodies.iter_mut().enumerate() {
+            // The hit fraction resets at the top of every integration and
+            // zeroes on a clamped CCD hit (Bullet's
+            // `integrateTransformsInternal`): the non-latency interpolation
+            // factor of a clamped body collapses to zero, freezing its
+            // render pose at the snapshot until the impact resolves.
+            body.hit_fraction = 1.0;
             body.integrate_position(dt);
             // Split-impulse positional correction (Bullet's
             // `writebackVelocityAndTransform`): move the pose along the
@@ -956,27 +1193,14 @@ impl PhysicsWorld {
             if ccd_clamps[i] < 1.0 {
                 let from = body.position - body.linear_velocity * dt;
                 body.position = from + (body.position - from) * ccd_clamps[i];
+                body.hit_fraction = 0.0;
             }
         }
 
-        // 7m. Motion states: hand the final pose to the render side
-        // (Bullet's `synchronizeMotionStates` after `integrateTransforms`).
-        // Active non-static/kinematic bodies only — a sleeping body's pose
-        // did not change, static bodies have no motion to report (Bullet's
-        // `synchronizeSingleMotionState` gate).
-        if self.bodies.iter().any(|b| b.motion_state.is_some()) {
-            for body in &mut self.bodies {
-                if !body.is_active() || body.is_static_or_kinematic() || body.motion_state.is_none()
-                {
-                    continue;
-                }
-                let pose = crate::body::pose_transform(body.position, body.orientation);
-                body.motion_state
-                    .as_mut()
-                    .expect("motion state checked above")
-                    .synchronize(&pose);
-            }
-        }
+        // 7m. Motion states: hand the render pose to the motion side
+        // (Bullet's `synchronizeMotionStates` after `integrateTransforms`,
+        // run after every substep of a fixed-timestep call).
+        self.sync_motion_states(interp);
 
         // 7s. Soft bodies: solve the position-based constraint set. Bullet
         // runs `solveSoftBodiesConstraints` after the rigid bodies are fully
@@ -1025,9 +1249,11 @@ impl PhysicsWorld {
             sb.update_normals();
         }
 
-        // 8. Clear accumulated forces for the next step.
-        for body in &mut self.bodies {
-            body.clear_forces();
+        // 8. Clear the accumulated forces (once per external call: an
+        // applied force feeds every substep of the call, Bullet's
+        // `clearForces` running after the substep loop).
+        if frame {
+            self.clear_frame_forces();
         }
 
         // 8m. Multibody position integration (`integrateMultiBodyTransforms`;
@@ -1047,7 +1273,7 @@ impl PhysicsWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bullet_math::Transform;
+    use bullet_math::{math, Transform};
     use crate::body::{ActivationState, MotionState};
     use crate::body::filter_groups;
     use approx::assert_relative_eq;
@@ -3040,5 +3266,403 @@ mod tests {
             world.step_simulation(dt);
         }
         assert!(world.contact_force_events().is_empty());
+    }
+
+    // ---- fixed-timestep accumulator (`stepSimulation(dt, maxSubSteps,
+    // fixedTimeStep)`)
+
+    /// Regression anchor for the whole fixed-timestep surface: with
+    /// `fixed_dt == dt` every call runs exactly one substep, so the
+    /// simulation, the events and the force lifecycle must match the
+    /// single-step API bit-for-bit.
+    #[test]
+    fn fixed_degenerates_to_single_step() {
+        let build = || {
+            let mut world = PhysicsWorld::new();
+            world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+            world.add_body(RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(4.0, 0.5, 4.0)),
+                Vector3::ZERO,
+            ));
+            world.add_body(
+                RigidBody::new_dynamic(
+                    bullet_collision::shapes::CollisionShape::sphere(0.5),
+                    Vector3::new(0.1, 3.0, 0.0),
+                    1.0,
+                )
+                .restitution(0.3),
+            );
+            world
+        };
+        let (mut single, mut fixed) = (build(), build());
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            single.step_simulation(dt);
+            let n = fixed.step_simulation_fixed(dt, 1, dt);
+            assert_eq!(n, 1);
+        }
+        let a = single.body(BodyHandle::from_index(1));
+        let b = fixed.body(BodyHandle::from_index(1));
+        assert_eq!(a.position, b.position, "positions must match bit-for-bit");
+        assert_eq!(
+            a.linear_velocity, b.linear_velocity,
+            "velocities must match bit-for-bit"
+        );
+        assert_eq!(
+            single.contact_events(), fixed.contact_events(),
+            "event streams must match"
+        );
+    }
+
+    /// The accumulator paces the substeps: a frame of 1/128 s against a
+    /// fixed step of 3/128 s (both binary-exact) runs one substep every
+    /// third call, and a constant-speed body advances by one fixed step
+    /// per substep.
+    #[test]
+    fn accumulator_substep_rhythm() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(-20.0, 0.0, 0.0),
+            1.0,
+        ));
+        world.body_mut(ball).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+        let dt = 1.0 / 128.0;
+        let fixed_dt = 3.0 / 128.0;
+        let expected = [0u32, 0, 1, 0, 0, 1];
+        let mut moved = 0.0;
+        for (frame, &want) in expected.iter().enumerate() {
+            let n = world.step_simulation_fixed(dt, 4, fixed_dt);
+            assert_eq!(n, want, "substep demand of frame {frame}");
+            moved += n as Real * fixed_dt;
+            assert_relative_eq!(
+                world.body(ball).position.x,
+                -20.0 + moved,
+                epsilon = 1e-6
+            );
+        }
+    }
+
+    /// A frame much longer than the fixed step is clamped to `max_sub_steps`
+    /// substeps (the slow frame slows the world down instead of spiraling);
+    /// the return value stays the unclamped demand.
+    #[test]
+    fn clamped_substeps() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(-20.0, 0.0, 0.0),
+            1.0,
+        ));
+        world.body_mut(ball).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+        let x0 = world.body(ball).position.x;
+        // 1.0 / (1/128) is exactly 128 in both precisions (a 1/120 fixed
+        // step would quantize the quotient to 119 in f32).
+        let n = world.step_simulation_fixed(1.0, 2, 1.0 / 128.0);
+        assert_eq!(n, 128, "the demand is reported unclamped");
+        let x = world.body(ball).position.x;
+        assert_relative_eq!(x - x0, 2.0 / 128.0, epsilon = 1e-6);
+    }
+
+    /// Latency interpolation: the render pose trails the last simulated
+    /// substep by `fixed_dt - remainder`, and a frame that skips its
+    /// substep keeps advancing it smoothly along the stored snapshot.
+    #[test]
+    fn interpolation_advances_across_skipped_frames() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let log = std::rc::Rc::new(core::cell::RefCell::new(Vec::new()));
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(-20.0, 0.0, 0.0),
+                1.0,
+            )
+            .motion_state(Box::new(RecordingState {
+                initial: crate::body::pose_transform(Vector3::new(-20.0, 0.0, 0.0), Quaternion::IDENTITY),
+                log: log.clone(),
+            })),
+        );
+        world.body_mut(ball).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+        // Binary-exact pacing: a fixed step of 3/128 s against 1/128 s
+        // frames runs on calls 1 and 4 (demand 1, 0, 0, 1).
+        let dt = 1.0 / 128.0;
+        let fixed_dt = 3.0 / 128.0;
+        // Substep frame: the render pose is the pre-integration snapshot
+        // (x = -20) pulled back a full fixed step by the velocity.
+        world.step_simulation_fixed(fixed_dt, 4, fixed_dt);
+        // Skipped frames: the remainder grows, so the factor
+        // (remainder - fixed_dt) rises toward zero — the render pose
+        // advances smoothly without any simulation.
+        world.step_simulation_fixed(dt, 4, fixed_dt);
+        world.step_simulation_fixed(dt, 4, fixed_dt);
+        // The next substep frame resets the cycle.
+        world.step_simulation_fixed(fixed_dt, 4, fixed_dt);
+        let received = log.borrow();
+        assert_eq!(received.len(), 4, "one synchronize per call, even skipped");
+        let xs: Vec<Real> = received
+            .iter()
+            .map(|t| t.to_scale_rotation_translation().2.x)
+            .collect();
+        assert_relative_eq!(xs[0], -20.0 - fixed_dt, epsilon = 1e-5);
+        assert_relative_eq!(xs[1], -20.0 - fixed_dt + dt, epsilon = 1e-5);
+        assert_relative_eq!(xs[2], -20.0 - fixed_dt + 2.0 * dt, epsilon = 1e-5);
+        // The substep advanced the simulation; the render pose (trailing
+        // the fresh snapshot by a full fixed step) caught up to where the
+        // simulation was one step ago.
+        // The substep frame's demand was 1 with a 2/128 remainder left
+        // over (the two skipped frames), so its factor is 1/128 short of a
+        // full pull-back and the render pose stops short of the snapshot.
+        assert_relative_eq!(xs[3], -20.0 + fixed_dt - dt, epsilon = 1e-5);
+        // The simulation state moved one fixed step per substep frame
+        // (two substeps ran in total).
+        assert_relative_eq!(
+            world.body(ball).position.x,
+            -20.0 + 2.0 * fixed_dt,
+            epsilon = 1e-5
+        );
+    }
+
+    /// A frame shorter than the fixed step still synchronizes the motion
+    /// states and drops the applied forces, but simulates nothing.
+    #[test]
+    fn no_substep_frame_syncs_and_clears_forces() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let log = std::rc::Rc::new(core::cell::RefCell::new(Vec::new()));
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(-20.0, 0.0, 0.0),
+                1.0,
+            )
+            .motion_state(Box::new(RecordingState {
+                initial: crate::body::pose_transform(Vector3::new(-20.0, 0.0, 0.0), Quaternion::IDENTITY),
+                log: log.clone(),
+            })),
+        );
+        world.body_mut(ball).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+        let fixed_dt = 1.0 / 120.0;
+        // Prime the snapshot with one real substep.
+        world.step_simulation_fixed(fixed_dt, 4, fixed_dt);
+        let at = world.body(ball).position;
+        world.body_mut(ball).apply_force_at_point(Vector3::new(10.0, 0.0, 0.0), at);
+        // A zero-length frame: the fuzzy-zero gate of the variable branch.
+        let n = world.step_simulation_fixed(0.0, 0, fixed_dt);
+        assert_eq!(n, 0);
+        {
+            let received = log.borrow();
+            assert_eq!(received.len(), 2, "motion states still synchronize");
+        }
+        // Forces are dropped by the call (Bullet's unconditional
+        // clearForces): a following substep keeps the coasting velocity
+        // exactly (a surviving force would have added F/m·fixed_dt).
+        let coasting = world.body(ball).linear_velocity.x;
+        world.step_simulation_fixed(fixed_dt, 4, fixed_dt);
+        assert_relative_eq!(world.body(ball).linear_velocity.x, coasting, epsilon = 1e-6);
+    }
+
+    /// A force applied between calls feeds every substep of the next call:
+    /// three substeps of 1/120 s accumulate `F·3·fixed_dt` of impulse, and
+    /// the force is gone afterwards (Bullet's `clearForces` once per call).
+    #[test]
+    fn forces_persist_across_substeps() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let ball = world.add_body(RigidBody::new_dynamic(
+            bullet_collision::shapes::CollisionShape::sphere(0.5),
+            Vector3::new(-20.0, 0.0, 0.0),
+            2.0,
+        ));
+        let at = world.body(ball).position;
+        world.body_mut(ball).apply_force_at_point(Vector3::new(12.0, 0.0, 0.0), at);
+        let demand = world.step_simulation_fixed(1.0, 8, 1.0 / 128.0);
+        assert_eq!(demand, 128, "the demand is reported unclamped");
+        let v = world.body(ball).linear_velocity.x;
+        // Δv = F/m · (8 · fixed_dt): the force feeds every one of the
+        // eight clamped substeps.
+        assert_relative_eq!(v, 12.0 / 2.0 * (8.0 / 128.0), epsilon = 1e-5);
+    }
+
+    /// A pair that touches in an intermediate substep and separates before
+    /// the frame closes never reports `Started`/`Stopped` (events are
+    /// per-call).
+    #[test]
+    fn events_report_once_per_frame() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, -10.0, 0.0));
+        world.add_body(RigidBody::new_static(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(4.0, 0.5, 4.0)),
+            Vector3::ZERO,
+        ));
+        let _ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 1.2, 0.0),
+                1.0,
+            )
+            .collision_events(true),
+        );
+        let (dt, fixed_dt) = (1.0 / 60.0, 1.0 / 120.0);
+        // The event buffer is per-call: drain it after every frame of the
+        // drop and assert the single pair starts exactly once across the
+        // whole fall, never churning within a call despite two substeps
+        // per frame.
+        let mut seen_started = false;
+        for _ in 0..60 {
+            world.step_simulation_fixed(dt, 4, fixed_dt);
+            let events = world.contact_events();
+            let started = events
+                .iter()
+                .filter(|e| matches!(e, CollisionEvent::Started { .. }))
+                .count();
+            let stopped = events
+                .iter()
+                .filter(|e| matches!(e, CollisionEvent::Stopped { .. }))
+                .count();
+            assert!(started <= 1 && stopped <= 1, "no within-call churn");
+            if started == 1 {
+                assert!(!seen_started, "the pair starts exactly once");
+                seen_started = true;
+            }
+        }
+        assert!(seen_started, "the drop must produce one Started");
+    }
+
+    /// A kinematic platform advances by its user velocity for every
+    /// substep of the frame (the velocity-driven pose integration is
+    /// per-substep).
+    #[test]
+    fn kinematic_drives_through_substeps() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let plate = world.add_body(RigidBody::new_kinematic(
+            bullet_collision::shapes::CollisionShape::box_shape(Vector3::new(2.0, 0.25, 2.0)),
+            Vector3::new(-20.0, 0.0, 0.0),
+        ));
+        world.body_mut(plate).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+        let x0 = world.body(plate).position.x;
+        world.step_simulation_fixed(1.0 / 60.0, 4, 1.0 / 120.0);
+        let x = world.body(plate).position.x;
+        assert_relative_eq!(x - x0, 2.0 / 120.0, epsilon = 1e-5);
+    }
+
+    /// Non-latency interpolation: the factor is `remainder × hit_fraction`,
+    /// so the render pose sits *between* the snapshot and the simulation,
+    /// and a CCD-clamped body (hit fraction zero) stays pinned at the
+    /// snapshot.
+    #[test]
+    fn non_latency_mode_scales_with_hit_fraction() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let log = std::rc::Rc::new(core::cell::RefCell::new(Vec::new()));
+        let ball = world.add_body(
+            RigidBody::new_dynamic(
+                bullet_collision::shapes::CollisionShape::sphere(0.5),
+                Vector3::new(-20.0, 0.0, 0.0),
+                1.0,
+            )
+            .motion_state(Box::new(RecordingState {
+                initial: crate::body::pose_transform(Vector3::new(-20.0, 0.0, 0.0), Quaternion::IDENTITY),
+                log: log.clone(),
+            })),
+        );
+        world.body_mut(ball).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+        world.set_latency_motion_state_interpolation(false);
+        assert!(!world.latency_motion_state_interpolation());
+        // Binary-exact pacing (3/128 fixed vs 1/128 frames): substep,
+        // skip, skip, substep. The non-latency factor is
+        // `remainder × hit_fraction`, so the render pose sits *between*
+        // the snapshot and the simulation and lands exactly on the body
+        // when the remainder hits zero.
+        let dt = 1.0 / 128.0;
+        let fixed_dt = 3.0 / 128.0;
+        world.step_simulation_fixed(fixed_dt, 4, fixed_dt); // remainder 0: the snapshot itself
+        world.step_simulation_fixed(dt, 4, fixed_dt); // remainder 1/128
+        world.step_simulation_fixed(dt, 4, fixed_dt); // remainder 2/128
+        world.step_simulation_fixed(fixed_dt, 4, fixed_dt); // demand 1, remainder 2/128
+        let received = log.borrow();
+        assert_eq!(received.len(), 4);
+        let xs: Vec<Real> = received
+            .iter()
+            .map(|t| t.to_scale_rotation_translation().2.x)
+            .collect();
+        assert_relative_eq!(xs[0], -20.0, epsilon = 1e-5);
+        assert_relative_eq!(xs[1], -20.0 + dt, epsilon = 1e-5);
+        assert_relative_eq!(xs[2], -20.0 + 2.0 * dt, epsilon = 1e-5);
+        // The last substep left a 2/128 remainder: the render pose
+        // overshoots the fresh snapshot by remainder × hit_fraction.
+        assert_relative_eq!(xs[3], -20.0 + fixed_dt + 2.0 * dt, epsilon = 1e-5);
+    }
+
+    /// The interpolation formula (Bullet's `btTransformUtil::
+    /// integrateTransform`): linear position, axis-angle rotation with the
+    /// Taylor small-angle branch and the `ANGULAR_MOTION_THRESHOLD` clamp,
+    /// negative spans handled symmetrically.
+    #[test]
+    fn interpolate_pose_branches() {
+        use crate::body::interpolate_pose;
+        // Pure translation.
+        let (p, q) = interpolate_pose(
+            Vector3::new(1.0, 2.0, 3.0),
+            Quaternion::IDENTITY,
+            Vector3::new(10.0, 0.0, 0.0),
+            Vector3::ZERO,
+            0.5,
+        );
+        assert_relative_eq!(p.x, 6.0, epsilon = 1e-6);
+        assert_relative_eq!(q.w, 1.0, epsilon = 1e-6);
+        // Small-angle branch (|w| < 0.001): the Taylor axis yields the
+        // half-angle quaternion x ≈ w·dt/2.
+        let w = 5e-4;
+        let (_, q) = interpolate_pose(
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::ZERO,
+            Vector3::new(w, 0.0, 0.0),
+            1.0,
+        );
+        assert_relative_eq!(q.x, 0.5 * w, epsilon = 1e-6);
+        assert!((q.w - 1.0).abs() < 1e-4);
+        // Large angle clamped: 90°/s over 1 s exceeds
+        // ANGULAR_MOTION_THRESHOLD (π/4), so the rotation is clamped to a
+        // π/4 turn around the rescaled axis (x = 0.63795, w = 0.77008).
+        #[cfg(not(feature = "f64"))]
+        const HALF_PI: Real = core::f32::consts::FRAC_PI_2;
+        #[cfg(feature = "f64")]
+        const HALF_PI: Real = core::f64::consts::FRAC_PI_2;
+        let (_, q) = interpolate_pose(
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::ZERO,
+            Vector3::new(HALF_PI, 0.0, 0.0),
+            1.0,
+        );
+        assert_relative_eq!(q.x, 0.637_951_8, epsilon = 1e-5);
+        assert_relative_eq!(q.w, 0.770_076_1, epsilon = 1e-5);
+        // Moderate angle below the clamp: 0.5 rad/s over 1 s is an exact
+        // 0.5 rad turn (x = sin(0.25), w = cos(0.25)).
+        let (_, q) = interpolate_pose(
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::ZERO,
+            Vector3::new(0.5, 0.0, 0.0),
+            1.0,
+        );
+        assert_relative_eq!(q.x, math::sin(0.25), epsilon = 1e-5);
+        assert_relative_eq!(q.w, math::cos(0.25), epsilon = 1e-5);
+        // Negative span (the latency remainder) rewinds symmetrically.
+        let (p, q) = interpolate_pose(
+            Vector3::new(0.0, 1.0, 0.0),
+            Quaternion::IDENTITY,
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::ZERO,
+            -1.0 / 128.0,
+        );
+        assert_relative_eq!(p.x, -2.0 / 128.0, epsilon = 1e-6);
+        assert_relative_eq!(p.y, 1.0, epsilon = 1e-6);
+        assert_relative_eq!(q.w, 1.0, epsilon = 1e-6);
     }
 }

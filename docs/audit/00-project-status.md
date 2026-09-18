@@ -28,11 +28,15 @@ integration, the classic SoftBody system, and the consumer-facing API layer
 are all implemented and covered by the test/parity/probe suites. The
 subsystem audits (01–09) are complete and the minimal debug draw shipped.
 Review progress: the internal edge utility shipped (`6be3117`), the
-`btContactSolverInfo` parameter surface shipped, and the
-`ConstraintTag` naming / `#[non_exhaustive]` ruling is recorded in the
-debug-draw design §26. Remaining review items: the Open rows in
-`docs/api-priorities.md` (the `stepSimulation` accumulator, the rigid
-gear constraint, 6DofSpring2, MultiSphere, …), each carrying a proposed
+`btContactSolverInfo` parameter surface shipped, the
+**`stepSimulation(dt, maxSubSteps, fixedTimeStep)` accumulator** shipped
+(2026-09-18 — `step_simulation_fixed` with the full motion-state
+interpolation, per-call force/event semantics, parity variants `substeps` /
+`substeps_clamped`, breaking nothing — the single-step API keeps its
+recorded semantics), and the `ConstraintTag` naming / `#[non_exhaustive]`
+ruling is recorded in the debug-draw design §26. Remaining review items:
+the Open rows in `docs/api-priorities.md` (the rigid gear constraint,
+6DofSpring2, MultiSphere, heightfield options, …), each carrying a proposed
 verdict.
 
 ## Completed
@@ -84,7 +88,7 @@ Feature status at this HEAD (evidence for *tested* cases only):
   (2026-09-11 re-record after the third batch + drift-split fix: wall clock
   in band, memory +0.031 MB attributed), memory-trend harness, flamegraph
   workflow.
-- **Quality gates**: 475 unit tests × f32/f64 green, 14 demos, clippy clean
+- **Quality gates**: 514 unit tests × f32/f64 green, 14 demos, clippy clean
   on both features.
 
 ## In Progress
