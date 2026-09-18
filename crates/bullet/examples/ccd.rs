@@ -10,7 +10,7 @@ use bullet::shapes::CollisionShape;
 fn main() {
     let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::ZERO);
-    world.set_iterations(20);
+    world.solver_info_mut().num_iterations = 20;
 
     // Thin static wall: a 0.2-thick box spanning the XY plane region.
     let wall = RigidBody::new_static(

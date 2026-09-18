@@ -152,6 +152,20 @@ def gen_c(scenes):
         "  int group, mask;  // ray filter (RayResultCallback::needsCollision order)",
         "};",
         "",
+        "struct SolverInfoSpec {  // btContactSolverInfo overrides (all fields filled in; missing json keys default to the engine defaults)",
+        "  btScalar erp, erp2;",
+        "  btScalar linear_slop;",
+        "  btScalar restitution_velocity_threshold;",
+        "  int split_impulse;",
+        "  btScalar split_impulse_penetration_threshold;",
+        "  btScalar split_impulse_turn_erp;",
+        "  btScalar warmstarting_factor;",
+        "  btScalar friction_erp;",
+        "  btScalar global_cfm;",
+        "  btScalar sor;",
+        "  btScalar damping;",
+        "};",
+        "",
         "struct SceneSpec {",
         "  const char* name;",
         "  int num_bodies;",
@@ -165,6 +179,7 @@ def gen_c(scenes):
         "  const char* const* pair_filter;  // {nameA, nameB} excluded pair, or null",
         "  int num_rays;",
         "  const RaySpec* rays;",
+        "  const SolverInfoSpec* solver_info;  // non-null overrides getSolverInfo()",
         "};",
         "",
     ]
@@ -273,10 +288,35 @@ def gen_c(scenes):
                 lines.append(f"  {{{{{fr}}}, {{{to}}}, {mode}, {rgrp}, {rmsk}}},")
             lines.append("};")
         rays_ref = f"k{name}_rays" if rays else "nullptr"
+        si = sc.get("solver_info")
+        if si:
+            # Fill every field: json overrides win, missing keys take this
+            # engine's defaults, so both engines read the identical 12 values
+            # from the shared table (Bullet's own constructor defaults differ).
+            fields = (
+                ("erp", 0.2, False),
+                ("erp2", 0.2, False),
+                ("linear_slop", 0.005, False),
+                ("restitution_velocity_threshold", 1.0, False),
+                ("split_impulse", 1, True),
+                ("split_impulse_penetration_threshold", -0.04, False),
+                ("split_impulse_turn_erp", 0.1, False),
+                ("warmstarting_factor", 0.85, False),
+                ("friction_erp", 0.2, False),
+                ("global_cfm", 0.0, False),
+                ("sor", 1.0, False),
+                ("damping", 1.0, False),
+            )
+            vals = []
+            for key, default, is_int in fields:
+                v = si.get(key, default)
+                vals.append(str(int(v)) if is_int else fmt(v))
+            lines.append(f"static const SolverInfoSpec k{name}_si = {{ {', '.join(vals)} }};")
+        si_ref = f"&k{name}_si" if si else "nullptr"
         lines.append(f"static const SceneSpec k{name} = {{\"{name}\", {len(sc['bodies'])}, k{name}_bodies, "
                      f"{len(sc['record'])}, k{name}_record, {dt_num}, {dt_den}, "
                      f"{sc['frames']}, {sc['iterations']}, {{{g}}}, "
-                     f"{pf_ref}, {len(rays)}, {rays_ref}}};")
+                     f"{pf_ref}, {len(rays)}, {rays_ref}, {si_ref}}};")
         lines.append("")
     lines.append("static const SceneSpec* kScenes[] = {")
     for name in scenes:
@@ -355,6 +395,23 @@ def gen_rs(scenes):
         "    pub gravity: [f32; 3],",
         "    pub pair_filter: Option<(&'static str, &'static str)>,",
         "    pub rays: &'static [RaySpec],",
+        "    pub solver_info: Option<SolverInfoSpec>,",
+        "}",
+        "",
+        "#[derive(Clone, Copy)]",
+        "pub struct SolverInfoSpec {",
+        "    pub erp: f32,",
+        "    pub erp2: f32,",
+        "    pub linear_slop: f32,",
+        "    pub restitution_velocity_threshold: f32,",
+        "    pub split_impulse: bool,",
+        "    pub split_impulse_penetration_threshold: f32,",
+        "    pub split_impulse_turn_erp: f32,",
+        "    pub warmstarting_factor: f32,",
+        "    pub friction_erp: f32,",
+        "    pub global_cfm: f32,",
+        "    pub sor: f32,",
+        "    pub damping: f32,",
         "}",
         "",
         "pub const SCENES: &[(&str, SceneSpec)] = &[",
@@ -476,6 +533,32 @@ def gen_rs(scenes):
             lines.append("        ],")
         else:
             lines.append("        rays: &[],")
+        si = sc.get("solver_info")
+        if si:
+            fields = (
+                ("erp", 0.2, False),
+                ("erp2", 0.2, False),
+                ("linear_slop", 0.005, False),
+                ("restitution_velocity_threshold", 1.0, False),
+                ("split_impulse", 1, True),
+                ("split_impulse_penetration_threshold", -0.04, False),
+                ("split_impulse_turn_erp", 0.1, False),
+                ("warmstarting_factor", 0.85, False),
+                ("friction_erp", 0.2, False),
+                ("global_cfm", 0.0, False),
+                ("sor", 1.0, False),
+                ("damping", 1.0, False),
+            )
+            parts = []
+            for key, default, is_int in fields:
+                v = si.get(key, default)
+                if is_int:
+                    parts.append(f"{key}: {'true' if int(v) else 'false'}")
+                else:
+                    parts.append(f"{key}: {fmt(v)}")
+            lines.append(f"        solver_info: Some(SolverInfoSpec {{ {', '.join(parts)} }}),")
+        else:
+            lines.append("        solver_info: None,")
         lines.append("    }),")
     lines.append("];")
     lines.append("")

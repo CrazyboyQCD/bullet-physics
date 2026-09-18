@@ -7,27 +7,9 @@ use alloc::vec::Vec;
 use bullet_collision::manifold::ContactPoint;
 use crate::body::RigidBody;
 use crate::CollisionFlags;
+use crate::solver::SolverInfo;
 use bullet_math::{math, FRAC_1_SQRT_2, Matrix3, Real, Vector3};
 
-/// Allowed penetration slop before the Baumgarte term kicks in.
-pub(crate) const SLOP: Real = 0.005;
-/// Baumgarte positional-correction factor — also the default joint ERP
-/// (Bullet's `infoGlobal.m_erp`, which `btPoint2PointConstraint::getInfo2`
-/// uses for `m_constraintError` unless overridden).
-pub(crate) const BAUMGARTE: Real = 0.2;
-/// Minimum approach speed (m/s) below which restitution is disabled.
-pub(crate) const RESTITUTION_THRESHOLD: Real = 1.0;
-/// Penetration depth (m) above which the split-impulse pass takes over
-/// position correction (Bullet's `m_splitImpulsePenetrationThreshold = -0.04`,
-/// sign-flipped to our positive-penetration convention). Deeper contacts are
-/// corrected by the split pass only; shallower ones keep the Baumgarte bias.
-const SPLIT_IMPULSE_PENETRATION_THRESHOLD: Real = 0.04;
-/// Positional error reduction of the friction-anchor bias (Bullet's
-/// `m_frictionERP`, `btContactSolverInfo` default 0.2).
-const FRICTION_ERP: Real = 0.2;
-/// Orientation scaling for the split-impulse turn velocity (Bullet's
-/// `m_splitImpulseTurnErp`, applied in `writebackVelocityAndTransform`).
-pub(crate) const SPLIT_TURN_ERP: Real = 0.1;
 /// Bullet's `SIMD_EPSILON` — precision-dependent (`f32::EPSILON` /
 /// `f64::EPSILON`, exactly FLT/DBL_EPSILON).
 const SIMD_EPSILON: Real = Real::EPSILON;
@@ -331,6 +313,7 @@ impl ContactConstraint {
         point_index: u32,
         anchor_disp: Option<Vector3>,
         inv_dt: Real,
+        info: &SolverInfo,
     ) -> Self {
         let normal = cp.normal;
         let (mut tangent1, mut tangent2) = tangent_basis(normal);
@@ -364,7 +347,7 @@ impl ContactConstraint {
 
         let mut normal_mass =
             effective_mass(inv_mass_a, inv_mass_b, ang_normal_a, ang_normal_b, r_a, r_b, normal);
-        let tangent1_mass = effective_mass(
+        let mut tangent1_mass = effective_mass(
             inv_mass_a,
             inv_mass_b,
             ang_tangent1_a,
@@ -373,7 +356,7 @@ impl ContactConstraint {
             r_b,
             tangent1,
         );
-        let tangent2_mass = effective_mass(
+        let mut tangent2_mass = effective_mass(
             inv_mass_a,
             inv_mass_b,
             ang_tangent2_a,
@@ -403,16 +386,19 @@ impl ContactConstraint {
         let restitution = a.restitution * b.restitution;
 
         // Soft-contact channel (Bullet's `setupContactConstraint`
-        // `BT_CONTACT_FLAG_CONTACT_STIFFNESS_DAMPING` branch, reached when
-        // either pair side carries the flag): the combined parameters
-        // (Bullet's `calculateCombinedContactDamping` = sum,
-        // `calculateCombinedContactStiffness` = springs in series) turn
-        // `cfm = 1/(dt·k + d)` and `erp = dt·k/(dt·k + d)` into a
-        // damped-spring normal row. `cfm` also enters the effective mass
-        // (`m_jacDiagABInv = relaxation/(denom + cfm)`, relaxation 1) and is
-        // scaled by `invTimeStep` exactly like Bullet does.
-        let mut erp = BAUMGARTE;
+        // parameter selection: the per-pair stiffness/damping flag overrides
+        // the global defaults). `erp` starts at Bullet's `m_erp2` and `cfm`
+        // at `m_globalCfm * invTimeStep` (`cfm *= invTimeStep` at
+        // btSequentialImpulseConstraintSolver.cpp:846, before it enters the
+        // effective-mass denominator); the stiffness branch replaces both
+        // with the combined `m_contactERP2` / spring formulas. The relaxation
+        // numerator `m_sor` enters both branches' `m_jacDiagABInv`. The
+        // defaults (`erp2 0.2`, `globalCfm 0`, `sor 1`) leave the original
+        // values bit-for-bit: `k + 0.0 == k`, `1.0 / x` is the same division,
+        // and a zero `cfm` keeps the compliance solve path gated off.
+        let mut erp = info.erp2;
         let mut normal_cfm = 0.0;
+        let cfm_global = info.global_cfm * inv_dt;
         if a.collision_flags.contains(CollisionFlags::HAS_CONTACT_STIFFNESS_DAMPING)
             || b.collision_flags.contains(CollisionFlags::HAS_CONTACT_STIFFNESS_DAMPING)
         {
@@ -429,10 +415,31 @@ impl ContactConstraint {
             let cfm = (1.0 / denom) * inv_dt;
             erp = (dt * combined_stiffness) / denom;
             // The row's `k` (inverse of `normal_mass`) gains the compliance:
-            // `m_jacDiagABInv = 1/(k + cfm)`.
+            // `m_jacDiagABInv = relaxation / (k + cfm)`.
             let k = if normal_mass > 0.0 { 1.0 / normal_mass } else { 0.0 };
-            normal_mass = if k + cfm > 0.0 { 1.0 / (k + cfm) } else { 0.0 };
+            normal_mass = if k + cfm > 0.0 { info.sor / (k + cfm) } else { 0.0 };
             normal_cfm = cfm * normal_mass;
+        } else if cfm_global != 0.0 || info.sor != 1.0 {
+            // Global compliance / relaxation on a plain contact row: the
+            // same `m_jacDiagABInv = relaxation / (k + cfm)` shape over the
+            // recovered `k` (the defaults skip this branch entirely, keeping
+            // the effective mass exactly as `effective_mass` returned it).
+            let k = if normal_mass > 0.0 { 1.0 / normal_mass } else { 0.0 };
+            normal_mass = if k + cfm_global > 0.0 {
+                info.sor / (k + cfm_global)
+            } else {
+                0.0
+            };
+            normal_cfm = cfm_global * normal_mass;
+        }
+        if info.sor != 1.0 {
+            // The linear friction rows carry the relaxation numerator too
+            // (`addFrictionConstraint` receives the same `relaxation`; the
+            // normal row already folded it in above). The multiplicative
+            // form differs from Bullet's division only in the last ulp of
+            // the non-default regime.
+            tangent1_mass *= info.sor;
+            tangent2_mass *= info.sor;
         }
 
         // Friction-anchor targets (Bullet's `setupFrictionConstraint`
@@ -449,8 +456,8 @@ impl ContactConstraint {
         // solve bit-for-bit unchanged.
         let anchor = if let Some(disp) = anchor_disp {
             [
-                disp.dot(tangent1) * FRICTION_ERP,
-                disp.dot(tangent2) * FRICTION_ERP,
+                disp.dot(tangent1) * info.friction_erp,
+                disp.dot(tangent2) * info.friction_erp,
             ]
         } else {
             [0.0; 2]
@@ -476,7 +483,7 @@ impl ContactConstraint {
             tangent1_mass,
             tangent2_mass,
             penetration: cp.penetration,
-            baumgarte_span: (cp.penetration - SLOP).max(0.0),
+            baumgarte_span: (cp.penetration - info.linear_slop).max(0.0),
             separation: cp.penetration.min(0.0),
             restitution,
             friction,
@@ -488,10 +495,14 @@ impl ContactConstraint {
             tangent2_impulse: cp.tangent_impulse[1],
             point_index,
             // Deep penetration switches position correction from the Baumgarte
-            // bias to the split-impulse pass (Bullet's `m_splitImpulse`
-            // branch in `setupContactConstraint`); the split impulse itself
-            // starts at zero every step, like `m_appliedPushImpulse`.
-            split_active: cp.penetration > SPLIT_IMPULSE_PENETRATION_THRESHOLD,
+            // bias to the split-impulse pass (Bullet's `!m_splitImpulse ||
+            // penetration > m_splitImpulsePenetrationThreshold` branch of
+            // `setupContactConstraint`); the threshold keeps Bullet's negative
+            // sign and is compared against the positive penetration depth. The
+            // split impulse itself starts at zero every step, like
+            // `m_appliedPushImpulse`.
+            split_active: info.split_impulse
+                && cp.penetration > -info.split_impulse_penetration_threshold,
             rhs_penetration: 0.0,
             push_impulse: 0.0,
             applies_a: inv_mass_a > 0.0,
@@ -643,20 +654,22 @@ fn two_bodies(bodies: &mut [RigidBody], a: usize, b: usize) -> (&mut RigidBody, 
 
 /// Solve all contact constraints and joint rows with sequential-impulse (PGS)
 /// iterations. Contacts warm-start from their cached impulses (Bullet's
-/// `SOLVER_USE_WARMSTARTING`); joints build from zero each step.
+/// `SOLVER_USE_WARMSTARTING`); joints build from zero each step. The
+/// iteration count and the per-row parameters come from `info`
+/// (`btContactSolverInfo`).
 pub fn solve(
     bodies: &mut [RigidBody],
     constraints: &mut [ContactConstraint],
     joints: &mut [ConstraintRow],
     rolling: &mut [RollingFriction],
-    iterations: u32,
     inv_dt: Real,
+    info: &SolverInfo,
 ) {
     warm_start(bodies, constraints);
-    for _ in 0..iterations {
-        velocity_iteration(bodies, constraints, joints, rolling, inv_dt);
+    for _ in 0..info.num_iterations {
+        velocity_iteration(bodies, constraints, joints, rolling, inv_dt, info);
     }
-    split_impulse_pass(bodies, constraints, iterations, inv_dt);
+    split_impulse_pass(bodies, constraints, inv_dt, info);
 }
 
 /// Re-apply the impulses accumulated by the previous step (Bullet's
@@ -678,12 +691,14 @@ pub(crate) fn velocity_iteration(
     joints: &mut [ConstraintRow],
     rolling: &mut [RollingFriction],
     inv_dt: Real,
+    info: &SolverInfo,
 ) {
     for c in constraints.iter_mut() {
-        solve_contact(bodies, c, rolling, inv_dt);
+        solve_contact(bodies, c, rolling, inv_dt, info);
     }
+    let damping = info.damping;
     for j in joints.iter_mut() {
-        solve_joint_row(bodies, j);
+        solve_joint_row(bodies, j, damping);
     }
 }
 
@@ -696,8 +711,8 @@ pub(crate) fn velocity_iteration(
 pub(crate) fn split_impulse_pass(
     bodies: &mut [RigidBody],
     constraints: &mut [ContactConstraint],
-    iterations: u32,
     inv_dt: Real,
+    info: &SolverInfo,
 ) {
     let split_rhs = |c: &mut ContactConstraint| {
         if c.split_active {
@@ -709,7 +724,7 @@ pub(crate) fn split_impulse_pass(
     for c in constraints.iter_mut() {
         split_rhs(c);
     }
-    for _ in 0..iterations {
+    for _ in 0..info.num_iterations {
         for c in constraints.iter_mut() {
             if !c.split_active {
                 continue;
@@ -759,6 +774,7 @@ fn solve_contact(
     c: &mut ContactConstraint,
     rolling: &mut [RollingFriction],
     inv_dt: Real,
+    info: &SolverInfo,
 ) {
     // One split serves the whole solve (the ten-iteration hot path used to
     // re-split for every tangent block — pure control-flow overhead).
@@ -779,15 +795,14 @@ fn solve_contact(
     // response stays a pure restitution/impact response without the energy
     // injection of a large positional bias.
     let mut bias = 0.0;
-    if vn < -RESTITUTION_THRESHOLD {
+    if vn < -info.restitution_velocity_threshold {
         bias = -c.restitution * vn;
     }
     if !c.split_active {
-        bias += if soft {
-            c.erp * inv_dt * c.baumgarte_span
-        } else {
-            BAUMGARTE * inv_dt * c.baumgarte_span
-        };
+        // The Baumgarte factor lives on the row (`erp`, loaded from
+        // `m_erp2` at prepare time — the soft-contact stiffness branch is
+        // its only override), so both paths read the same field.
+        bias += c.erp * inv_dt * c.baumgarte_span;
     }
     // Separated (margin-band) contacts: Bullet's solver subtracts the
     // separation rate from the velocity error (`velocityError -= penetration
@@ -884,14 +899,22 @@ fn solve_contact(
 
 /// Solve one bilateral joint row (Bullet's `gResolveSingleConstraintRowGeneric`:
 /// drive the relative velocity along the row toward the position-error bias,
-/// clamping the accumulated impulse to the row limits).
-fn solve_joint_row(bodies: &mut [RigidBody], c: &mut ConstraintRow) {
+/// clamping the accumulated impulse to the row limits). `damping` is Bullet's
+/// `info2.m_damping` (global default 1.0, bit-for-bit neutral): the row's
+/// relative velocity is scaled by it before entering the impulse.
+fn solve_joint_row(bodies: &mut [RigidBody], c: &mut ConstraintRow, damping: Real) {
     let (a, b) = two_bodies(bodies, c.body_a, c.body_b);
 
     let row_vel = (c.lin_b.dot(b.linear_velocity) + c.ang_b.dot(b.angular_velocity))
         - (c.lin_a.dot(a.linear_velocity) + c.ang_a.dot(a.angular_velocity));
 
-    let lambda = c.mass * (c.bias - row_vel);
+    // The damping multiply is branch-isolated so the default path keeps its
+    // exact instruction sequence (`x * 1.0` would be a live multiply).
+    let lambda = if damping != 1.0 {
+        c.mass * (c.bias - row_vel * damping)
+    } else {
+        c.mass * (c.bias - row_vel)
+    };
     let old = c.impulse;
     let new = match c.limits {
         RowLimits::Unbounded => old + lambda,
@@ -958,6 +981,12 @@ mod tests {
     /// it (contact point at the box bottom), with zero velocities so the
     /// velocity iterations stay idle and only the split pass acts.
     fn deep_contact(penetration: Real) -> (Vec<RigidBody>, Vec<ContactConstraint>) {
+        deep_contact_with(penetration, &SolverInfo::default())
+    }
+
+    /// [`deep_contact`] with an explicit solver info (tests that flip
+    /// `split_impulse` need the row built under the same info).
+    fn deep_contact_with(penetration: Real, info: &SolverInfo) -> (Vec<RigidBody>, Vec<ContactConstraint>) {
         let ground = RigidBody::new_static(
             CollisionShape::plane(Vector3::Y, 0.0),
             Vector3::ZERO,
@@ -972,7 +1001,7 @@ mod tests {
             Vector3::Y,                           // normal A -> B (box -> plane)
             penetration,
         );
-        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &cube, u32::MAX, None, 60.0);
+        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &cube, u32::MAX, None, 60.0, info);
         (vec![ground, cube], vec![c])
     }
 
@@ -1012,6 +1041,7 @@ mod tests {
             u32::MAX,
             Some(Vector3::new(d, 0.0, 0.0)),
             60.0,
+            &SolverInfo::default(),
         );
         let mut bodies = vec![ground, make_cube()];
         // Approach speed along the normal: the first iteration builds a
@@ -1019,7 +1049,8 @@ mod tests {
         // the friction cone has slack for the servo to spend.
         bodies[1].linear_velocity = Vector3::new(0.0, -1.0, 0.0);
         let mut constraints = vec![anchored];
-        solve(&mut bodies, &mut constraints, &mut [], &mut [], 1, 60.0);
+        let info = SolverInfo { num_iterations: 1, ..SolverInfo::default() };
+solve(&mut bodies, &mut constraints, &mut [], &mut [], 60.0, &info);
         assert!(
             bodies[1].linear_velocity.x > 0.01,
             "servo must pull B toward the A-side anchor: vx = {}",
@@ -1029,11 +1060,12 @@ mod tests {
         // Without the anchor displacement the plain friction row only
         // zeroes the tangential slip (which is zero here) — no drive.
         let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
-        let plain = ContactConstraint::prepare(0, 1, &cp, &ground, &make_cube(), u32::MAX, None, 60.0);
+        let plain = ContactConstraint::prepare(0, 1, &cp, &ground, &make_cube(), u32::MAX, None, 60.0, &SolverInfo::default());
         let mut bodies = vec![ground, make_cube()];
         bodies[1].linear_velocity = Vector3::new(0.0, -1.0, 0.0);
         let mut constraints = vec![plain];
-        solve(&mut bodies, &mut constraints, &mut [], &mut [], 1, 60.0);
+        let info = SolverInfo { num_iterations: 1, ..SolverInfo::default() };
+solve(&mut bodies, &mut constraints, &mut [], &mut [], 60.0, &info);
         assert_relative_eq!(bodies[1].linear_velocity.x, 0.0, epsilon = 1e-7);
     }
 
@@ -1042,7 +1074,7 @@ mod tests {
     #[test]
     fn split_impulse_pushes_deep_penetration_without_touching_velocity() {
         let (mut bodies, mut constraints) = deep_contact(0.1);
-        solve(&mut bodies, &mut constraints, &mut [], &mut [], 10, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], &mut [], 60.0, &SolverInfo::default());
         // Split pass accumulated an upward positional push on the box.
         assert!(bodies[1].push_linear.y > 0.0);
         // The real velocity is untouched: zero approach speed means the
@@ -1057,7 +1089,7 @@ mod tests {
     #[test]
     fn split_impulse_ignores_shallow_penetration() {
         let (mut bodies, mut constraints) = deep_contact(0.01);
-        solve(&mut bodies, &mut constraints, &mut [], &mut [], 10, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], &mut [], 60.0, &SolverInfo::default());
         assert!(!constraints[0].split_active);
         assert_eq!(bodies[1].push_linear, Vector3::ZERO);
     }
@@ -1068,10 +1100,12 @@ mod tests {
     fn split_impulse_converges_and_clamps() {
         let (mut bodies, mut constraints) = deep_contact(0.1);
         // Half the iterations of the default solve.
-        solve(&mut bodies, &mut constraints, &mut [], &mut [], 5, 60.0);
+        let info = SolverInfo { num_iterations: 5, ..SolverInfo::default() };
+solve(&mut bodies, &mut constraints, &mut [], &mut [], 60.0, &info);
         let push_full = bodies[1].push_linear.y;
         let (mut bodies2, mut constraints2) = deep_contact(0.1);
-        solve(&mut bodies2, &mut constraints2, &mut [], &mut [], 20, 60.0);
+        let info = SolverInfo { num_iterations: 20, ..SolverInfo::default() };
+solve(&mut bodies2, &mut constraints2, &mut [], &mut [], 60.0, &info);
         // More iterations converge further toward removing the penetration;    
         // both stay positive (no pull-in).
         assert!(push_full > 0.0);
@@ -1106,7 +1140,7 @@ mod tests {
                 Vector3::Y,
                 0.01,
             );
-            let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0);
+            let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &SolverInfo::default());
             let mut pool: Vec<RollingFriction> = Vec::new();
             c.attach_rolling(&ground, &sphere, &mut pool);
             (vec![ground, sphere], vec![c], pool)
@@ -1115,7 +1149,7 @@ mod tests {
         // Without rolling friction the rows are never installed and the
         // spin stays exactly as it started.
         let (mut bodies, mut constraints, mut pool) = build(0.0);
-        solve(&mut bodies, &mut constraints, &mut [], &mut pool, 10, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], &mut pool, 60.0, &SolverInfo::default());
         assert!(pool.is_empty());
         assert_relative_eq!(bodies[1].angular_velocity.z, 2.0, epsilon = 1e-6);
 
@@ -1127,7 +1161,7 @@ mod tests {
         // full deceleration under sustained contact load is covered by
         // the scene test in `world_tests`.
         let (mut bodies, mut constraints, mut pool) = build(0.5);
-        solve(&mut bodies, &mut constraints, &mut [], &mut pool, 10, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], &mut pool, 60.0, &SolverInfo::default());
         assert_eq!(pool.len(), 1);
         let w = bodies[1].angular_velocity.z;
         assert_relative_eq!(w, 1.7, epsilon = 1e-5);
@@ -1156,11 +1190,11 @@ mod tests {
             Vector3::Y,
             0.01,
         );
-        let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0);
+        let mut c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &SolverInfo::default());
         let mut pool: Vec<RollingFriction> = Vec::new();
         c.attach_rolling(&ground, &sphere, &mut pool);
         let mut bodies = vec![ground, sphere];
-        solve(&mut bodies, std::slice::from_mut(&mut c), &mut [], &mut pool, 10, 60.0);
+        solve(&mut bodies, std::slice::from_mut(&mut c), &mut [], &mut pool, 60.0, &SolverInfo::default());
         // |ΔL| per row ≤ combined (0.005); I = 0.1 → |Δω| ≤ 0.05.
         let dw = (100.0 - bodies[1].angular_velocity.z).abs();
         assert!(dw <= 0.06, "clamp should cap the change: Δω = {}", dw);
@@ -1196,7 +1230,7 @@ mod tests {
                 0.01,
             );
             let c =
-                ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0);
+                ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &SolverInfo::default());
             let mut pool: Vec<RollingFriction> = Vec::new();
             let mut c = c;
             c.attach_rolling(&ground, &sphere, &mut pool);
@@ -1204,7 +1238,7 @@ mod tests {
         };
 
         let (mut bodies, mut constraints, mut pool) = build();
-        solve(&mut bodies, &mut constraints, &mut [], &mut pool, 10, 60.0);
+        solve(&mut bodies, &mut constraints, &mut [], &mut pool, 60.0, &SolverInfo::default());
         assert_eq!(pool.len(), 1);
         assert!(pool[0].spinning);
         // Same math as the rolling test: the row saturates its clamp at
@@ -1240,12 +1274,12 @@ mod tests {
             Vector3::Y,
             0.01,
         );
-        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0);
+        let c = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &SolverInfo::default());
         let mut pool: Vec<RollingFriction> = Vec::new();
         let mut c = c;
         c.attach_rolling(&ground, &sphere, &mut pool);
         let mut bodies = vec![ground, sphere];
-        solve(&mut bodies, std::slice::from_mut(&mut c), &mut [], &mut pool, 10, 60.0);
+        solve(&mut bodies, std::slice::from_mut(&mut c), &mut [], &mut pool, 60.0, &SolverInfo::default());
         assert!(pool.is_empty());
         assert_relative_eq!(bodies[1].angular_velocity.y, 2.0, epsilon = 1e-6);
     }
@@ -1264,7 +1298,7 @@ mod tests {
         let mut sphere =
             RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::new(0.0, 0.5, 0.0), 1.0);
         sphere.set_contact_stiffness_and_damping(1000.0, 10.0);
-        let soft = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0);
+        let soft = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &SolverInfo::default());
         // dt = 1/60, k = 1000; the flagged sphere's damping 10 *adds* the
         // plane's default 0.1 (Bullet's `calculateCombinedContactDamping`),
         // and the plane's `BT_LARGE_FLOAT` stiffness contributes ~nothing to
@@ -1284,7 +1318,7 @@ mod tests {
             1.0,
         );
         let plain =
-            ContactConstraint::prepare(0, 1, &cp, &ground, &plain_sphere, u32::MAX, None, 60.0);
+            ContactConstraint::prepare(0, 1, &cp, &ground, &plain_sphere, u32::MAX, None, 60.0, &SolverInfo::default());
         assert_relative_eq!(plain.erp, 0.2, epsilon = 1e-12);
         assert_relative_eq!(plain.normal_cfm, 0.0, epsilon = 1e-12);
     }
@@ -1316,6 +1350,7 @@ mod tests {
             u32::MAX,
             None,
             60.0,
+            &SolverInfo::default(),
         );
         let (t1, t2) = tangent_basis(Vector3::Y);
         assert!((plain.tangent1 - t1).length() < 1e-12);
@@ -1325,7 +1360,7 @@ mod tests {
         // its length.
         let mut aniso = make_cube();
         aniso.anisotropic_friction = Vector3::new(1.0, 1.0, 0.0);
-        let scaled = ContactConstraint::prepare(0, 1, &cp, &ground, &aniso, u32::MAX, None, 60.0);
+        let scaled = ContactConstraint::prepare(0, 1, &cp, &ground, &aniso, u32::MAX, None, 60.0, &SolverInfo::default());
         assert_relative_eq!(scaled.tangent1.length(), 0.0, epsilon = 1e-12);
         assert_relative_eq!(scaled.tangent2.length(), 1.0, epsilon = 1e-12);
 
@@ -1334,7 +1369,7 @@ mod tests {
         let mut rotated = make_cube();
         rotated.orientation = bullet_math::Quaternion::from_rotation_y(bullet_math::FRAC_PI_2 * 0.5);
         rotated.anisotropic_friction = Vector3::new(1.0, 1.0, 0.0);
-        let turned = ContactConstraint::prepare(0, 1, &cp, &ground, &rotated, u32::MAX, None, 60.0);
+        let turned = ContactConstraint::prepare(0, 1, &cp, &ground, &rotated, u32::MAX, None, 60.0, &SolverInfo::default());
         let expected_t1 = Vector3::new(0.5, 0.0, -0.5);
         let expected_t2 = Vector3::new(-0.5, 0.0, 0.5);
         assert!(
@@ -1347,6 +1382,261 @@ mod tests {
             "t2 = {}",
             turned.tangent2
         );
+    }
+
+    /// `erp2` is the contact row's Baumgarte factor: the row carries it in
+    /// `erp`, so a stiffer factor lands on the row one-to-one.
+    #[test]
+    fn solver_info_erp2_scales_the_contact_baumgarte_bias() {
+        let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
+        let sphere = RigidBody::new_dynamic(
+            CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.49, 0.0),
+            1.0,
+        );
+        let cp = bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.0, -0.01, 0.0),
+            Vector3::Y,
+            0.01,
+        );
+        let info = SolverInfo::default();
+        let row = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &info);
+        assert_relative_eq!(row.erp, 0.2, epsilon = 1e-12);
+
+        let stiff = SolverInfo { erp2: 0.4, ..SolverInfo::default() };
+        let row = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &stiff);
+        assert_relative_eq!(row.erp, 0.4, epsilon = 1e-12);
+    }
+
+    /// `linear_slop` is the dead zone before the Baumgarte term: inside the
+    /// slop the span is zero; with the slop removed (Bullet's constructor
+    /// value) the same depth feeds the full bias.
+    #[test]
+    fn solver_info_slop_sets_the_baumgarte_dead_zone() {
+        let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
+        let sphere = RigidBody::new_dynamic(
+            CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.497, 0.0),
+            1.0,
+        );
+        let cp = bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.0, -0.003, 0.0),
+            Vector3::Y,
+            0.003,
+        );
+        let info = SolverInfo::default();
+        let row = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &info);
+        assert_relative_eq!(row.baumgarte_span, 0.0, epsilon = 1e-12);
+
+        let upstream = SolverInfo { linear_slop: 0.0, ..SolverInfo::default() };
+        let row = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &upstream);
+        assert_relative_eq!(row.baumgarte_span, 0.003, epsilon = 1e-12);
+    }
+
+    /// `restitution_velocity_threshold`: at the engine default (1.0) a
+    /// 0.5 m/s approach bounces zero times; at the upstream default (0.2)
+    /// the same approach carries restitution.
+    #[test]
+    fn solver_info_restitution_threshold_gates_low_speed_bounces() {
+        let build = |info: &SolverInfo| {
+            let mut ground = RigidBody::new_static(
+                CollisionShape::plane(Vector3::Y, 0.0),
+                Vector3::ZERO,
+            );
+            ground.restitution = 1.0;
+            let mut sphere = RigidBody::new_dynamic(
+                CollisionShape::sphere(0.5),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            );
+            sphere.restitution = 1.0;
+            sphere.linear_velocity = Vector3::new(0.0, -0.5, 0.0);
+            let cp = bullet_collision::manifold::ContactPoint::new(Vector3::ZERO, Vector3::Y, 0.0);
+            let row = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, info);
+            (vec![ground, sphere], row)
+        };
+        // One iteration isolates the threshold from the PGS re-projection
+        // (later iterations re-read the approach velocity, which has already
+        // been corrected — the gate is a per-iteration bias input, like
+        // Bullet's assembly-time restitutionCurve).
+        let default = SolverInfo { num_iterations: 1, ..SolverInfo::default() };
+        let (mut bodies, mut row) = build(&default);
+        solve(&mut bodies, std::slice::from_mut(&mut row), &mut [], &mut [], 60.0, &default);
+        // The unilateral impulse absorbs the approach but adds no bounce.
+        assert_relative_eq!(bodies[1].linear_velocity.y, 0.0, epsilon = 1e-6);
+
+        let info = SolverInfo {
+            restitution_velocity_threshold: 0.2,
+            num_iterations: 1,
+            ..SolverInfo::default()
+        };
+        let (mut bodies, mut row) = build(&info);
+        solve(&mut bodies, std::slice::from_mut(&mut row), &mut [], &mut [], 60.0, &info);
+        assert_relative_eq!(bodies[1].linear_velocity.y, 0.5, epsilon = 1e-6);
+    }
+
+    /// `split_impulse = false` keeps the deep-contact position correction in
+    /// the velocity solve (Bullet's constructor default): the row loses the
+    /// split pass and regains the Baumgarte bias, which the velocity solve
+    /// turns into an outward impulse; the default keeps the velocities calm
+    /// and hands the correction to the split pass.
+    #[test]
+    fn solver_info_split_switch_routes_deep_penetration_correction() {
+        let off = SolverInfo { split_impulse: false, ..SolverInfo::default() };
+        let (mut bodies, mut constraints) = deep_contact_with(0.1, &off);
+        solve(&mut bodies, &mut constraints, &mut [], &mut [], 60.0, &off);
+        assert!(!constraints[0].split_active);
+        assert!(bodies[1].linear_velocity.y > 0.0);
+
+        let (mut bodies, mut constraints) = deep_contact(0.1);
+        solve(&mut bodies, &mut constraints, &mut [], &mut [], 60.0, &SolverInfo::default());
+        assert!(constraints[0].split_active);
+        assert_relative_eq!(bodies[1].linear_velocity.y, 0.0, epsilon = 1e-6);
+    }
+
+    /// `split_impulse_penetration_threshold` (Bullet's negative sign) picks
+    /// the depth beyond which the split pass takes over: a deeper threshold
+    /// keeps a 0.05-deep contact on the plain Baumgarte path.
+    #[test]
+    fn solver_info_split_threshold_picks_the_handover_depth() {
+        let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
+        let sphere = RigidBody::new_dynamic(
+            CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.45, 0.0),
+            1.0,
+        );
+        let cp = bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.0, -0.05, 0.0),
+            Vector3::Y,
+            0.05,
+        );
+        let info = SolverInfo::default();
+        let row = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &info);
+        assert!(row.split_active);
+
+        let deeper = SolverInfo {
+            split_impulse_penetration_threshold: -0.1,
+            ..SolverInfo::default()
+        };
+        let row = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &deeper);
+        assert!(!row.split_active);
+    }
+
+    /// `friction_erp` scales the friction-anchor servo target one-to-one:
+    /// tripling it triples the first-iteration pull toward the anchor.
+    #[test]
+    fn solver_info_friction_erp_scales_the_anchor_servo() {
+        let cp = bullet_collision::manifold::ContactPoint::new(Vector3::ZERO, Vector3::Y, 0.0);
+        let disp = Vector3::new(0.005, 0.0, 0.0);
+
+        let run = |friction_erp: Real| -> Real {
+            let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
+            let mut cube = RigidBody::new_dynamic(
+                CollisionShape::box_shape(Vector3::splat(0.5)),
+                Vector3::new(0.0, 0.5, 0.0),
+                1.0,
+            );
+            cube.linear_velocity = Vector3::new(0.0, -1.0, 0.0);
+            let info = SolverInfo { friction_erp, ..SolverInfo::default() };
+            let row = ContactConstraint::prepare(0, 1, &cp, &ground, &cube, u32::MAX, Some(disp), 60.0, &info);
+            let mut bodies = vec![ground, cube];
+            solve(&mut bodies, &mut [row], &mut [], &mut [], 60.0, &info);
+            bodies[1].linear_velocity.x
+        };
+        let default_pull = run(0.2);
+        let strong_pull = run(0.6);
+        assert!(default_pull > 0.0);
+        assert_relative_eq!(strong_pull, default_pull * 3.0, epsilon = 1e-4);
+    }
+
+    /// `global_cfm` opens the compliance channel: the row gains a non-zero
+    /// `normal_cfm` (soft solve path) and a softened effective mass; the
+    /// default 0 keeps both exactly at their rigid values.
+    #[test]
+    fn solver_info_global_cfm_softens_the_normal_row() {
+        let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
+        let sphere = RigidBody::new_dynamic(
+            CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.49, 0.0),
+            1.0,
+        );
+        let cp = bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.0, -0.01, 0.0),
+            Vector3::Y,
+            0.01,
+        );
+        let info = SolverInfo::default();
+        let row = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &info);
+        let rigid_mass = row.normal_mass;
+        assert_eq!(row.normal_cfm, 0.0);
+
+        let soft = SolverInfo { global_cfm: 0.1, ..SolverInfo::default() };
+        let row = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &soft);
+        assert!(row.normal_cfm > 0.0);
+        assert!(row.normal_mass < rigid_mass);
+    }
+
+    /// `sor` is the relaxation numerator of the contact and linear friction
+    /// rows: a 2x over-relaxation doubles the masses, one-to-one.
+    #[test]
+    fn solver_info_sor_relaxes_the_contact_and_friction_rows() {
+        let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);
+        let sphere = RigidBody::new_dynamic(
+            CollisionShape::sphere(0.5),
+            Vector3::new(0.0, 0.49, 0.0),
+            1.0,
+        );
+        let cp = bullet_collision::manifold::ContactPoint::new(
+            Vector3::new(0.0, -0.01, 0.0),
+            Vector3::Y,
+            0.01,
+        );
+        let info = SolverInfo::default();
+        let row = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &info);
+
+        let relaxed = SolverInfo { sor: 2.0, ..SolverInfo::default() };
+        let row2 = ContactConstraint::prepare(0, 1, &cp, &ground, &sphere, u32::MAX, None, 60.0, &relaxed);
+        assert_relative_eq!(row2.normal_mass, row.normal_mass * 2.0, epsilon = 1e-6);
+        assert_relative_eq!(row2.tangent1_mass, row.tangent1_mass * 2.0, epsilon = 1e-6);
+        assert_relative_eq!(row2.tangent2_mass, row.tangent2_mass * 2.0, epsilon = 1e-6);
+    }
+
+    /// `damping` scales the joint row's relative-velocity term (Bullet's
+    /// `info2.m_damping`): with 0.5 the point-to-point rows correct less of
+    /// the relative velocity in one iteration than with the default 1.0.
+    #[test]
+    fn solver_info_damping_scales_the_joint_row_velocity_term() {
+        let run = |damping: Real| -> (Real, Real) {
+            let mut a = RigidBody::new_dynamic(
+                CollisionShape::sphere(0.5),
+                Vector3::new(-0.5, 0.0, 0.0),
+                1.0,
+            );
+            let b = RigidBody::new_dynamic(
+                CollisionShape::sphere(0.5),
+                Vector3::new(0.5, 0.0, 0.0),
+                1.0,
+            );
+            a.linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+            let mut constraint = crate::constraint::Constraint::point2point(
+                crate::handles::BodyHandle::from_index(0),
+                crate::handles::BodyHandle::from_index(1),
+                Vector3::new(0.5, 0.0, 0.0),
+                Vector3::new(-0.5, 0.0, 0.0),
+            );
+            let mut bodies = vec![a, b];
+            let mut rows = Vec::new();
+            crate::constraint::prepare_rows(&mut constraint, &bodies, 60.0, 0.2, &mut rows);
+            let info = SolverInfo { num_iterations: 1, damping, ..SolverInfo::default() };
+            solve(&mut bodies, &mut [], &mut rows, &mut [], 60.0, &info);
+            (bodies[0].linear_velocity.x, bodies[1].linear_velocity.x)
+        };
+        let (va1, vb1) = run(1.0);
+        let (va05, vb05) = run(0.5);
+        // The rows pull the pair toward a common velocity: the default
+        // damping corrects more per iteration, so the residual relative
+        // velocity shrinks further.
+        assert!((vb1 - va1).abs() < (vb05 - va05).abs());
     }
 }
 

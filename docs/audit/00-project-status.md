@@ -8,24 +8,32 @@
 
 ## Current HEAD
 
-`67e46f3` — *docs: re-record the speed ledger after the soft-contact fix*
-(2026-09-10, pushed). The working tree carries the uncommitted on-demand
-third batch (additional damping, multi-part meshes, parity scenes
-`damped_stack`/`mesh_parts`) plus the 2026-09-11 cluster-joint
-drift-split fix (`terminate` parameter order — the split channel had been
-silently dead since the first port; `cluster_joints` probe now bit-identical
-in f64, regression test pinned).
+`6be3117` — *feat: port the internal edge utility (btInternalEdgeUtility)*
+(2026-09-18, pushed), followed by the **`SolverInfo` parameter surface**
+(2026-09-18, the first landed row of the 1.0 freeze review — breaking: the
+three pre-freeze setters `set_iterations` / `set_multibody_erp` /
+`set_num_non_contact_inner_iterations` are folded into `SolverInfo`):
+twelve live knobs with defaults bit-for-bit (parity ledger digits
+unchanged), parity variants `solver_erp2` / `solver_split_off` /
+`solver_restitution` proving the parameter flow against the real library
+(deviations §3), and a full speed + memory ledger re-record (in band; the
+wall-clock shift pinned to machine drift by a HEAD-baseline interleaved
+comparison).
 
 ## Current Phase
 
-**1.0 API freeze (pre-freeze review).** The functional core is complete and
+**1.0 API freeze review (in progress).** The functional core is complete and
 audited: the rigid-body pipeline, Featherstone multibodies with collision
 integration, the classic SoftBody system, and the consumer-facing API layer
 are all implemented and covered by the test/parity/probe suites. The
-subsystem audits (01–09) are complete, the minimal debug draw shipped, and
-the consumer-API backlog (`docs/api-priorities.md`) is fully dispatched —
-every row is Done or explicitly Won't-do/deferred. The remaining 1.0 item
-is the API freeze review (naming / docs / breaking surface).
+subsystem audits (01–09) are complete and the minimal debug draw shipped.
+Review progress: the internal edge utility shipped (`6be3117`), the
+`btContactSolverInfo` parameter surface shipped, and the
+`ConstraintTag` naming / `#[non_exhaustive]` ruling is recorded in the
+debug-draw design §26. Remaining review items: the Open rows in
+`docs/api-priorities.md` (the `stepSimulation` accumulator, the rigid
+gear constraint, 6DofSpring2, MultiSphere, …), each carrying a proposed
+verdict.
 
 ## Completed
 

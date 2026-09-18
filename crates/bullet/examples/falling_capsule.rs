@@ -10,7 +10,7 @@ use bullet::shapes::CollisionShape;
 fn main() {
     let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
-    world.set_iterations(20);
+    world.solver_info_mut().num_iterations = 20;
 
     // Infinite static ground plane at y = 0 (new plane shape).
     let ground = RigidBody::new_static(CollisionShape::plane(Vector3::Y, 0.0), Vector3::ZERO);

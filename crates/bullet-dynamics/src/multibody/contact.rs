@@ -22,16 +22,10 @@ use bullet_math::{Real, Vector3};
 use super::body::{MultiBody, MultiBodyScratch};
 use super::constraint::{plane_space1, SolverData};
 use crate::body::RigidBody;
-use crate::solver::sequential_impulse::{RESTITUTION_THRESHOLD, SLOP};
+use crate::solver::SolverInfo;
 
-/// ERP for multibody contact rows — Bullet's `m_erp2` (0.2), the same value
-/// the rigid contact solver's Baumgarte uses, so mixed islands correct
-/// penetration at one rate.
-const MB_CONTACT_ERP: Real = 0.2;
 /// Upper impulse bound of a normal row (Bullet's `m_upperLimit = 1e10`).
 const NORMAL_ROW_UPPER: Real = 1e10;
-/// CFM for contact rows (Bullet's `m_globalCfm = 0` scaled by `1/dt`).
-const CFM: Real = 0.0;
 
 /// One side of a multibody contact: a rigid body or a multibody base/link
 /// collider.
@@ -127,6 +121,7 @@ fn setup_contact_row(
     data: &mut SolverData,
     scratch: &mut MultiBodyScratch,
     inv_dt: Real,
+    info: &SolverInfo,
     normal_row: Option<usize>,
 ) -> MbContactRow {
     let pos = cp.position;
@@ -242,6 +237,10 @@ fn setup_contact_row(
     };
 
     // --- Effective mass: jacDiagABInv = sor / (Σ jac·unit + cfm) ---
+    // Bullet's `setupMultiBodyContactConstraint`: the relaxation numerator
+    // (`m_sor`, 1 by default) and the contact CFM (`m_globalCfm` scaled by
+    // `invTimeStep`, 0 by default) — both identities at their defaults.
+    let cfm = info.global_cfm * inv_dt;
     let mut denom = 0.0;
     if let SideData::MultiBody {
         jac_index,
@@ -286,7 +285,7 @@ fn setup_contact_row(
         denom += inv_mass + contact_normal.dot(vec);
     }
     let jac_diag_ab_inv = if denom > Real::EPSILON {
-        1.0 / (denom + CFM)
+        info.sor / (denom + cfm)
     } else {
         0.0 // singular row: disabled
     };
@@ -336,7 +335,7 @@ fn setup_contact_row(
         // No friction anchors: no positional term.
         velocity_error = -rel_vel;
     } else {
-        let restitution = if rel_vel < -RESTITUTION_THRESHOLD {
+        let restitution = if rel_vel < -info.restitution_velocity_threshold {
             -restitution * rel_vel
         } else {
             0.0
@@ -345,15 +344,16 @@ fn setup_contact_row(
         // Bullet's `distance = getDistance() + linearSlop` with its default
         // slop of 0: only genuinely separated points soften
         // (`velocityError -= distance / dt`), and any penetration beyond
-        // our engine-wide slop drives the positional term. The slop zone
+        // the configured slop drives the positional term. The slop zone
         // in between stays a dead zone (documented deviation) — matching
-        // the rigid contact rows in `sequential_impulse.rs`.
+        // the rigid contact rows in `sequential_impulse.rs`. The ERP is
+        // Bullet's `m_erp2`, the same field the rigid rows read.
         if cp.penetration < 0.0 {
             velocity_error += cp.penetration * inv_dt;
         } else {
-            let distance = SLOP - cp.penetration;
+            let distance = info.linear_slop - cp.penetration;
             if distance < 0.0 {
-                positional_error = -distance * MB_CONTACT_ERP * inv_dt;
+                positional_error = -distance * info.erp2 * inv_dt;
             }
         }
     }
@@ -397,6 +397,9 @@ fn side_com(side: ContactSide, multibodies: &[MultiBody]) -> Vector3 {
 /// Convert every contact point of a pending manifold into three rows
 /// (normal + two tangents, Bullet's `convertMultiBodyContact` with the
 /// two-friction-direction engine convention).
+/// (the argument count mirrors `setupMultiBodyContact`'s parameter pack;
+/// clippy's 7-arg lint is acknowledged at the boundary)
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn convert_contact(
     pending: &PendingContact,
     bodies: &[RigidBody],
@@ -404,6 +407,7 @@ pub(crate) fn convert_contact(
     data: &mut SolverData,
     scratch: &mut MultiBodyScratch,
     inv_dt: Real,
+    info: &SolverInfo,
     out: &mut Vec<MbContactRow>,
 ) {
     for cp in &pending.manifold.points {
@@ -421,6 +425,7 @@ pub(crate) fn convert_contact(
             data,
             scratch,
             inv_dt,
+            info,
             None,
         ));
         let (t1, t2) = plane_space1(cp.normal);
@@ -438,6 +443,7 @@ pub(crate) fn convert_contact(
                 data,
                 scratch,
                 inv_dt,
+                info,
                 Some(normal_index),
             ));
         }
@@ -447,11 +453,18 @@ pub(crate) fn convert_contact(
 /// Solve one contact row (Bullet's `resolveSingleConstraintRowGeneric` with
 /// mixed sides): compute the impulse needed to meet `rhs` given both sides'
 /// current velocities, clamp it to the row window, and apply it.
-fn solve_row(row: &mut MbContactRow, data: &mut SolverData, bodies: &mut [RigidBody]) {
+fn solve_row(row: &mut MbContactRow, data: &mut SolverData, bodies: &mut [RigidBody], cfm: Real) {
     if row.jac_diag_ab_inv == 0.0 {
         return; // disabled singular row
     }
-    let mut delta_impulse = row.rhs - row.applied_impulse * CFM;
+    // The compliance term is branch-isolated: the default `globalCfm` of 0
+    // keeps the original instruction sequence (a live `x * 0.0` multiply
+    // would sit on the multibody hot path).
+    let mut delta_impulse = if cfm != 0.0 {
+        row.rhs - row.applied_impulse * cfm
+    } else {
+        row.rhs
+    };
 
     // Velocity of each side along the row, given everything applied so far.
     // Both sides contribute only their **impulse delta** since assembly (the
@@ -563,10 +576,11 @@ pub(crate) fn solve_contact_rows(
     data: &mut SolverData,
     bodies: &mut [RigidBody],
     scratch: &mut Vec<Real>,
+    cfm: Real,
 ) {
     for row in rows.iter_mut() {
         if row.normal_row.is_none() {
-            solve_row(row, data, bodies);
+            solve_row(row, data, bodies, cfm);
         }
     }
     // Snapshot the normal impulses for the friction bounds (a friction row
@@ -582,7 +596,7 @@ pub(crate) fn solve_contact_rows(
                 let bound = row.friction * total;
                 row.lower_limit = -bound;
                 row.upper_limit = bound;
-                solve_row(row, data, bodies);
+                solve_row(row, data, bodies, cfm);
             } else {
                 row.applied_impulse = 0.0;
             }

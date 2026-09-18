@@ -45,7 +45,7 @@ impl PhysicsWorld {
                 mb_data: data,
                 mb_scratch: scratch,
                 mb_rows: rows,
-                mb_erp: erp,
+                solver_info,
                 ..
             } = self;
             for (i, c) in constraints.iter_mut().enumerate() {
@@ -56,14 +56,14 @@ impl PhysicsWorld {
                 if !multibodies[c.body_a().index()].is_awake() && !side_b_awake {
                     continue;
                 }
-                c.create_constraint_rows(i, rows, data, scratch, multibodies, bodies, dt, *erp);
+                c.create_constraint_rows(i, rows, data, scratch, multibodies, bodies, dt, solver_info.erp);
             }
         }
 
         // PGS iterations over the non-contact rows, alternating direction by
         // iteration parity (Bullet's `solveSingleIteration`).
-        let outer = self.iterations as usize;
-        let inner = self.num_non_contact_inner_iterations as usize;
+        let outer = self.solver_info.num_iterations as usize;
+        let inner = self.solver_info.num_non_contact_inner_iterations as usize;
         for iteration in 0..outer {
             for _ in 0..inner {
                 self.mb_rows_sweep(iteration);
@@ -117,7 +117,7 @@ impl PhysicsWorld {
                 mb_scratch: scratch,
                 mb_constraints,
                 mb_rows,
-                mb_erp: erp,
+                solver_info,
                 ..
             } = self;
             for p in mb_pending_contacts.iter() {
@@ -135,6 +135,7 @@ impl PhysicsWorld {
                     data,
                     scratch,
                     inv_dt,
+                    solver_info,
                     mb_contact_rows,
                 );
             }
@@ -149,15 +150,15 @@ impl PhysicsWorld {
                 if !multibodies[c.body_a().index()].is_awake() && !side_b_awake {
                     continue;
                 }
-                c.create_constraint_rows(i, mb_rows, data, scratch, multibodies, bodies, dt, *erp);
+                c.create_constraint_rows(i, mb_rows, data, scratch, multibodies, bodies, dt, solver_info.erp);
             }
         }
 
         // One PGS iteration: rigid sweep, multibody contact sweep (normals,
         // then bounded frictions), then the multibody constraint rows.
         sequential_impulse::warm_start(&mut self.bodies, constraints);
-        let outer = self.iterations as usize;
-        let inner = self.num_non_contact_inner_iterations as usize;
+        let outer = self.solver_info.num_iterations as usize;
+        let inner = self.solver_info.num_non_contact_inner_iterations as usize;
         for iteration in 0..outer {
             sequential_impulse::velocity_iteration(
                 &mut self.bodies,
@@ -165,12 +166,14 @@ impl PhysicsWorld {
                 joint_rows,
                 &mut self.rolling_rows,
                 inv_dt,
+                &self.solver_info,
             );
             contact::solve_contact_rows(
                 &mut self.mb_contact_rows,
                 &mut self.mb_data,
                 &mut self.bodies,
                 &mut self.mb_row_scratch,
+                self.solver_info.global_cfm * inv_dt,
             );
             for _ in 0..inner {
                 self.mb_rows_sweep(iteration);
@@ -179,8 +182,8 @@ impl PhysicsWorld {
         sequential_impulse::split_impulse_pass(
             &mut self.bodies,
             constraints,
-            self.iterations,
             inv_dt,
+            &self.solver_info,
         );
 
         // Writebacks: the multibody contact impulses first, then the

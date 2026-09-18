@@ -9,7 +9,7 @@ use bullet::shapes::CollisionShape;
 fn main() {
     let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
-    world.set_iterations(20);
+    world.solver_info_mut().num_iterations = 20;
 
     // A 10x10 triangle mesh ground spanning x, z in [-5, 5] at y = 0, with a
     // gentle ridge along the diagonal (peak 0.5 at the center).

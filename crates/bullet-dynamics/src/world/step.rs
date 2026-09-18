@@ -521,11 +521,14 @@ impl PhysicsWorld {
                     b.orientation,
                     &mut self.refresh_out,
                 );
-                let deep = self.refresh_out.iter().any(|cp| cp.penetration > SLOP);
+                let deep = self
+                    .refresh_out
+                    .iter()
+                    .any(|cp| cp.penetration > self.solver_info.linear_slop);
                 if !fast || !deep {
                     if !no_response {
                         for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
-                            cp.normal_impulse *= WARM_STARTING_FACTOR;
+                            cp.normal_impulse *= self.solver_info.warmstarting_factor;
                             // The refreshed points line up with the cache
                             // entries (`retain_mut` keeps the order), so
                             // entry k yields the A-side anchor of contact k.
@@ -535,6 +538,7 @@ impl PhysicsWorld {
                             });
                             let mut row = ContactConstraint::prepare(
                                 i, j, &cp, a, b, k as u32, anchor_disp, inv_dt,
+                                &self.solver_info,
                             );
                             row.attach_rolling(a, b, &mut self.rolling_rows);
                             self.contact_rows.push(row);
@@ -594,7 +598,7 @@ impl PhysicsWorld {
                 cache.refresh(pa, a.orientation, pb, b.orientation, &mut self.refresh_out);
                 if !no_response {
                     for (k, mut cp) in self.refresh_out.iter().copied().enumerate() {
-                        cp.normal_impulse *= WARM_STARTING_FACTOR;
+                        cp.normal_impulse *= self.solver_info.warmstarting_factor;
                         // Same cache alignment as the refresh path: entry k
                         // is the A-side anchor of contact k.
                         let anchor_disp = anchored.then(|| {
@@ -603,6 +607,7 @@ impl PhysicsWorld {
                         });
                         let mut row = ContactConstraint::prepare(
                             i, j, &cp, a, b, k as u32, anchor_disp, inv_dt,
+                            &self.solver_info,
                         );
                         row.attach_rolling(a, b, &mut self.rolling_rows);
                         self.contact_rows.push(row);
@@ -701,7 +706,13 @@ impl PhysicsWorld {
             {
                 continue;
             }
-            constraint::prepare_rows(c, &self.bodies, inv_dt, BAUMGARTE, &mut self.joint_rows);
+            constraint::prepare_rows(
+                c,
+                &self.bodies,
+                inv_dt,
+                self.solver_info.erp,
+                &mut self.joint_rows,
+            );
         }
         clk.mark(&mut self.step_timings, StepStage::Narrowphase);
 
@@ -720,8 +731,8 @@ impl PhysicsWorld {
                 &mut contact_rows,
                 &mut joint_rows,
                 &mut self.rolling_rows,
-                self.iterations,
                 inv_dt,
+                &self.solver_info,
             );
         } else {
             self.solve_mixed(&mut contact_rows, &mut joint_rows, inv_dt);
@@ -931,7 +942,7 @@ impl PhysicsWorld {
                 && !body.is_static_or_kinematic()
                 && (push_ang.x != 0.0 || push_ang.y != 0.0 || push_ang.z != 0.0)
             {
-                let w = push_ang * SPLIT_TURN_ERP;
+                let w = push_ang * self.solver_info.split_impulse_turn_erp;
                 let dq = Quaternion::from_xyzw(
                     w.x * dt * 0.5,
                     w.y * dt * 0.5,

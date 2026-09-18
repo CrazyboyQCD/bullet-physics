@@ -32,7 +32,8 @@ pub mod prelude {
         create_rope, BodyHandle, CollisionEvent, CollisionFlags, CollisionObject, ContactForceEvent,
         ContactPointEvent, ConstraintTag, DebugDrawFlags, DebugPrim, KinematicCharacterController,
         MotionState, MultiBody, MultiBodyConstraint, MultiBodyHandle, PhysicsWorld, RaycastVehicle,
-        RigidBody, SoftBody, SoftBodyHandle, StepStage, StepTimings, VehicleTuning, STEP_STAGES,
+        RigidBody, SoftBody, SoftBodyHandle, SolverInfo, StepStage, StepTimings, VehicleTuning,
+        STEP_STAGES,
     };
     pub use bullet_dynamics::body::filter_groups;
     pub use bullet_math::{Quaternion, Real, Vector3};

@@ -24,7 +24,8 @@ use crate::softbody::solver::MbSolveContext;
 use crate::softbody::config::SoftCollision;
 use crate::softbody::{AngularJointSpecs, LinearJointSpecs, Side, SoftBody, SoftJoint};
 use bullet_math::{Aabb, Matrix3, Quaternion, Real, Vector3};
-use crate::solver::sequential_impulse::{self, BAUMGARTE, ContactConstraint, ConstraintRow, RollingFriction, SLOP, SPLIT_TURN_ERP};
+use crate::solver::sequential_impulse::{self, ContactConstraint, ConstraintRow, RollingFriction};
+use crate::solver::SolverInfo;
 
 /// One entry of the persistent-manifold cache: the owning broad-phase pair
 /// plus the manifold itself. The cache is an adjacency structure — one
@@ -47,10 +48,6 @@ struct ManifoldCacheEntry {
 /// broadphase while their margin-band contacts can still form.
 const BROADPHASE_AABB_MARGIN: Real = CONTACT_BREAKING_THRESHOLD;
 
-/// Scale applied to a cached impulse before the warm-start pass (Bullet's
-/// `m_warmstartingFactor`): old impulses are faded slightly so the solver can
-/// correct drift instead of blindly trusting the previous step.
-const WARM_STARTING_FACTOR: Real = 0.85;
 /// Linear/angular speed above which a pair re-runs detection instead of
 /// refreshing its cached manifold. The refresh re-projects cached anchors,
 /// normals and penetrations — while the bodies move, those go stale at a rate
@@ -231,7 +228,9 @@ pub struct PhysicsWorld {
     bodies: Vec<RigidBody>,
     broadphase: BroadPhaseBackend,
     gravity: Vector3,
-    iterations: u32,
+    /// Global solver parameters (Bullet's `btContactSolverInfo`), read by
+    /// the step at row assembly and solve time; see [`SolverInfo`].
+    solver_info: SolverInfo,
     /// Contact manifolds cached across steps, keyed by body pair in
     /// broad-phase proxy order (Bullet's persistent manifolds on the pair
     /// cache): the points are refreshed against the current poses and only
@@ -317,11 +316,6 @@ pub struct PhysicsWorld {
     multibodies: Vec<MultiBody>,
     /// Multibody constraints (Bullet's `btMultiBodyConstraint` list).
     mb_constraints: Vec<MultiBodyConstraint>,
-    /// Inner iterations for the multibody non-contact rows per outer
-    /// iteration (Bullet's `m_numNonContactInnerIterations`, default 1).
-    num_non_contact_inner_iterations: u32,
-    /// Multibody constraint error-reduction factor (Bullet's `m_erp`, 0.2).
-    mb_erp: Real,
     /// Multibody solver scratch shared across steps.
     mb_scratch: MultiBodyScratch,
     /// Multibody solver pool (jacobians + velocity deltas).
@@ -390,7 +384,7 @@ impl PhysicsWorld {
             bodies: Vec::new(),
             broadphase,
             gravity: Vector3::new(0.0, -9.81, 0.0),
-            iterations: 10,
+            solver_info: SolverInfo::default(),
             manifold_cache: Vec::new(),
             contact_rows: Vec::new(),
             rolling_rows: Vec::new(),
@@ -416,8 +410,6 @@ impl PhysicsWorld {
             proxy_owners: Vec::new(),
             multibodies: Vec::new(),
             mb_constraints: Vec::new(),
-            num_non_contact_inner_iterations: 1,
-            mb_erp: 0.2,
             mb_scratch: MultiBodyScratch::default(),
             mb_data: SolverData::default(),
             mb_rows: Vec::new(),
@@ -464,11 +456,6 @@ impl PhysicsWorld {
 
     pub fn gravity(&self) -> Vector3 {
         self.gravity
-    }
-
-    /// Number of solver (PGS) iterations per step.
-    pub fn set_iterations(&mut self, iterations: u32) {
-        self.iterations = iterations;
     }
 
     /// Add a body and return its handle.
@@ -895,16 +882,22 @@ impl PhysicsWorld {
         }
     }
 
-    /// Inner iterations for the multibody non-contact (joint) rows per outer
-    /// iteration (Bullet's `m_numNonContactInnerIterations`, default 1).
-    pub fn set_num_non_contact_inner_iterations(&mut self, n: u32) {
-        self.num_non_contact_inner_iterations = n;
+    /// The global solver parameters (Bullet's `btContactSolverInfo`).
+    ///
+    /// Covers the iteration counts and multibody knobs the three pre-freeze
+    /// setters (`set_iterations` / `set_multibody_erp` /
+    /// `set_num_non_contact_inner_iterations`) exposed; those were removed in
+    /// the 1.0 API freeze (breaking) — use `solver_info_mut()` instead.
+    pub fn solver_info(&self) -> &SolverInfo {
+        &self.solver_info
     }
 
-    /// Multibody constraint error-reduction factor (Bullet's `m_erp`,
-    /// default 0.2).
-    pub fn set_multibody_erp(&mut self, erp: Real) {
-        self.mb_erp = erp;
+    /// Mutable access to the global solver parameters (Bullet's
+    /// `getSolverInfo()`), e.g. `world.solver_info_mut().erp2 = 0.15`.
+    /// Values are read at each `step_simulation`, so changes apply from the
+    /// next step on.
+    pub fn solver_info_mut(&mut self) -> &mut SolverInfo {
+        &mut self.solver_info
     }
 
     /// Add a finalized multibody (Bullet's `addMultiBody`) and return its

@@ -119,7 +119,7 @@ fn build_world(spec: &PerfSceneSpec) -> (PhysicsWorld, Vec<(u64, RigidBody)>) {
         spec.gravity[1] as Real,
         spec.gravity[2] as Real,
     ));
-    world.set_iterations(spec.iterations);
+    world.solver_info_mut().num_iterations = spec.iterations;
 
     // Staggered-rain scenes: bodies with spawn_frame > 0 are built here but
     // registered by the step loop when their frame comes due (the table is

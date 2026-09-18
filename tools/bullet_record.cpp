@@ -216,6 +216,23 @@ int main(int argc, char** argv) {
   btContactSolverInfo& info = world.getSolverInfo();
   info.m_solverMode &= ~SOLVER_RANDMIZE_ORDER;
   info.m_numIterations = spec->iterations;
+  // Scene solver-info overrides (btContactSolverInfo knobs; the generated
+  // table fills every field, so both engines read the same 12 values).
+  if (spec->solver_info) {
+    const SolverInfoSpec* si = spec->solver_info;
+    info.m_erp = si->erp;
+    info.m_erp2 = si->erp2;
+    info.m_linearSlop = si->linear_slop;
+    info.m_restitutionVelocityThreshold = si->restitution_velocity_threshold;
+    info.m_splitImpulse = si->split_impulse != 0;
+    info.m_splitImpulsePenetrationThreshold = si->split_impulse_penetration_threshold;
+    info.m_splitImpulseTurnErp = si->split_impulse_turn_erp;
+    info.m_warmstartingFactor = si->warmstarting_factor;
+    info.m_frictionERP = si->friction_erp;
+    info.m_globalCfm = si->global_cfm;
+    info.m_sor = si->sor;
+    info.m_damping = si->damping;
+  }
   // The internal-edge utility hook: inert unless a body carries
   // CF_CUSTOM_MATERIAL_CALLBACK (only the internal_edge scene's mesh does).
   gContactAddedCallback = internal_edge_contact_callback;

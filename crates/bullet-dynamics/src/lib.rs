@@ -35,6 +35,7 @@ pub use softbody::{
     Face, Impulse, ImplicitFn, JointSpecs, LinearJointSpecs, LJoint, Material, MsvcRand, Pose,
     SContact, Side, SoftBody, SoftCollision, SoftJoint, Tetra, ROPE_FIX_END, ROPE_FIX_START,
 };
+pub use solver::SolverInfo;
 pub use vehicle::{RaycastVehicle, VehicleTuning, WheelInfo};
 pub use timing::{StepStage, StepTimings, STEP_STAGES};
 pub use world::{

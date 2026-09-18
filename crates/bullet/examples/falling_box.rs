@@ -8,7 +8,7 @@ use bullet::shapes::CollisionShape;
 fn main() {
     let mut world = PhysicsWorld::new();
     world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
-    world.set_iterations(20);
+    world.solver_info_mut().num_iterations = 20;
 
     // Static ground plane (a wide, thin box).
     let ground = RigidBody::new_static(
