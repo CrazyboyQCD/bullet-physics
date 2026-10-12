@@ -34,6 +34,7 @@ use crate::solver::sequential_impulse::{ConstraintRow, RowLimits};
 mod conetwist;
 mod fixed;
 mod generic6dof;
+mod generic6dof_spring2;
 mod hinge;
 mod p2p;
 mod shared;
@@ -44,6 +45,9 @@ mod tests;
 pub use conetwist::{ConeTwistConstraint, ConeTwistMotor};
 pub use fixed::FixedConstraint;
 pub use generic6dof::{Generic6DofConstraint, RotationalLimitMotor, TranslationalLimitMotor};
+pub use generic6dof_spring2::{
+    Generic6DofSpring2Constraint, RotateOrder, RotationalLimitMotor2, TranslationalLimitMotor2,
+};
 pub use hinge::{HingeConstraint, HingeMotor};
 pub use p2p::Point2PointConstraint;
 pub use slider::{SliderConstraint, SliderMotor};
@@ -84,6 +88,11 @@ pub enum ConstraintKind {
     /// axes with independent limits and motors (Bullet's
     /// `btGeneric6DofConstraint`).
     Generic6Dof(Generic6DofConstraint),
+    /// Generic six-degree-of-freedom joint with per-axis springs, servo
+    /// motors, elastic limits and configurable Euler order (Bullet's
+    /// `btGeneric6DofSpring2Constraint`, the 2014 rewrite). The joint type
+    /// PMX/MMD-style model physics is built on.
+    Generic6DofSpring2(Generic6DofSpring2Constraint),
 }
 
 impl ConstraintKind {
@@ -96,6 +105,7 @@ impl ConstraintKind {
             ConstraintKind::ConeTwist(_) => "cone-twist",
             ConstraintKind::Slider(_) => "slider",
             ConstraintKind::Generic6Dof(_) => "generic 6DOF",
+            ConstraintKind::Generic6DofSpring2(_) => "generic 6DOF spring 2",
         }
     }
 
@@ -220,6 +230,30 @@ impl ConstraintKind {
             ConstraintKind::Generic6Dof(dof) => dof,
             other => panic!(
                 "not a generic 6DOF constraint (found {})",
+                other.kind_name()
+            ),
+        }
+    }
+
+    /// Access to the [`Generic6DofSpring2Constraint`] parameters (panics on
+    /// any other kind).
+    pub fn generic_6dof_spring2(&self) -> &Generic6DofSpring2Constraint {
+        match self {
+            ConstraintKind::Generic6DofSpring2(dof) => dof,
+            other => panic!(
+                "not a generic 6DOF spring 2 constraint (found {})",
+                other.kind_name()
+            ),
+        }
+    }
+
+    /// Mutable access to the [`Generic6DofSpring2Constraint`] parameters
+    /// (panics on any other kind).
+    pub fn generic_6dof_spring2_mut(&mut self) -> &mut Generic6DofSpring2Constraint {
+        match self {
+            ConstraintKind::Generic6DofSpring2(dof) => dof,
+            other => panic!(
+                "not a generic 6DOF spring 2 constraint (found {})",
                 other.kind_name()
             ),
         }
@@ -392,6 +426,31 @@ impl Constraint {
         }
     }
 
+    /// A generic six-degree-of-freedom joint with per-axis springs, servo
+    /// motors, elastic limits and a configurable Euler rotation order
+    /// (Bullet's `btGeneric6DofSpring2Constraint`). Bullet's defaults apply —
+    /// linear axes locked, angular axes free — so a fresh joint behaves like
+    /// a ball joint; set limits/springs to taste.
+    pub fn generic_6dof_spring2(
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        frame_a: JointFrame,
+        frame_b: JointFrame,
+        rotate_order: RotateOrder,
+    ) -> Self {
+        Self {
+            kind: ConstraintKind::Generic6DofSpring2(Generic6DofSpring2Constraint::new(
+                frame_a,
+                frame_b,
+                rotate_order,
+            )),
+            body_a,
+            body_b,
+            enabled: true,
+            disable_collisions: true,
+        }
+    }
+
     pub fn kind(&self) -> &ConstraintKind {
         &self.kind
     }
@@ -438,6 +497,12 @@ impl Constraint {
     /// motors).
     pub fn generic_6dof_mut(&mut self) -> &mut Generic6DofConstraint {
         self.kind_mut().generic_6dof_mut()
+    }
+
+    /// Mutable access to the [`Generic6DofSpring2Constraint`] parameters
+    /// (limits, motors, springs, servos).
+    pub fn generic_6dof_spring2_mut(&mut self) -> &mut Generic6DofSpring2Constraint {
+        self.kind_mut().generic_6dof_spring2_mut()
     }
 
     pub fn enabled(&self) -> bool {
@@ -564,13 +629,16 @@ impl AngularLimit {
 /// Flatten a [`Constraint`] into its solver rows for this step (Bullet's
 /// `getInfo1` + `getInfo2` + `convertJoint`). Rows are appended to `out`.
 /// `inv_dt` is `1 / dt` (Bullet's `info2.fps`); `erp` is the global ERP
-/// (Bullet's `infoGlobal.m_erp`, 0.2). Joints with per-step state (the hinge
-/// angle and limit test) update it here, before the solve.
+/// (Bullet's `infoGlobal.m_erp`, 0.2); `global_cfm` is the global compliance
+/// (Bullet's `infoGlobal.m_globalCfm`, 0 — the default row cfm for joint
+/// rows; only the spring-2 kind consumes it today). Joints with per-step
+/// state (the hinge angle and limit test) update it here, before the solve.
 pub fn prepare_rows(
     constraint: &mut Constraint,
     bodies: &[RigidBody],
     inv_dt: Real,
     erp: Real,
+    global_cfm: Real,
     out: &mut Vec<ConstraintRow>,
 ) {
     if !constraint.enabled {
@@ -633,6 +701,9 @@ pub fn prepare_rows(
         }
         ConstraintKind::Generic6Dof(dof) => {
             dof.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, out);
+        }
+        ConstraintKind::Generic6DofSpring2(dof) => {
+            dof.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, global_cfm, out);
         }
     }
 }

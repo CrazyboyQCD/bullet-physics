@@ -927,6 +927,7 @@ impl PhysicsWorld {
                 &self.bodies,
                 inv_dt,
                 self.solver_info.erp,
+                self.solver_info.global_cfm,
                 &mut self.joint_rows,
             );
         }

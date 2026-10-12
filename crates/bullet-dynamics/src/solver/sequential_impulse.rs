@@ -243,6 +243,12 @@ pub struct ConstraintRow {
     /// Velocity target for `J·v` (Bullet's `m_constraintError`, built into
     /// `m_rhs` at `convertJoint`).
     bias: Real,
+    /// Soft-constraint compliance (Bullet's `info->cfm[srow]`, defaulting to
+    /// `m_globalCfm`). Joint rows consume it **raw** — unlike contacts, it is
+    /// not pre-scaled into the effective mass: the solve subtracts
+    /// `cfm · applied` from the impulse delta. Zero (the default) keeps the
+    /// solve bit-for-bit unchanged.
+    cfm: Real,
     limits: RowLimits,
     impulse: Real,
 }
@@ -287,11 +293,37 @@ impl ConstraintRow {
             inv_inertia_b,
             mass,
             bias,
+            cfm: 0.0,
             limits,
             // Joints are not warm-started (Bullet resets
             // `internalSetAppliedImpulse(0)` in `convertJoints`).
             impulse: 0.0,
         }
+    }
+
+    /// Same as [`ConstraintRow::prepare`] with a soft-constraint compliance
+    /// term (Bullet's `info->cfm[srow]`; consumed raw by the joint solve,
+    /// see the `cfm` field). Used by the spring-2 rows with per-axis
+    /// `stopCFM`/`motorCFM` overrides.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_with_cfm(
+        body_a: usize,
+        body_b: usize,
+        lin_a: Vector3,
+        ang_a: Vector3,
+        lin_b: Vector3,
+        ang_b: Vector3,
+        a: &RigidBody,
+        b: &RigidBody,
+        bias: Real,
+        limits: RowLimits,
+        cfm: Real,
+    ) -> Self {
+        let mut row = Self::prepare(
+            body_a, body_b, lin_a, ang_a, lin_b, ang_b, a, b, bias, limits,
+        );
+        row.cfm = cfm;
+        row
     }
 }
 
@@ -910,12 +942,17 @@ fn solve_joint_row(bodies: &mut [RigidBody], c: &mut ConstraintRow, damping: Rea
 
     // The damping multiply is branch-isolated so the default path keeps its
     // exact instruction sequence (`x * 1.0` would be a live multiply).
-    let lambda = if damping != 1.0 {
+    let old = c.impulse;
+    let base = if damping != 1.0 {
         c.mass * (c.bias - row_vel * damping)
     } else {
         c.mass * (c.bias - row_vel)
     };
-    let old = c.impulse;
+    // Bullet's joint rows consume `m_cfm` raw (not folded into the effective
+    // mass): `delta = rhs − applied·cfm − Δ(J·v)·invK`. Branch-isolated like
+    // the damping term (the default `cfm == 0` keeps the instruction
+    // sequence).
+    let lambda = if c.cfm != 0.0 { base - c.cfm * old } else { base };
     let new = match c.limits {
         RowLimits::Unbounded => old + lambda,
         RowLimits::Bilateral(clamp) => (old + lambda).clamp(-clamp, clamp),
@@ -1626,7 +1663,7 @@ solve(&mut bodies2, &mut constraints2, &mut [], &mut [], 60.0, &info);
             );
             let mut bodies = vec![a, b];
             let mut rows = Vec::new();
-            crate::constraint::prepare_rows(&mut constraint, &bodies, 60.0, 0.2, &mut rows);
+            crate::constraint::prepare_rows(&mut constraint, &bodies, 60.0, 0.2, 0.0, &mut rows);
             let info = SolverInfo { num_iterations: 1, damping, ..SolverInfo::default() };
             solve(&mut bodies, &mut [], &mut rows, &mut [], 60.0, &info);
             (bodies[0].linear_velocity.x, bodies[1].linear_velocity.x)
