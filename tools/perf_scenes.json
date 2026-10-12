@@ -101,6 +101,29 @@
         "collider_radius": 0.1
       }
     },
+    "spring2_chains": {
+      "comment": "Spring-2 joint stress (the PMX/MMD joint type): a 15x10 grid (150) of hanging rigid chains - one static anchor box plus three 1 kg boxes each - joined by btGeneric6DofSpring2Constraint / Generic6DofSpring2 with the three angular springs enabled (stiffness 5, damping 0.3, auto-clamped) and the linear axes locked (Bullet's defaults). Gravity sags the chains, so the springs carry a sustained nonzero load every frame; DISABLE_DEACTIVATION keeps the islands awake (a settled spring chain would sleep and stop producing rows). 450 joints x ~6 rows/frame, no inter-chain contact.",
+      "dt": [1, 60],
+      "frames": 300,
+      "warmup": 5,
+      "iterations": 10,
+      "gravity": [0, -9.81, 0],
+      "broadphase_aabb": [[-64, -8, -64], [64, 8, 64]],
+      "bodies": [],
+      "spring2": {
+        "kind": "hanging_chains",
+        "count": 150,
+        "cols": 15,
+        "links": 3,
+        "spacing": 4.0,
+        "base_height": 4.0,
+        "pitch": 0.55,
+        "half": 0.2,
+        "mass": 1.0,
+        "stiffness": 5.0,
+        "damping": 0.3
+      }
+    },
     "dbvt_rain_2000": {
       "comment": "Large-scale dynamic scene for the Dbvt broad phase: 2000 mixed convex bodies (20x20 grid x 5 layers) raining onto a wavy 40x40 height mesh. Both sides run their dynamic-BVH broad phase (Bullet's default btDbvtBroadphase vs this crate's DbvtBroadPhase via BroadPhaseBackend::Dbvt) - the sweep scenes above compare the other algorithm.",
       "dt": [1, 60],

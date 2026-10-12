@@ -260,6 +260,13 @@ def gen_c(scenes):
         "  btScalar initial_angle, collider_radius;  // radians / sphere radius",
         "};",
         "",
+        "struct PerfSpring2Spec {  // grid of hanging rigid chains with spring-2 joints (0 = no spring scene)",
+        "  int count, cols, links;        // links = dynamic boxes per chain (joints per chain = links)",
+        "  btScalar spacing, base_height; // chain grid layout (chain along +X from the anchor)",
+        "  btScalar pitch, half, mass;    // body-center pitch along the chain / box half extent / dynamic mass",
+        "  btScalar stiffness, damping;   // the three angular springs per joint (auto-clamped)",
+        "};",
+        "",
         "struct PerfSoftSpec {  // grid of cloth patches, expanded by CreatePatch/create_patch in the runners",
         "  int count, cols, resx, resy;   // resx x resy nodes per patch (res+2 actually built by the helpers)",
         "  int fixeds, piterations;       // corner pins bitmask (1+2+4+8 = all four)",
@@ -280,6 +287,7 @@ def gen_c(scenes):
         "  int num_bodies;",
         "  const PerfBodySpec* bodies;",
         "  PerfChainSpec chains;",
+        "  PerfSpring2Spec spring2;",
         "  PerfSoftSpec softs;",
         "};",
         "",
@@ -331,6 +339,15 @@ def gen_c(scenes):
                       f"btScalar({fmt(angle)}), btScalar({fmt(ch['collider_radius'])}) }}")
         else:
             chains = "{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }"
+        sp = sc.get("spring2")
+        if sp:
+            spring2 = (f"{{ {sp['count']}, {sp['cols']}, {sp['links']}, "
+                       f"btScalar({fmt(sp['spacing'])}), btScalar({fmt(sp['base_height'])}), "
+                       f"btScalar({fmt(sp['pitch'])}), btScalar({fmt(sp['half'])}), "
+                       f"btScalar({fmt(sp['mass'])}), btScalar({fmt(sp['stiffness'])}), "
+                       f"btScalar({fmt(sp['damping'])}) }}")
+        else:
+            spring2 = "{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }"
         so = sc.get("softs")
         if so:
             w = ", ".join(fmt(x) for x in so["wind"])
@@ -350,7 +367,7 @@ def gen_c(scenes):
                      f"{sc['frames']}, {sc['warmup']}, {sc['iterations']}, {{{g}}}, "
                      f"{{{lo}}}, {{{hi}}}, {1 if sc['broadphase'] == 'dbvt' else 0}, "
                      f"{1 if sc['script'] == 'arena' else 0}, {len(bodies)}, k{name}_bodies, "
-                     f"{chains}, {softs}}};")
+                     f"{chains}, {spring2}, {softs}}};")
         lines.append("")
     lines.append("static const PerfSceneSpec* kPerfScenes[] = {")
     for name in scenes:
@@ -401,6 +418,19 @@ def gen_rs(scenes):
         "    pub collider_radius: f32,",
         "}",
         "",
+        "pub struct PerfSpring2Spec {",
+        "    pub count: usize,",
+        "    pub cols: usize,",
+        "    pub links: usize,",
+        "    pub spacing: f32,",
+        "    pub base_height: f32,",
+        "    pub pitch: f32,",
+        "    pub half: f32,",
+        "    pub mass: f32,",
+        "    pub stiffness: f32,",
+        "    pub damping: f32,",
+        "}",
+        "",
         "pub struct PerfSoftSpec {",
         "    pub count: usize,",
         "    pub cols: usize,",
@@ -429,6 +459,7 @@ def gen_rs(scenes):
         "    pub arena_script: bool,",
         "    pub bodies: &'static [PerfBodySpec],",
         "    pub chains: Option<PerfChainSpec>,",
+        "    pub spring2: Option<PerfSpring2Spec>,",
         "    pub softs: Option<PerfSoftSpec>,",
         "}",
         "",
@@ -478,6 +509,16 @@ def gen_rs(scenes):
                          f"collider_radius: {fmt(ch['collider_radius'])} }}),")
         else:
             lines.append("        chains: None,")
+        sp = sc.get("spring2")
+        if sp:
+            lines.append(f"        spring2: Some(PerfSpring2Spec {{ count: {sp['count']}, "
+                         f"cols: {sp['cols']}, links: {sp['links']}, "
+                         f"spacing: {fmt(sp['spacing'])}, base_height: {fmt(sp['base_height'])}, "
+                         f"pitch: {fmt(sp['pitch'])}, half: {fmt(sp['half'])}, "
+                         f"mass: {fmt(sp['mass'])}, stiffness: {fmt(sp['stiffness'])}, "
+                         f"damping: {fmt(sp['damping'])} }}),")
+        else:
+            lines.append("        spring2: None,")
         so = sc.get("softs")
         if so:
             w = ", ".join(fmt(x) for x in so["wind"])
@@ -556,6 +597,16 @@ def validate(scenes):
         if "chains" in sc and "softs" in sc:
             print(f"error: {name}: chain and soft scenes must not mix", file=sys.stderr)
             return False
+        if ("chains" in sc or "spring2" in sc) and "softs" in sc:
+            print(f"error: {name}: spring2 and soft scenes must not mix", file=sys.stderr)
+            return False
+        if "spring2" in sc and "chains" in sc:
+            print(f"error: {name}: spring2 and chain scenes must not mix", file=sys.stderr)
+            return False
+        if "spring2" in sc and sc.get("bodies"):
+            print(f"error: {name}: spring2 scenes must not mix with rigid bodies",
+                  file=sys.stderr)
+            return False
         if "chains" in sc and sc.get("bodies"):
             print(f"error: {name}: chain scenes must not mix with rigid bodies", file=sys.stderr)
             return False
@@ -564,7 +615,7 @@ def validate(scenes):
         except (ValueError, KeyError) as e:
             print(f"error: {name}: {e}", file=sys.stderr)
             return False
-        if not bodies and "chains" not in sc and "softs" not in sc:
+        if not bodies and "chains" not in sc and "softs" not in sc and "spring2" not in sc:
             print(f"error: {name}: empty scene", file=sys.stderr)
             return False
     return True
@@ -583,6 +634,7 @@ def main():
     for name, sc in scenes.items():
         n = (len(expand_scene(sc))
              + (sc["chains"]["count"] if "chains" in sc else 0)
+             + (sc["spring2"]["count"] * (sc["spring2"]["links"] + 1) if "spring2" in sc else 0)
              + (sc["softs"]["count"] if "softs" in sc else 0))
         print(f"scene {name}: {n} dynamic objects")
     print(f"generated {C_HEADER}")

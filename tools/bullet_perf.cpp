@@ -67,6 +67,7 @@
 #include <BulletDynamics/Featherstone/btMultiBodyDynamicsWorld.h>
 #include <BulletDynamics/Featherstone/btMultiBodyConstraintSolver.h>
 #include <BulletDynamics/Featherstone/btMultiBodyLinkCollider.h>
+#include <BulletDynamics/ConstraintSolver/btGeneric6DofSpring2Constraint.h>
 
 #include <LinearMath/btAlignedAllocator.h>
 
@@ -227,6 +228,7 @@ struct SceneRun {
   };
   std::vector<KinematicDriver> kinematics;
   std::vector<std::unique_ptr<btMultiBody>> multibodies;
+  std::vector<std::unique_ptr<btTypedConstraint>> constraints;
   // Soft scenes run btSoftRigidDynamicsWorld (soft + rigid stages); every
   // other scene keeps btMultiBodyDynamicsWorld (its mb stages are no-ops
   // without multibodies). Both derive from btDiscreteDynamicsWorld; the
@@ -320,6 +322,7 @@ struct SceneRun {
     }
 
     if (spec.chains.count > 0) add_chains(spec.chains);
+    if (spec.spring2.count > 0) add_spring2(spec.spring2);
     if (spec.softs.count > 0) add_softs(spec.softs);
   }
 
@@ -370,6 +373,56 @@ struct SceneRun {
         world->addCollisionObject(col, btBroadphaseProxy::DefaultFilter,
                                   btBroadphaseProxy::DefaultFilter | btBroadphaseProxy::StaticFilter);
         body->getLink(i).m_collider = col;
+      }
+    }
+  }
+
+  // A grid of hanging rigid chains joined by spring-2 joints, matching the
+  // Rust runner's add_spring2 (anchor positions, pitches and spring
+  // parameters must be identical on both sides). The first box of each chain
+  // is a static anchor; every joint locks the three linear axes (Bullet's
+  // defaults) and carries the three angular springs. DISABLE_DEACTIVATION
+  // keeps the sagged chains awake, so the spring rows stay hot every frame.
+  void add_spring2(const PerfSpring2Spec& c) {
+    const int rows = (c.count + c.cols - 1) / c.cols;
+    for (int k = 0; k < c.count; ++k) {
+      const int col = k % c.cols;
+      const int row = k / c.cols;
+      const btScalar x = (btScalar(col) - (btScalar(c.cols) - 1) / 2) * c.spacing;
+      const btScalar z = (btScalar(row) - (btScalar(rows) - 1) / 2) * c.spacing;
+      btBoxShape* box = new btBoxShape(btVector3(c.half, c.half, c.half));
+      shapes.push_back(std::unique_ptr<btCollisionShape>(box));
+      btVector3 local_inertia(0, 0, 0);
+      box->calculateLocalInertia(c.mass, local_inertia);
+      btRigidBody* prev = nullptr;
+      for (int i = 0; i <= c.links; ++i) {
+        const btVector3 pos(x + btScalar(i) * c.pitch, c.base_height, z);
+        motions.push_back(std::unique_ptr<btMotionState>(
+            new btDefaultMotionState(btTransform(btQuaternion(0, 0, 0, 1), pos))));
+        btVector3 inertia(0, 0, 0);
+        if (i > 0) inertia = local_inertia;
+        btRigidBody::btRigidBodyConstructionInfo ci(
+            i == 0 ? btScalar(0.0) : c.mass, motions.back().get(), box, inertia);
+        bodies.push_back(std::unique_ptr<btRigidBody>(new btRigidBody(ci)));
+        btRigidBody* body = bodies.back().get();
+        if (i > 0) body->setActivationState(DISABLE_DEACTIVATION);
+        world->addRigidBody(body);
+        if (i > 0) {
+          btGeneric6DofSpring2Constraint* joint = new btGeneric6DofSpring2Constraint(
+              *prev, *body,
+              btTransform(btQuaternion(0, 0, 0, 1), btVector3(c.pitch / 2, 0, 0)),
+              btTransform(btQuaternion(0, 0, 0, 1), btVector3(-c.pitch / 2, 0, 0)),
+              RO_XYZ);
+          for (int ax = 3; ax < 6; ++ax) {
+            joint->enableSpring(ax, true);
+            joint->setStiffness(ax, c.stiffness, true);
+            joint->setDamping(ax, c.damping, true);
+          }
+          world->addConstraint(joint);
+          constraints.push_back(
+              std::unique_ptr<btTypedConstraint>(joint));
+        }
+        prev = body;
       }
     }
   }
@@ -682,6 +735,9 @@ int main(int argc, char** argv) {
   }
   const int repeats = repeats_arg > 0 ? repeats_arg : 5;
   const int bodies = spec->num_bodies + (spec->chains.count > 0 ? spec->chains.count : 0)
+                     + (spec->spring2.count > 0
+                            ? spec->spring2.count * (spec->spring2.links + 1)
+                            : 0)
                      + spec->softs.count;
   std::printf("perf scene %s bodies %d frames %d warmup %d\n", spec->name, bodies,
               spec->frames, spec->warmup);

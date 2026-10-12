@@ -93,9 +93,11 @@ fn mem_peak_mb() -> f64 {
 }
 
 use bullet::dynamics::{
-    create_patch, BodyHandle, MultiBody, PhysicsWorld, RigidBody, StepStage, STEP_STAGES,
+    create_patch, BodyHandle, Constraint, JointFrame, MultiBody, PhysicsWorld, RigidBody,
+    StepStage, STEP_STAGES,
 };
-use bullet::math::{Quaternion, Real, Vector3, PI};
+use bullet::dynamics::constraint::RotateOrder;
+use bullet::math::{Matrix3, Quaternion, Real, Vector3, PI};
 use bullet::shapes::CollisionShape;
 use bullet::collision::broadphase::{BroadPhaseBackend, DbvtBroadPhase};
 
@@ -104,7 +106,9 @@ use bullet::collision::broadphase::{BroadPhaseBackend, DbvtBroadPhase};
 #[path = "../src/perf_scenes_table.rs"]
 mod perf_scenes_table;
 
-use perf_scenes_table::{PerfChainSpec, PerfSceneSpec, PerfShapeSpec, PerfSoftSpec, PERF_SCENES};
+use perf_scenes_table::{
+    PerfChainSpec, PerfSceneSpec, PerfShapeSpec, PerfSoftSpec, PerfSpring2Spec, PERF_SCENES,
+};
 
 fn build_world(spec: &PerfSceneSpec) -> (PhysicsWorld, Vec<(u64, RigidBody)>) {
     // The backend mirrors the C++ runner's per-scene broad phase choice
@@ -180,6 +184,9 @@ fn build_world(spec: &PerfSceneSpec) -> (PhysicsWorld, Vec<(u64, RigidBody)>) {
     if let Some(c) = &spec.chains {
         add_chains(&mut world, c);
     }
+    if let Some(c) = &spec.spring2 {
+        add_spring2(&mut world, c);
+    }
     if let Some(s) = &spec.softs {
         add_softs(&mut world, s);
     }
@@ -227,6 +234,64 @@ fn add_chains(world: &mut PhysicsWorld, c: &PerfChainSpec) {
             mb.set_link_collider(i, collider.clone(), 0.5, 0.0);
         }
         world.add_multibody(mb);
+    }
+}
+
+/// A grid of hanging rigid chains joined by spring-2 joints, matching the
+/// C++ runner's add_spring2 (anchor positions, pitches and spring parameters
+/// must be identical on both sides). The first box of each chain is a static
+/// anchor; every joint locks the three linear axes (Bullet's defaults) and
+/// carries the three angular springs. `disable_deactivation` keeps the
+/// sagged chains awake, so the spring rows stay hot every frame.
+fn add_spring2(world: &mut PhysicsWorld, c: &PerfSpring2Spec) {
+    let rows = c.count.div_ceil(c.cols);
+    let shape = CollisionShape::box_shape(Vector3::splat(c.half as Real));
+    for k in 0..c.count {
+        let (col, row) = (k % c.cols, k / c.cols);
+        let x = (col as Real - (c.cols as Real - 1.0) / 2.0) * c.spacing as Real;
+        let z = (row as Real - (rows as Real - 1.0) / 2.0) * c.spacing as Real;
+        let mut prev = world.add_body(RigidBody::new_static(
+            shape.clone(),
+            Vector3::new(x, c.base_height as Real, z),
+        ));
+        for i in 1..=c.links {
+            let body = world.add_body(
+                RigidBody::new_dynamic(
+                    shape.clone(),
+                    Vector3::new(
+                        x + i as Real * c.pitch as Real,
+                        c.base_height as Real,
+                        z,
+                    ),
+                    c.mass as Real,
+                )
+                .disable_deactivation(),
+            );
+            let joint = Constraint::generic_6dof_spring2(
+                prev,
+                body,
+                JointFrame::new(
+                    Vector3::new(c.pitch as Real / 2.0, 0.0, 0.0),
+                    Matrix3::IDENTITY,
+                ),
+                JointFrame::new(
+                    Vector3::new(-c.pitch as Real / 2.0, 0.0, 0.0),
+                    Matrix3::IDENTITY,
+                ),
+                RotateOrder::Xyz,
+            );
+            let index = world.add_constraint(joint);
+            let j = world
+                .constraint_mut(index)
+                .kind_mut()
+                .generic_6dof_spring2_mut();
+            for ax in 3..6 {
+                j.enable_spring(ax, true);
+                j.set_stiffness(ax, c.stiffness as Real, true);
+                j.set_damping(ax, c.damping as Real, true);
+            }
+            prev = body;
+        }
     }
 }
 
@@ -461,6 +526,10 @@ fn main() {
     let dt: Real = spec.dt_num as Real / spec.dt_den as Real;
     let bodies = spec.bodies.len()
         + spec.chains.as_ref().map_or(0, |c| c.count)
+        + spec
+            .spring2
+            .as_ref()
+            .map_or(0, |c| c.count * (c.links + 1))
         + spec.softs.as_ref().map_or(0, |s| s.count);
     println!(
         "perf scene {} bodies {} frames {} warmup {}",
