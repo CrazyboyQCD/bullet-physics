@@ -22,7 +22,7 @@ pub mod forces;
 pub mod geometry;
 pub mod helpers;
 pub mod joints;
-pub mod rng;
+mod rng;
 pub mod solver;
 #[cfg(test)]
 mod tests;
@@ -44,4 +44,3 @@ pub use joints::{
     AngularControl, AngularJointSpecs, AJoint, CJoint, DefaultAngularControl, JointSpecs,
     LinearJointSpecs, LJoint, SoftJoint,
 };
-pub use rng::MsvcRand;

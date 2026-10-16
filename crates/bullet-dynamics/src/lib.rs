@@ -32,7 +32,7 @@ pub use multibody::{MultiBody, MultiBodyConstraint};
 pub use softbody::{
     create_ellipsoid, create_from_convex_hull, create_from_tri_mesh, create_patch, create_rope,
     patch_fixeds, AeroModel, AngularControl, AngularJointSpecs, AJoint, Cluster, DefaultAngularControl,
-    Face, Impulse, ImplicitFn, JointSpecs, LinearJointSpecs, LJoint, Material, MsvcRand, Pose,
+    Face, Impulse, ImplicitFn, JointSpecs, LinearJointSpecs, LJoint, Material, Pose,
     SContact, Side, SoftBody, SoftCollision, SoftJoint, Tetra, ROPE_FIX_END, ROPE_FIX_START,
 };
 pub use solver::SolverInfo;

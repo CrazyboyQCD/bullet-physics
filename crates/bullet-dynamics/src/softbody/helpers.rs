@@ -75,9 +75,10 @@ pub fn create_rope(from: Vector3, to: Vector3, res: usize, fixeds: u32) -> SoftB
 /// [`patch_fixeds`] bits to pin nodes. The append order (links and faces,
 /// interleaved per cell) matches Bullet exactly — PBD is order-sensitive.
 ///
-/// `perturbation` jitters the y of both edge interpolants using MSVC's
-/// `rand()` sequence (Bullet calls the CRT `rand()`; only meaningful when
-/// comparing against MSVC-built probes — pass 0 for a deterministic patch).
+/// `perturbation` jitters the y of both edge interpolants using the C runtime
+/// `rand()` sequence Bullet calls, replayed portably by [`super::rng`] (pass 0
+/// for a deterministic patch; a non-zero value only matters when comparing
+/// against MSVC-built probes).
 #[allow(clippy::too_many_arguments)]
 pub fn create_patch(
     corner00: Vector3,

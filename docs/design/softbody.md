@@ -58,7 +58,7 @@ PSolve_{Links,RContacts,SContacts,Anchors} + VSolve_Links kernels; applyForces
 (7 aero models/Pressure/Volume); K-mean clusters + CL_RS/CL_SS/CL_SELF; LJoint/AJoint/CJoint;
 helpers (Rope/Patch/Ellipsoid/FromTriMesh/FromConvexHull + quickhull); anchors (vs rigid);
 soft-body raycast; the `{translate,rotate,scale,transform,transform_to,set_total_mass,...}`
-transform/mass API; `randomizeConstraints` (MSVC rand replication).
+transform/mass API; `randomizeConstraints` (built-in deterministic LCG — §8).
 
 **Out of scope (backlog + deviations)**: the `btDeformable*` system
 (NeoHookean/Corotated/LinearElasticity force models, backward Euler, CG/CR/preconditioning,
@@ -116,7 +116,7 @@ crates/bullet-dynamics/src/softbody/
 ├── joints.rs     // SoftJoint tri-state Prepare/Solve/Terminate + Side impulse dispatch
 ├── helpers.rs    // create_rope/create_patch/create_ellipsoid/from_tri_mesh/from_convex_hull
 ├── quickhull.rs  // minimal quickhull (face generation for CreateEllipsoid/FromConvexHull)
-├── rng.rs        // MSVC rand() bit-exact replication (randomizeConstraints/patch perturbation)
+├── rng.rs        // C runtime rand() replay, portable (patch perturbation only)
 └── tests.rs      // unit tests (analytic cross-checks)
 ```
 
@@ -207,9 +207,10 @@ simultaneously); rigid impulses are written directly through an `apply_impulse`-
 `seed = (1664525·seed + 1013904223) & 0xffffffff`, shuffles links/faces by `seed % len`) —
 already bit-exact replicated in Rust, no rand dependency.
 `CreatePatch`'s perturbation uses C `rand()` — both probe sides compile with MSVC, so Phase C
-replicates MSVC rand (`state = state·214013 + 2531011; (state>>16)&0x7fff`, `srand(0)` means
-state=0). Patch builds default to `perturbation=0`. Bullet's rand differs under clang —
-probes use MSVC (the parity convention).
+replicates MSVC's sequence (`state = state·214013 + 2531011; (state>>16)&0x7fff`, `srand(0)`
+means state=0) in plain integer arithmetic, hence portably: the same replay runs on every
+target and needs no MSVC toolchain. Patch builds default to `perturbation=0`. Bullet's rand
+differs under clang — probes use MSVC (the parity convention).
 
 ## 9. quickhull (`quickhull.rs`)
 
