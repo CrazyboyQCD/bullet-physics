@@ -41,6 +41,28 @@ docs/
 └── bullet-compare.md      # Difference ledger (auto-generated + manual classification columns)
 ```
 
+## Probe sources
+
+The remaining `tools/*.cpp` files are single-file programs compiled directly
+against the pinned `refs/bullet3` checkout, each answering one question about
+what stock Bullet actually does. Some carry a Rust twin and a build script; the
+rest are one-off archaeology kept as the primary source behind a documented
+decision.
+
+| Probe | Role |
+|---|---|
+| `multibody_probe.cpp`, `softbody_probe.cpp` | probe rigs with Rust twins (`crates/bullet-physics/examples/*_probe.rs`) and build scripts (`build_*_probe.py`) |
+| `gimpact_probe.cpp` | probe rig with a Rust twin (`examples/gimpact_probe.rs`), cited by `design/architecture.md` and `bullet-compare.md` |
+| `island_probe.cpp` | activation / sleeping / island semantics — cited by `bullet-deviations.md` §2 and `design/multibody-collision.md` §9, built by `build_island_probe.py` |
+| `rope_press_probe.cpp` | the rope-pressing-a-box scenario cited by the softbody tests (`rope_pushes_dynamic_box`) |
+| `flat_box_probe.cpp`, `flat_box_manifold_probe.cpp` | the wide-flat-box manifold bug (single-corner contact, diagonal spin, sink through the plane) — the scenario of the ignored test `wide_flat_box_on_plane_known_bug`, plus a dump of the cached manifold point set |
+| `swing_push_probe.cpp` | the passive-pendulum-pushing-a-box scenarios from the early multibody/island work (box trajectory and activation state); no live test names it now |
+
+The probes without a build script (`gimpact_probe.cpp`, `rope_press_probe.cpp`,
+`flat_box_probe.cpp`, `flat_box_manifold_probe.cpp`, `swing_push_probe.cpp`)
+were compiled ad hoc against `refs/bullet3`; they are kept for the record rather
+than for reruns.
+
 ## Scene protocol
 
 - **Parameter contract**: every scene is defined once in `tools/scenes.json`

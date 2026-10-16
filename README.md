@@ -107,6 +107,27 @@ let platform = world.add_body(RigidBody::new_kinematic(
 world.body_mut(platform).linear_velocity = Vector3::new(1.5, 0.0, 0.0);
 ```
 
+## Correctness and performance evidence
+
+The port is checked against the real C++ library, not only against its own tests:
+
+- **Frame-by-frame parity.** This crate and upstream Bullet build the same scenes
+  from the same generated tables and are diffed frame by frame in both `f32` and
+  `f64`. The numbers, and the classification of every exceedance, are in
+  [`docs/bullet-compare.md`](docs/bullet-compare.md); each intentional divergence
+  from upstream is recorded in [`docs/bullet-deviations.md`](docs/bullet-deviations.md).
+- **Wall-clock and memory ledgers.** The same reference binary is timed scene by
+  scene in [`docs/perf/speed.md`](docs/perf/speed.md), with per-scene allocator
+  curves in [`docs/perf/memory.md`](docs/perf/memory.md).
+- **Subsystem audits.** Every numerically sensitive area — manifold, GJK, EPA,
+  convex-convex, the axis-sweep and DBVT broad phases, CCD, and an integrated
+  multi-system pass — has an adversarial audit record under
+  [`docs/audit/`](docs/audit/README.md).
+- **Reproducing it.** [`docs/parity-harness.md`](docs/parity-harness.md)
+  documents the C++ reference build (CMake + MSVC + a pinned `refs/bullet3`
+  clone); `python tools/check.py` runs the Rust-only gate (test matrix plus demo
+  assertions) with no C++ toolchain.
+
 ## License
 
 Licensed under the [zlib license](LICENSE). This project is a reimplementation
