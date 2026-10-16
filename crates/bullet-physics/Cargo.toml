@@ -19,6 +19,6 @@ std = ["bullet-dynamics/std"]
 libm = ["bullet-dynamics/libm"]
 
 [dependencies]
-bullet-math = { path = "../bullet-math", default-features = false }
-bullet-collision = { path = "../bullet-collision", default-features = false }
-bullet-dynamics = { path = "../bullet-dynamics", default-features = false }
+bullet-math = { version = "0.1", path = "../bullet-math", default-features = false }
+bullet-collision = { version = "0.1", path = "../bullet-collision", default-features = false }
+bullet-dynamics = { version = "0.1", path = "../bullet-dynamics", default-features = false }
