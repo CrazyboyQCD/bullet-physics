@@ -10,7 +10,7 @@ Orchestrates the whole pipeline for one scene (docs/parity-harness.md):
      tools/build_recorder.py if missing or stale).
   4. Record the Bullet trajectory (tools/bullet_record[_f64].exe, cwd =
      target/; f64 recordings get a _f64 name suffix).
-  5. Record the Rust trajectory (crates/bullet/examples/record_scenes.rs).
+  5. Record the Rust trajectory (crates/bullet-physics/examples/record_scenes.rs).
   6. Diff every recorded body with tools/compare.py's stats, print a per-body
      report, and optionally update the numeric section of the scene's ledger
      entry in docs/bullet-compare.md (--update-ledger). Each precision has its
@@ -39,7 +39,7 @@ TARGET = os.path.join(ROOT, "target")
 LEDGER = os.path.join(ROOT, "docs", "bullet-compare.md")
 SCENES_JSON = os.path.join(TOOLS, "scenes.json")
 C_HEADER = os.path.join(TOOLS, "bullet_scenes.h")
-RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "parity_scenes.rs")
+RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "src", "parity_scenes.rs")
 
 # f64 runs use a second Bullet build (target/bullet3-build-double) and a
 # separately linked recorder, so the f32 artifacts are never clobbered.

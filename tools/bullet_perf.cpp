@@ -5,7 +5,7 @@
 // (bullet_perf_scenes.h), builds one scene, runs `warmup` untimed frames then
 // times `frames` fixed steps, and repeats the whole run (fresh world each
 // time) printing one line per repeat. The output protocol matches the Rust
-// runner (crates/bullet/examples/perf_scenes.rs) so tools/perf.py can parse
+// runner (crates/bullet-physics/examples/perf_scenes.rs) so tools/perf.py can parse
 // both:
 //
 //     perf scene <name> bodies <n> frames <f> warmup <w>

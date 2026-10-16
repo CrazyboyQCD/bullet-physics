@@ -2,7 +2,7 @@
 """Per-frame numerical comparison between the Bullet C++ and Rust recordings.
 
 Reads the two CSV files produced by tools/bullet_record.cpp and
-crates/bullet/examples/record_scenes.rs (one line per frame:
+crates/bullet-physics/examples/record_scenes.rs (one line per frame:
 `t px py pz qx qy qz qw`, %.6f) and reports per-frame position distance and
 quaternion angle (double-cover aware), against the tolerances from
 docs/parity-harness.md (position 1e-2, orientation angle 1e-2).

@@ -3,7 +3,7 @@
 of truth) into:
 
   - tools/bullet_perf_scenes.h            (C++ runner, tools/bullet_perf.cpp)
-  - crates/bullet/src/perf_scenes_table.rs (Rust runner, examples/perf_scenes.rs)
+  - crates/bullet-physics/src/perf_scenes_table.rs (Rust runner, examples/perf_scenes.rs)
 
 The generated files are DO NOT EDIT; tools/perf.py reruns this generator
 before every measurement. Unlike the parity generator (generate_scenes.py),
@@ -29,7 +29,7 @@ C_HEADER = os.path.join(ROOT, "tools", "bullet_perf_scenes.h")
 # Lives under src/ (not examples/) so cargo does not treat it as a standalone
 # example; perf_scenes.rs pulls it in with #[path] (same pattern as the
 # parity tables).
-RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "perf_scenes_table.rs")
+RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "src", "perf_scenes_table.rs")
 
 GENERATOR_TYPES = {"box_grid", "mixed_rain", "mesh_rain", "sphere_rain", "kinematic_push"}
 SHAPE_TYPES = {"box", "sphere", "capsule", "mesh", "plane"}

@@ -8,7 +8,7 @@
 //
 // Files are written to the current working directory (tools/parity.py runs
 // the recorder with cwd = target/). The Rust counterpart is
-// crates/bullet/examples/record_scenes.rs; both consume the same generated
+// crates/bullet-physics/examples/record_scenes.rs; both consume the same generated
 // scene tables, so scene parameters have a single source of truth.
 //
 // Usage: bullet_record.exe [scene_name]

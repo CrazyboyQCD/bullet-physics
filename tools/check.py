@@ -28,7 +28,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS = os.path.join(ROOT, "tools")
 SCENES_JSON = os.path.join(TOOLS, "scenes.json")
 C_HEADER = os.path.join(TOOLS, "bullet_scenes.h")
-RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "parity_scenes.rs")
+RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "src", "parity_scenes.rs")
 
 def run(cmd, **kw):
     """Run a command and echo it; returns CompletedProcess."""

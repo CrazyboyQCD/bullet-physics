@@ -4,7 +4,7 @@ members = [
     "crates/bullet-math",
     "crates/bullet-collision",
     "crates/bullet-dynamics",
-    "crates/bullet",
+    "crates/bullet-physics",
     # Browser demo harness (wasm32 cdylib; never built for the host).
     "tools/wasm-demo",
 ]

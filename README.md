@@ -25,7 +25,7 @@ See [docs/design/architecture.md](docs/design/architecture.md) for the detailed 
   `BT_USE_DOUBLE_PRECISION`).
 
 ```toml
-bullet-physics = { path = "crates/bullet", features = ["f64"] }
+bullet-physics = { path = "crates/bullet-physics", features = ["f64"] }
 ```
 
 ## no_std
@@ -36,7 +36,7 @@ pure-Rust `libm` crate) and drop the default features:
 
 ```toml
 [dependencies]
-bullet-physics = { path = "crates/bullet", default-features = false, features = ["libm"] }
+bullet-physics = { path = "crates/bullet-physics", default-features = false, features = ["libm"] }
 ```
 
 - Default/std builds are bit-identical to always; only `libm` builds may

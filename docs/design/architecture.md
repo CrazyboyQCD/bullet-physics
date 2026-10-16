@@ -289,7 +289,7 @@ skip narrow-phase collision (`disableCollisionsBetweenLinkedBodies`).
   ledger `docs/bullet-compare.md` classifies every exceedance as a known
   trade-off or an implementation problem.
 - **Multibody probes**: `tools/multibody_probe.cpp` vs
-  `crates/bullet/examples/multibody_probe.rs`, 24 scenes × f32/f64 against
+  `crates/bullet-physics/examples/multibody_probe.rs`, 24 scenes × f32/f64 against
   the real Bullet library (13 multibody-dynamics scenes, the 6 collider
   scenes of `docs/design/multibody-collision.md` §7, the joint-feedback pair and
   the three multibody-vs-rigidbody constraint scenes, compared with

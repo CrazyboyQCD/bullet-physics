@@ -120,7 +120,7 @@ crates/bullet-dynamics/src/softbody/
 └── tests.rs      // unit tests (analytic cross-checks)
 ```
 
-The facade `bullet/src/lib.rs` re-exports; `PhysicsWorld` gains `soft_bodies: Vec<SoftBody>` +
+The facade `bullet-physics/src/lib.rs` re-exports; `PhysicsWorld` gains `soft_bodies: Vec<SoftBody>` +
 `add_soft_body/soft_body(_mut)/remove_soft_body` (proxy cascades, same pattern as body removal).
 
 ## 4. World Stepping Integration (stage insertion points)

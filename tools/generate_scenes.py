@@ -3,7 +3,7 @@
 truth) into:
 
   - tools/bullet_scenes.h            (C++ recorder, bullet_record.cpp)
-  - crates/bullet/examples/scenes_generated.rs  (Rust recorder, record_scenes.rs)
+  - crates/bullet-physics/examples/scenes_generated.rs  (Rust recorder, record_scenes.rs)
 
 Both generated files are DO NOT EDIT. tools/parity.py reruns this generator
 before every recording, so the generated code always matches the JSON.
@@ -21,7 +21,7 @@ SCENES_JSON = os.path.join(ROOT, "tools", "scenes.json")
 C_HEADER = os.path.join(ROOT, "tools", "bullet_scenes.h")
 # Lives under src/ (not examples/) so cargo does not treat it as a standalone
 # example; record_scenes.rs pulls it in with #[path].
-RS_TABLE = os.path.join(ROOT, "crates", "bullet", "src", "parity_scenes.rs")
+RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "src", "parity_scenes.rs")
 
 SHAPE_TYPES = {"box", "sphere", "capsule", "cylinder", "cone", "plane", "mesh",
                "mesh_parts", "uniform_scaling", "scaled_mesh"}

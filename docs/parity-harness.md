@@ -33,7 +33,7 @@ tools/
 ├── parity.py             # One-command orchestration: self-build + record + diff + ledger
 ├── compare.py            # Per-frame diff: position distance + quaternion angle (+ --report-md)
 └── check.py              # Regression: cargo test f32/f64 + demo assertions (+ --parity)
-crates/bullet/
+crates/bullet-physics/
 ├── src/parity_scenes.rs  # Rust scene tables (generated, DO NOT EDIT)
 └── examples/record_scenes.rs  # Rust recorder (same scenes, same format)
 docs/
