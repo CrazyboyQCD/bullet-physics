@@ -4,7 +4,7 @@
 Orchestrates the perf pipeline for one scene (or all):
   1. Regenerate the perf scene tables from tools/perf_scenes.json if stale
      (tools/generate_perf_scenes.py -> bullet_perf_scenes.h +
-     perf_scenes_table.rs).
+     generated/perf_scenes_table.rs).
   2. Self-check the f32 Bullet static libs (imported from tools/parity.py;
      built via CMake if missing) and tools/bullet_perf.exe (rebuilt via
      tools/build_recorder.py's build_perf).
@@ -45,7 +45,7 @@ SPEED_LEDGER = os.path.join(ROOT, "docs", "perf", "speed.md")
 MEMORY_LEDGER = os.path.join(ROOT, "docs", "perf", "memory.md")
 SCENES_JSON = os.path.join(TOOLS, "perf_scenes.json")
 C_HEADER = os.path.join(TOOLS, "bullet_perf_scenes.h")
-RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "src", "perf_scenes_table.rs")
+RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "generated", "perf_scenes_table.rs")
 
 # 60 fps frame budget split the way realtime guidance suggests: the pure
 # engine ceiling (physics owning the whole frame) and the common

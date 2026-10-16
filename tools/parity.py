@@ -3,7 +3,7 @@
 
 Orchestrates the whole pipeline for one scene (docs/parity-harness.md):
   1. Regenerate the scene tables from tools/scenes.json if stale
-     (tools/generate_scenes.py -> bullet_scenes.h + scenes_generated.rs).
+     (tools/generate_scenes.py -> bullet_scenes.h + generated/parity_scenes.rs).
   2. Self-check the static Bullet libraries (build via CMake if missing;
      --precision f64 builds/uses a separate -DUSE_DOUBLE_PRECISION=ON tree).
   3. Self-check the recorder exe for that precision (rebuild via
@@ -39,7 +39,7 @@ TARGET = os.path.join(ROOT, "target")
 LEDGER = os.path.join(ROOT, "docs", "bullet-compare.md")
 SCENES_JSON = os.path.join(TOOLS, "scenes.json")
 C_HEADER = os.path.join(TOOLS, "bullet_scenes.h")
-RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "src", "parity_scenes.rs")
+RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "generated", "parity_scenes.rs")
 
 # f64 runs use a second Bullet build (target/bullet3-build-double) and a
 # separately linked recorder, so the f32 artifacts are never clobbered.

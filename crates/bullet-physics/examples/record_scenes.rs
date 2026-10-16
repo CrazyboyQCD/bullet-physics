@@ -1,7 +1,7 @@
 //! Rust-side scene recorder for the frame-by-frame parity harness.
 //!
 //! Reads the scene tables generated from tools/scenes.json
-//! (scenes_generated.rs), simulates one scene with the same protocol as the
+//! (generated/parity_scenes.rs), simulates one scene with the same protocol as the
 //! C++ recorder (tools/bullet_record.cpp), and writes one CSV per recorded
 //! body to the current working directory:
 //!
@@ -22,9 +22,9 @@ use bullet_physics::dynamics::{BodyHandle, CollisionFlags, PhysicsWorld, RigidBo
 use bullet_physics::math::{Real, Vector3};
 use bullet_physics::shapes::{CollisionShape, TriangleMeshPart};
 
-// Included via #[path] from src/parity_scenes.rs (auto-generated from
+// Included via #[path] from generated/parity_scenes.rs (auto-generated from
 // tools/scenes.json).
-#[path = "../src/parity_scenes.rs"]
+#[path = "../generated/parity_scenes.rs"]
 mod parity_scenes;
 
 use parity_scenes::{ShapeSpec, SCENES};

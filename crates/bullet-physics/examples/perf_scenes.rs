@@ -2,7 +2,7 @@
 //! (docs/perf/speed.md).
 //!
 //! Reads the perf scene tables generated from tools/perf_scenes.json
-//! (perf_scenes_table.rs), builds one scene, runs `warmup` untimed frames
+//! (generated/perf_scenes_table.rs), builds one scene, runs `warmup` untimed frames
 //! then times `frames` fixed steps, and repeats the whole run (fresh world
 //! each time) reporting one line per repeat. The output protocol matches the
 //! C++ runner (tools/bullet_perf.cpp) so tools/perf.py can parse both:
@@ -101,9 +101,9 @@ use bullet_physics::math::{Matrix3, Quaternion, Real, Vector3, PI};
 use bullet_physics::shapes::CollisionShape;
 use bullet_physics::collision::broadphase::{BroadPhaseBackend, DbvtBroadPhase};
 
-// Included via #[path] from src/perf_scenes_table.rs (auto-generated from
+// Included via #[path] from generated/perf_scenes_table.rs (auto-generated from
 // tools/perf_scenes.json).
-#[path = "../src/perf_scenes_table.rs"]
+#[path = "../generated/perf_scenes_table.rs"]
 mod perf_scenes_table;
 
 use perf_scenes_table::{

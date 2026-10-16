@@ -26,7 +26,7 @@
 ```
 tools/
 ├── scenes.json           # Single source of truth for scene parameters
-├── generate_scenes.py    # scenes.json -> bullet_scenes.h + parity_scenes.rs
+├── generate_scenes.py    # scenes.json -> bullet_scenes.h + generated/parity_scenes.rs
 ├── bullet_scenes.h       # C++ scene tables (generated, DO NOT EDIT)
 ├── bullet_record.cpp     # C++ recorder (single file, links refs/bullet3 static libs)
 ├── build_recorder.py     # MSVC build of the C++ recorder (importable)
@@ -34,7 +34,7 @@ tools/
 ├── compare.py            # Per-frame diff: position distance + quaternion angle (+ --report-md)
 └── check.py              # Regression: cargo test f32/f64 + demo assertions (+ --parity)
 crates/bullet-physics/
-├── src/parity_scenes.rs  # Rust scene tables (generated, DO NOT EDIT)
+├── generated/parity_scenes.rs  # Rust scene tables (generated, DO NOT EDIT)
 └── examples/record_scenes.rs  # Rust recorder (same scenes, same format)
 docs/
 ├── parity-harness.md      # This design + run instructions

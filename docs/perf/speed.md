@@ -59,7 +59,7 @@ the analysis text below each report is hand-written).
   `cargo run --profile release-debug -p bullet-physics --example perf_scenes` consume the same
   generated scene tables (`tools/perf_scenes.json` ->
   `tools/generate_perf_scenes.py` -> `bullet_perf_scenes.h` +
-  `src/perf_scenes_table.rs`), mirroring the parity harness's single-source
+  `generated/perf_scenes_table.rs`), mirroring the parity harness's single-source
   discipline.
 - **Protocol.** Per scene: build, run `warmup` untimed frames, then time
   `frames` fixed steps (`stepSimulation(dt, 1, dt)` / `step_simulation(dt)`),
