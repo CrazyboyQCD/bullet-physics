@@ -282,7 +282,7 @@ order → settle-class scatter (deviations §11-⑤).
   order; solve_constraints becomes an associated function
   `SoftBody::solve_constraints(idx, &mut [SoftBody], bodies)` with field-level split — the
   soft contact kernel writes nodes on both bodies); create_patch (full fixeds bitmap/gendiags/
-  perturbation + MsvcRand replication — rand consumes 2 draws per node and only affects
+  perturbation + CrtRand replication — rand consumes 2 draws per node and only affects
   geometry when perturbation≠0); soft-body raycast (SoftBody::ray_test full face scan =
   Bullet's bcountonly path + PhysicsWorld::raycast_soft_closest; fdbvt pruning recorded as a
   perf backlog). Demo: `softbody_flag` (12th check.py demo: pinned top corner wind bulge 0.745

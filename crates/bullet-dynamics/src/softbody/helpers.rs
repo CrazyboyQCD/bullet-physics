@@ -11,7 +11,7 @@ use bullet_math::{math, Real, Vector3};
 
 use super::body::SoftBody;
 use bullet_math::quickhull::quick_hull;
-use super::rng::MsvcRand;
+use super::rng::CrtRand;
 
 /// Bit flag for [`create_rope`]: pin the first node (Bullet's `fixeds & 1`).
 pub const ROPE_FIX_START: u32 = 1;
@@ -99,7 +99,7 @@ pub fn create_patch(
     // path skips it.
     let mut positions = Vec::with_capacity(resx * resy);
     let masses = vec![1.0 as Real; resx * resy];
-    let mut rng = MsvcRand::default_seeded();
+    let mut rng = CrtRand::default_seeded();
     for iy in 0..resy {
         let ty = iy as Real / (resy - 1) as Real;
         let py0 = corner00.lerp(corner01, ty);

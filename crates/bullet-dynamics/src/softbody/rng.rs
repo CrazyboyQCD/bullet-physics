@@ -1,20 +1,22 @@
-//! Bit-for-bit replay of the C runtime `rand()` sequence MSVC ships (design
-//! §8): `state = state·214013 + 2531011 (mod 2³²)`, returning
+//! Bit-for-bit replay of the C runtime `rand()` sequence (design §8):
+//! `state = state·214013 + 2531011 (mod 2³²)`, returning
 //! `(state >> 16) & 0x7fff`.
 //!
 //! Portable by construction: plain integer arithmetic, no platform or toolchain
-//! dependency, same output on every target. It is what lets the soft-body
-//! helpers reproduce the numbers of the MSVC-built C++ probes (clang's libc
-//! ships a different generator); the deterministic helpers prefer the built-in
-//! LCG ([`super::body::SoftBody::randomize_constraints`]).
+//! dependency, same output on every target. The sequence replayed is
+//! specifically the one MSVC's CRT ships — other libc implementations use a
+//! different generator — which is what the MSVC-built C++ probes draw from, so
+//! this is what lets the soft-body helpers reproduce their numbers. The
+//! deterministic helpers prefer the built-in LCG
+//! ([`super::body::SoftBody::randomize_constraints`]).
 
-/// Replay state of that C runtime `rand()` sequence.
+/// Replay state of that C runtime `rand()` sequence (MSVC's LCG).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct MsvcRand {
+pub(crate) struct CrtRand {
     state: u32,
 }
 
-impl MsvcRand {
+impl CrtRand {
     /// Equivalent of the default-seeded sequence (C requires `rand()` to
     /// behave as if `srand(1)` had been called).
     pub(crate) fn default_seeded() -> Self {
