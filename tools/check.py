@@ -5,8 +5,10 @@ Runs the full test matrix plus the demo assertions and (optionally) a parity
 snapshot, then prints a one-line summary. Use before every commit.
 
   0. Ensure the generated scene tables exist (tools/generate_scenes.py from
-     tools/scenes.json; the generated files are git-ignored, so a fresh clone
-     needs this step before cargo can build the record_scenes example).
+     tools/scenes.json and tools/generate_perf_scenes.py from
+     tools/perf_scenes.json; the generated files are git-ignored, so a fresh
+     clone needs this step before cargo can build the record_scenes and
+     perf_scenes examples).
   1. cargo test --workspace          (f32, default)
   2. cargo test --workspace --features f64
   3. cargo run --example <demo> for falling_box / falling_capsule /
@@ -29,6 +31,9 @@ TOOLS = os.path.join(ROOT, "tools")
 SCENES_JSON = os.path.join(TOOLS, "scenes.json")
 C_HEADER = os.path.join(TOOLS, "bullet_scenes.h")
 RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "generated", "parity_scenes.rs")
+PERF_JSON = os.path.join(TOOLS, "perf_scenes.json")
+PERF_C_HEADER = os.path.join(TOOLS, "bullet_perf_scenes.h")
+PERF_RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "generated", "perf_scenes_table.rs")
 
 def run(cmd, **kw):
     """Run a command and echo it; returns CompletedProcess."""
@@ -51,6 +56,18 @@ def ensure_scenes_generated():
         return True
     print("scene tables missing or stale; regenerating...")
     return run(["python", os.path.join(TOOLS, "generate_scenes.py")]).returncode == 0
+
+
+def ensure_perf_scenes_generated():
+    """Same contract for the perf pair. cargo test also compiles the
+    perf_scenes example, so its table has to exist before the test matrix."""
+    json_mtime = max(os.path.getmtime(PERF_JSON),
+                     os.path.getmtime(os.path.join(TOOLS, "generate_perf_scenes.py")))
+    if all(os.path.exists(f) and os.path.getmtime(f) >= json_mtime
+           for f in (PERF_C_HEADER, PERF_RS_TABLE)):
+        return True
+    print("perf scene tables missing or stale; regenerating...")
+    return run(["python", os.path.join(TOOLS, "generate_perf_scenes.py")]).returncode == 0
 
 
 def ledger_freshness(scene, report_name):
@@ -97,9 +114,12 @@ def main():
 
     failed = []
 
-    # 0. Scene tables must exist before cargo can build the examples.
+    # 0. Generated tables must exist before cargo can build the examples
+    # (record_scenes and perf_scenes both #[path]-include theirs).
     if not ensure_scenes_generated():
-        failed.append("scene table generation")
+        failed.append("scene table generation (parity)")
+    if not ensure_perf_scenes_generated():
+        failed.append("scene table generation (perf)")
 
     # 1 + 2. Test matrix.
     for label, extra in (("f32", []), ("f64", ["--features", "f64"])):

@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+# The parity and perf harness examples #[path]-include scene tables that are
+# generated and git-ignored, so they are absent from the package and would not
+# build there.
+exclude = ["examples/record_scenes.rs", "examples/perf_scenes.rs"]
+
 [features]
 default = ["std", "f32"]
 f32 = ["bullet-math/f32", "bullet-collision/f32", "bullet-dynamics/f32"]        
