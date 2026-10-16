@@ -24,8 +24,11 @@
 
 /tools/_vcvars_env.bat
 
-# Local agent handoff notes, not part of the published repo
+# Local agent handoff notes, not part of the published repo. Both spellings:
+# ignore matching is case-sensitive on Linux/CI, where /HANDOFF.md alone would
+# let a lowercase handoff.md be staged.
 /HANDOFF.md
+/handoff.md
 
 # Browser demo build output (regenerate with tools/wasm-demo/build.py)
 /tools/wasm-demo/dist/

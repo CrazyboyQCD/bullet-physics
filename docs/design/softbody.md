@@ -455,5 +455,5 @@ order → settle-class scatter (deviations §11-⑤).
 | softbody/cluster.rs | btSoftBody.cpp generateClusters/initializeClusters/updateClusters/solveClusters/applyClusters/dampClusters |
 | softbody/joints.rs | btSoftBody.cpp 3390-3747 (Joint::Prepare/Solve/Terminate) + Body 515-620 |
 | softbody/helpers.rs | btSoftBodyHelpers.cpp 691-1120 (Rope/Patch/Ellipsoid/TriMesh/ConvexHull) |
-| softbody/quickhull.rs | Extras/ConvexDecomposition/… HullLibrary semantics, reduced (new implementation) |
+| softbody/quickhull.rs | LinearMath/btConvexHull.h HullLibrary semantics, reduced (new implementation) |
 | world.rs stages 1s/3s/4b/5s/7s/8s (now `world/step.rs` + `world/softbody_pass.rs` + `world/islands.rs`) | btSoftRigidDynamicsWorld.cpp 69-118 + btDiscreteDynamicsWorld stepping |

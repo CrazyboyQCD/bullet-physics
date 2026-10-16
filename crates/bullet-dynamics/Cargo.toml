@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["physics", "rigid-body", "constraints", "solver", "no-std"]
+categories = ["simulation", "science", "game-development", "mathematics"]
 
 [features]
 default = ["std", "f32"]

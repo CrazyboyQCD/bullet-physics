@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["physics", "collision-detection", "rigid-body", "softbody", "simulation"]
+categories = ["game-development", "simulation", "science", "mathematics"]
 
 # The parity and perf harness examples #[path]-include scene tables that are
 # generated and git-ignored, so they are absent from the package and would not
