@@ -1,8 +1,7 @@
 # bullet-physics
 
 A pure Rust physics engine reimplementing the core of
-[Bullet Physics](https://github.com/bulletphysics/bullet3), filling the gap for
-a high-performance, modern physics library in the Rust ecosystem.
+[Bullet Physics](https://github.com/bulletphysics/bullet3).
 
 ## Workspace layout
 
