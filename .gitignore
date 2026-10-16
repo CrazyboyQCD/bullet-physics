@@ -1,5 +1,10 @@
 /target
 
+# Host-specific cargo config (MSVC linker pin). Recreate it locally when cargo
+# fails to link on Windows — see docs/agent-setup.md §2. Kept out of the
+# repository on purpose.
+/.cargo/
+
 # Parity harness build artifacts
 /tools/*.exe
 /tools/*.obj
