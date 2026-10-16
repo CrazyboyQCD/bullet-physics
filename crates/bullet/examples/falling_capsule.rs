@@ -3,9 +3,9 @@
 //! the dedicated plane-vs-convex narrow phase; the sphere lands through the
 //! same path. Run with `cargo run --example falling_capsule`.
 
-use bullet::dynamics::{PhysicsWorld, RigidBody};
-use bullet::math::{Real, Vector3};
-use bullet::shapes::CollisionShape;
+use bullet_physics::dynamics::{PhysicsWorld, RigidBody};
+use bullet_physics::math::{Real, Vector3};
+use bullet_physics::shapes::CollisionShape;
 
 fn main() {
     let mut world = PhysicsWorld::new();

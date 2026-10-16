@@ -7,8 +7,8 @@
 //!
 //! Run with `cargo run --example softbody_rope`.
 
-use bullet::dynamics::{create_rope, PhysicsWorld, ROPE_FIX_END, ROPE_FIX_START};
-use bullet::math::{Real, Vector3};
+use bullet_physics::dynamics::{create_rope, PhysicsWorld, ROPE_FIX_END, ROPE_FIX_START};
+use bullet_physics::math::{Real, Vector3};
 
 fn main() {
     let mut world = PhysicsWorld::new();

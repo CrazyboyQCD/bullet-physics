@@ -1,5 +1,5 @@
 [package]
-name = "bullet"
+name = "bullet-physics"
 description = "Facade crate aggregating the bullet physics engine (math, collision, and dynamics)"
 version.workspace = true
 edition.workspace = true

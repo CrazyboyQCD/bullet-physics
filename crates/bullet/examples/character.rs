@@ -8,9 +8,9 @@
 //!
 //! Run with `cargo run --example character`.
 
-use bullet::dynamics::{KinematicCharacterController, PhysicsWorld, RigidBody};
-use bullet::math::{Real, Vector3};
-use bullet::shapes::CollisionShape;
+use bullet_physics::dynamics::{KinematicCharacterController, PhysicsWorld, RigidBody};
+use bullet_physics::math::{Real, Vector3};
+use bullet_physics::shapes::CollisionShape;
 
 fn main() {
     let mut world = PhysicsWorld::new();

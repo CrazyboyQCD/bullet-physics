@@ -10,9 +10,9 @@
 //!
 //! Run with `cargo run --example vehicle`.
 
-use bullet::dynamics::{PhysicsWorld, RaycastVehicle, RigidBody, VehicleTuning};
-use bullet::math::{Real, Vector3};
-use bullet::shapes::CollisionShape;
+use bullet_physics::dynamics::{PhysicsWorld, RaycastVehicle, RigidBody, VehicleTuning};
+use bullet_physics::math::{Real, Vector3};
+use bullet_physics::shapes::CollisionShape;
 
 fn main() {
     let mut world = PhysicsWorld::new();

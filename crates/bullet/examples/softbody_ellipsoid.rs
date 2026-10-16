@@ -9,9 +9,9 @@
 //!
 //! Run with `cargo run --example softbody_ellipsoid`.
 
-use bullet::dynamics::{create_ellipsoid, PhysicsWorld, RigidBody, SoftCollision};
-use bullet::math::{Real, Vector3};
-use bullet::prelude::CollisionShape;
+use bullet_physics::dynamics::{create_ellipsoid, PhysicsWorld, RigidBody, SoftCollision};
+use bullet_physics::math::{Real, Vector3};
+use bullet_physics::prelude::CollisionShape;
 
 fn ground() -> RigidBody {
     RigidBody::new_static(
@@ -122,7 +122,7 @@ fn main() {
     for _ in 0..600 {
         world.step_simulation(dt);
         let (a, b) = (world.soft_body(left), world.soft_body(right));
-        let com = |sb: &bullet::dynamics::SoftBody| {
+        let com = |sb: &bullet_physics::dynamics::SoftBody| {
             let mut c = Vector3::ZERO;
             for n in &sb.nodes {
                 c += n.x;

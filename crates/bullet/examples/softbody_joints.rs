@@ -8,12 +8,12 @@
 //!
 //! Run with `cargo run --example softbody_joints`.
 
-use bullet::dynamics::{
+use bullet_physics::dynamics::{
     AngularControl, AngularJointSpecs, create_patch, AJoint, JointSpecs, PhysicsWorld, RigidBody,
     Side, LinearJointSpecs,
 };
-use bullet::math::{Real, Vector3};
-use bullet::prelude::CollisionShape;
+use bullet_physics::math::{Real, Vector3};
+use bullet_physics::prelude::CollisionShape;
 
 /// The SoftDemo motor control (`MotorControl`): drive the joint speed
 /// toward `goal`, clamped by `maxtorque` per solve.
@@ -124,7 +124,7 @@ fn main() {
         CollisionShape::box_shape(Vector3::splat(0.1)),
         Vector3::ZERO,
     ));
-    let ball = world.add_soft_body(bullet::dynamics::create_ellipsoid(
+    let ball = world.add_soft_body(bullet_physics::dynamics::create_ellipsoid(
         Vector3::ZERO,
         Vector3::new(1.0, 0.7, 1.0),
         96,

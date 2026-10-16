@@ -16,10 +16,10 @@
 //! dynamic body) and final assertions: no NaN/inf ever, nothing tunnels under
 //! the terrain, velocities settle, and both p2p joints hold their anchors.
 //!
-//! Usage: `cargo run -p bullet --release --example mixed_stress [-- frames]`
+//! Usage: `cargo run -p bullet-physics --release --example mixed_stress [-- frames]`
 
-use bullet::dynamics::Constraint;
-use bullet::prelude::*;
+use bullet_physics::dynamics::Constraint;
+use bullet_physics::prelude::*;
 
 const DT: Real = 1.0 / 60.0;
 

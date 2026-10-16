@@ -189,7 +189,7 @@ def record_bullet(scene_name, precision, cwd):
 
 def record_rust(scene_name, precision, cwd):
     suffix = "rust" if precision == "f32" else "rust_f64"
-    cargo = ["cargo", "run", "-p", "bullet", "--example", "record_scenes",
+    cargo = ["cargo", "run", "-p", "bullet-physics", "--example", "record_scenes",
              scene_name, suffix]
     if precision == "f64":
         cargo += ["--features", "f64"]

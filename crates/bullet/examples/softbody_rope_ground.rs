@@ -7,9 +7,9 @@
 //!
 //! Run with `cargo run --example softbody_rope_ground`.
 
-use bullet::dynamics::{create_rope, PhysicsWorld, RigidBody};
-use bullet::math::{Real, Vector3};
-use bullet::shapes::CollisionShape;
+use bullet_physics::dynamics::{create_rope, PhysicsWorld, RigidBody};
+use bullet_physics::math::{Real, Vector3};
+use bullet_physics::shapes::CollisionShape;
 
 fn main() {
     let mut world = PhysicsWorld::new();

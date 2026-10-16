@@ -9,9 +9,9 @@
 //!
 //! Run with `cargo run --example joints`.
 
-use bullet::dynamics::{Constraint, JointFrame, PhysicsWorld, RigidBody};
-use bullet::math::{Quaternion, Real, Vector3};
-use bullet::shapes::CollisionShape;
+use bullet_physics::dynamics::{Constraint, JointFrame, PhysicsWorld, RigidBody};
+use bullet_physics::math::{Quaternion, Real, Vector3};
+use bullet_physics::shapes::CollisionShape;
 
 fn main() {
     let mut world = PhysicsWorld::new();
@@ -116,8 +116,8 @@ fn main() {
     world.add_constraint(Constraint::fixed(
         fixed_box,
         anchor_f,
-        JointFrame::new(Vector3::new(0.0, 0.5, 0.0), bullet::math::Matrix3::IDENTITY),
-        JointFrame::new(Vector3::new(0.0, -0.5, 0.0), bullet::math::Matrix3::IDENTITY),
+        JointFrame::new(Vector3::new(0.0, 0.5, 0.0), bullet_physics::math::Matrix3::IDENTITY),
+        JointFrame::new(Vector3::new(0.0, -0.5, 0.0), bullet_physics::math::Matrix3::IDENTITY),
     ));
     world.body_mut(fixed_box).linear_velocity = Vector3::new(1.0, 0.0, 0.0);
 
@@ -135,8 +135,8 @@ fn main() {
     world.add_constraint(Constraint::cone_twist(
         cone_bob,
         anchor_ct,
-        JointFrame::new(Vector3::ZERO, bullet::math::Matrix3::IDENTITY),
-        JointFrame::new(Vector3::ZERO, bullet::math::Matrix3::IDENTITY),
+        JointFrame::new(Vector3::ZERO, bullet_physics::math::Matrix3::IDENTITY),
+        JointFrame::new(Vector3::ZERO, bullet_physics::math::Matrix3::IDENTITY),
         0.52,
         0.52,
         -1.0,
@@ -157,8 +157,8 @@ fn main() {
     let mut slider = Constraint::slider(
         anchor_s,
         slider_box,
-        JointFrame::new(Vector3::ZERO, bullet::math::Matrix3::IDENTITY),
-        JointFrame::new(Vector3::ZERO, bullet::math::Matrix3::IDENTITY),
+        JointFrame::new(Vector3::ZERO, bullet_physics::math::Matrix3::IDENTITY),
+        JointFrame::new(Vector3::ZERO, bullet_physics::math::Matrix3::IDENTITY),
     );
     slider.slider_mut().enable_lin_motor(1.5, 100.0);
     world.add_constraint(slider);
@@ -177,8 +177,8 @@ fn main() {
     let mut dof = Constraint::generic_6dof(
         dof_box,
         anchor_d,
-        JointFrame::new(Vector3::ZERO, bullet::math::Matrix3::IDENTITY),
-        JointFrame::new(Vector3::ZERO, bullet::math::Matrix3::IDENTITY),
+        JointFrame::new(Vector3::ZERO, bullet_physics::math::Matrix3::IDENTITY),
+        JointFrame::new(Vector3::ZERO, bullet_physics::math::Matrix3::IDENTITY),
     );
     dof.generic_6dof_mut().set_angular_limits(
         Vector3::new(-1.0, -1.0, -0.52),

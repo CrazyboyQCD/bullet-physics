@@ -1,9 +1,9 @@
 // Browser-only cdylib: the wasm32 target is the only supported build (the
 // workspace's host-side `cargo test/clippy --workspace` runs see an empty
-// crate, so precision features forwarded to `bullet` never touch this code).
+// crate, so precision features forwarded to `bullet-physics` never touch this code).
 #![cfg(target_arch = "wasm32")]
 
-//! C ABI bindings that drive the `bullet` engine from a browser (the
+//! C ABI bindings that drive the `bullet-physics` engine from a browser (the
 //! renderer and UI live in `template.html` on the JS side, Babylon.js).        
 //!
 //! The physics library stays untouched; this is a thin harness: build a        
@@ -13,9 +13,9 @@
 //! exported once per scene so the JS side can build meshes without
 //! mirroring scene layout.
 
-use bullet::dynamics::{body::ActivationState, Constraint};
-use bullet::math::{Real, Vector3};
-use bullet::prelude::*;
+use bullet_physics::dynamics::{body::ActivationState, Constraint};
+use bullet_physics::math::{Real, Vector3};
+use bullet_physics::prelude::*;
 
 /// Floats per rigid-body pose: position (3) + orientation xyzw (4).
 /// (The spawn-table stride, 16 floats, is a JS-side contract — see template.html.)
@@ -253,7 +253,7 @@ impl Demo {
     fn scene_cloth(&mut self) {
         self.ground();
         let res = 18;
-        let mut cloth = bullet::dynamics::create_patch(
+        let mut cloth = bullet_physics::dynamics::create_patch(
             Vector3::new(-4.0, 9.0, -4.0),
             Vector3::new(4.0, 9.0, -4.0),
             Vector3::new(-4.0, 9.0, 4.0),

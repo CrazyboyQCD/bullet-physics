@@ -3,17 +3,17 @@
 //! parameters and prints per-frame trajectories so the two implementations
 //! can be diffed numerically.
 //!
-//! Usage: `cargo run -p bullet --example multibody_probe -- <scene> [frames]`
+//! Usage: `cargo run -p bullet-physics --example multibody_probe -- <scene> [frames]`
 //! with scene in {free_base, pendulum, two_link, p2p, motor, fixed,
 //! prismatic, spherical, planar, gear, joint_limit, spherical_limit,
 //! spherical_motor, link_ground, base_ground, mb_pushes_rb, rb_hits_mb,
 //! mb_mb, self_collision, joint_feedback, joint_feedback_contact, p2p_rb,
 //! fixed_rb, slider_rb}.
 
-use bullet::dynamics::multibody::constraint::MultiBodyConstraint;
-use bullet::dynamics::{BodyHandle, MultiBody, MultiBodyHandle, PhysicsWorld, RigidBody};
-use bullet::math::{Matrix3, Quaternion, Real, Vector3};
-use bullet::shapes::CollisionShape;
+use bullet_physics::dynamics::multibody::constraint::MultiBodyConstraint;
+use bullet_physics::dynamics::{BodyHandle, MultiBody, MultiBodyHandle, PhysicsWorld, RigidBody};
+use bullet_physics::math::{Matrix3, Quaternion, Real, Vector3};
+use bullet_physics::shapes::CollisionShape;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -87,7 +87,7 @@ fn scene_pendulum(dt: Real, frames: usize) {
         Vector3::new(0.0, -1.0, 0.0),
     );
     body.finalize_multidof();
-    body.set_joint_pos_multidof(0, &[bullet::math::FRAC_PI_2]);
+    body.set_joint_pos_multidof(0, &[bullet_physics::math::FRAC_PI_2]);
     world.add_multibody(body);
     for f in 0..frames {
         world.step_simulation(dt);
@@ -202,8 +202,8 @@ fn scene_fixed(dt: Real, frames: usize) {    let mut world = PhysicsWorld::new()
         None,
         Vector3::ZERO,
         Vector3::ZERO,
-        bullet::math::Matrix3::IDENTITY,
-        bullet::math::Matrix3::IDENTITY,
+        bullet_physics::math::Matrix3::IDENTITY,
+        bullet_physics::math::Matrix3::IDENTITY,
         &snapshot,
     );
     world.add_multibody_constraint(c);
@@ -257,7 +257,7 @@ fn scene_spherical(dt: Real, frames: usize) {
     );
     body.finalize_multidof();
     // Tilt the joint 60 degrees about X.
-    let half = bullet::math::FRAC_PI_2 / 3.0;
+    let half = bullet_physics::math::FRAC_PI_2 / 3.0;
     let q = [half.sin(), 0.0, 0.0, half.cos()];
     body.set_joint_pos_multidof(0, &q);
     world.add_multibody(body);
@@ -391,7 +391,7 @@ fn scene_spherical_limit(dt: Real, frames: usize) {
         Vector3::new(0.0, 0.0, -1.0),
     );
     body.finalize_multidof();
-    let half = bullet::math::FRAC_PI_2 / 3.0;
+    let half = bullet_physics::math::FRAC_PI_2 / 3.0;
     let q = [half.sin(), 0.0, 0.0, half.cos()];
     body.set_joint_pos_multidof(0, &q);
     let ib = world.add_multibody(body);
@@ -424,7 +424,7 @@ fn scene_spherical_motor(dt: Real, frames: usize) {
         Vector3::new(0.0, 0.0, -1.0),
     );
     body.finalize_multidof();
-    let half = bullet::math::FRAC_PI_2 / 3.0;
+    let half = bullet_physics::math::FRAC_PI_2 / 3.0;
     let q = [half.sin(), 0.0, 0.0, half.cos()];
     body.set_joint_pos_multidof(0, &q);
     let ib = world.add_multibody(body);
@@ -478,7 +478,7 @@ fn scene_link_ground(dt: Real, frames: usize) {
     mb.finalize_multidof();
     // q = +pi/2 rotates the COM from straight down to (+1, 0) — the
     // horizontal release, the same pose as the `pendulum` scene.
-    mb.set_joint_pos_multidof(0, &[bullet::math::FRAC_PI_2]);
+    mb.set_joint_pos_multidof(0, &[bullet_physics::math::FRAC_PI_2]);
     mb.base_pos = Vector3::new(0.0, 1.25, 0.0);
     mb.set_link_collider(0, CollisionShape::sphere(0.3), 0.5, 0.0);
     world.add_multibody(mb);
@@ -765,7 +765,7 @@ fn scene_joint_feedback_contact(dt: Real, frames: usize) {
         Vector3::new(0.0, -1.0, 0.0),
     );
     mb.finalize_multidof();
-    mb.set_joint_pos_multidof(0, &[bullet::math::FRAC_PI_2]);
+    mb.set_joint_pos_multidof(0, &[bullet_physics::math::FRAC_PI_2]);
     mb.base_pos = Vector3::new(0.0, 1.05, 0.0);
     mb.set_link_collider(0, CollisionShape::sphere(0.3), 0.0, 0.0);
     mb.enable_link_joint_feedback(0);

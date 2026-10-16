@@ -28,7 +28,7 @@
 //! ```
 //!
 //! Run in release for meaningful numbers:
-//! `cargo run --release -p bullet --example perf_scenes -- <scene>`.
+//! `cargo run --release -p bullet-physics --example perf_scenes -- <scene>`.
 //!
 //! Usage: perf_scenes <scene> [--repeats N] [--stages] [--mem]
 
@@ -92,14 +92,14 @@ fn mem_peak_mb() -> f64 {
     PEAK_BYTES.load(Ordering::Relaxed) as f64 / 1048576.0
 }
 
-use bullet::dynamics::{
+use bullet_physics::dynamics::{
     create_patch, BodyHandle, Constraint, JointFrame, MultiBody, PhysicsWorld, RigidBody,
     StepStage, STEP_STAGES,
 };
-use bullet::dynamics::constraint::RotateOrder;
-use bullet::math::{Matrix3, Quaternion, Real, Vector3, PI};
-use bullet::shapes::CollisionShape;
-use bullet::collision::broadphase::{BroadPhaseBackend, DbvtBroadPhase};
+use bullet_physics::dynamics::constraint::RotateOrder;
+use bullet_physics::math::{Matrix3, Quaternion, Real, Vector3, PI};
+use bullet_physics::shapes::CollisionShape;
+use bullet_physics::collision::broadphase::{BroadPhaseBackend, DbvtBroadPhase};
 
 // Included via #[path] from src/perf_scenes_table.rs (auto-generated from
 // tools/perf_scenes.json).
@@ -322,9 +322,9 @@ fn add_softs(world: &mut PhysicsWorld, c: &PerfSoftSpec) {
         sb.cfg.k_df = c.k_df as Real;
         sb.materials[0].k_lst = c.k_lst as Real;
         sb.cfg.aeromodel = if c.aero == 1 {
-            bullet::dynamics::AeroModel::VTwoSided
+            bullet_physics::dynamics::AeroModel::VTwoSided
         } else {
-            bullet::dynamics::AeroModel::VPoint
+            bullet_physics::dynamics::AeroModel::VPoint
         };
         sb.wind_velocity = Vector3::new(c.wind[0] as Real, c.wind[1] as Real, c.wind[2] as Real);
     }

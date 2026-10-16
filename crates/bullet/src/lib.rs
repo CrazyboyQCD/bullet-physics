@@ -1,4 +1,4 @@
-//! # bullet
+//! # bullet-physics
 //!
 //! A pure Rust physics engine reimplementing the core of Bullet Physics.
 //!

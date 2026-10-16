@@ -12,15 +12,15 @@
 //! Output is diffed against the Bullet recording by tools/compare.py /
 //! tools/parity.py (see docs/parity-harness.md).
 //!
-//! Usage: cargo run -p bullet --example record_scenes -- [scene_name]
+//! Usage: cargo run -p bullet-physics --example record_scenes -- [scene_name]
 
 use std::fs::File;
 use std::io::Write;
 
-use bullet::dynamics::body::RayFilter;
-use bullet::dynamics::{BodyHandle, CollisionFlags, PhysicsWorld, RigidBody};
-use bullet::math::{Real, Vector3};
-use bullet::shapes::{CollisionShape, TriangleMeshPart};
+use bullet_physics::dynamics::body::RayFilter;
+use bullet_physics::dynamics::{BodyHandle, CollisionFlags, PhysicsWorld, RigidBody};
+use bullet_physics::math::{Real, Vector3};
+use bullet_physics::shapes::{CollisionShape, TriangleMeshPart};
 
 // Included via #[path] from src/parity_scenes.rs (auto-generated from
 // tools/scenes.json).

@@ -111,7 +111,7 @@ def main():
 
     # 3. Demo assertions.
     for demo in DEMOS:
-        r = run(["cargo", "run", "-p", "bullet", "--example", demo], capture_output=True)
+        r = run(["cargo", "run", "-p", "bullet-physics", "--example", demo], capture_output=True)
         if r.returncode != 0 or b"OK" not in r.stdout:
             failed.append(f"demo {demo}")
 

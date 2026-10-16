@@ -3,16 +3,16 @@
 //! revolute links — the Rust port of `BulletDynamics/Featherstone`
 //! (`btMultiBody`, `btMultiBodyDynamicsWorld`, `btMultiBodyConstraint`).
 //!
-//! Unlike the rigid-body [`bullet::dynamics::PhysicsWorld`], articulated
-//! bodies are stepped through the fused [`bullet::dynamics::PhysicsWorld`];
+//! Unlike the rigid-body [`bullet_physics::dynamics::PhysicsWorld`], articulated
+//! bodies are stepped through the fused [`bullet_physics::dynamics::PhysicsWorld`];
 //! joints between them are `btMultiBody*`-style constraints solved by the
 //! multibody projected Gauss-Seidel solver inside
 //! `world.step_simulation(dt)`.
 //!
 //! Run with `cargo run --example multibody`.
 
-use bullet::dynamics::{MultiBody, MultiBodyConstraint, MultiBodyHandle, PhysicsWorld};
-use bullet::math::{Quaternion, Real, Vector3};
+use bullet_physics::dynamics::{MultiBody, MultiBodyConstraint, MultiBodyHandle, PhysicsWorld};
+use bullet_physics::math::{Quaternion, Real, Vector3};
 
 fn main() {
     // --- Scene 1: fixed-base revolute pendulum released from the horizontal.
@@ -30,7 +30,7 @@ fn main() {
         Vector3::new(0.0, -1.0, 0.0),
     );
     pendulum.finalize_multidof();
-    pendulum.set_joint_pos_multidof(0, &[bullet::math::FRAC_PI_2]);
+    pendulum.set_joint_pos_multidof(0, &[bullet_physics::math::FRAC_PI_2]);
     world.add_multibody(pendulum);
 
     // --- Scene 2: a fixed-base prismatic link pushed along its rail by a

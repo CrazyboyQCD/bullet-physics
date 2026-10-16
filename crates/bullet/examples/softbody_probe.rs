@@ -3,15 +3,15 @@
 //! per-frame trajectories so the two implementations can be diffed
 //! numerically.
 //!
-//! Usage: `cargo run -p bullet --example softbody_probe -- <scene> [frames]`
+//! Usage: `cargo run -p bullet-physics --example softbody_probe -- <scene> [frames]`
 //! with scene in {rope_pendulum, rope_ground, cloth_plane}.
 
-use bullet::dynamics::{
+use bullet_physics::dynamics::{
     create_ellipsoid, create_patch, create_rope, AngularJointSpecs, LinearJointSpecs,
     PhysicsWorld, RigidBody, Side, SoftBodyHandle, SoftCollision,
 };
-use bullet::math::{Real, Vector3};
-use bullet::shapes::CollisionShape;
+use bullet_physics::math::{Real, Vector3};
+use bullet_physics::shapes::CollisionShape;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -60,7 +60,7 @@ fn build_patch(
     resx: usize,
     resy: usize,
     fixeds: u32,
-) -> bullet::dynamics::SoftBody {
+) -> bullet_physics::dynamics::SoftBody {
     create_patch(corner00, corner10, corner01, corner11, resx, resy, fixeds, true, 0.0)
 }
 

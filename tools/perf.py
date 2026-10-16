@@ -8,7 +8,7 @@ Orchestrates the perf pipeline for one scene (or all):
   2. Self-check the f32 Bullet static libs (imported from tools/parity.py;
      built via CMake if missing) and tools/bullet_perf.exe (rebuilt via
      tools/build_recorder.py's build_perf).
-  3. Build the Rust runner in release (cargo build --release -p bullet
+  3. Build the Rust runner in release (cargo build --release -p bullet-physics
      --example perf_scenes).
   4. Run both runners `--repeats` times (fresh world per repeat), take the
      median per-frame/total/last300 wall-clock time per engine, and print a
@@ -122,7 +122,7 @@ def run_bullet(scene, repeats):
 def run_rust(scene, repeats, extra=()):
     # --release: perf numbers are meaningless in a debug build. Pass -q so
     # the runner's protocol lines are the only stdout content.
-    cmd = ["cargo", "run", "--release", "-q", "-p", "bullet",
+    cmd = ["cargo", "run", "--release", "-q", "-p", "bullet-physics",
            "--example", "perf_scenes", "--", scene, "--repeats", str(repeats), *extra]
     r = run(cmd, cwd=ROOT, capture_output=True, text=True)
     if r.returncode != 0:
@@ -167,7 +167,7 @@ def run_bullet_mem(scene):
 
 
 def run_rust_mem(scene):
-    cmd = ["cargo", "run", "--release", "-q", "-p", "bullet",
+    cmd = ["cargo", "run", "--release", "-q", "-p", "bullet-physics",
            "--example", "perf_scenes", "--", scene, "--mem"]
     r = run(cmd, cwd=ROOT, capture_output=True, text=True)
     if r.returncode != 0:
@@ -203,7 +203,7 @@ def build_mem_report(scene, rust, bullet):
 
 
 def run_rust_stages(scene):
-    cmd = ["cargo", "run", "--release", "-q", "-p", "bullet",
+    cmd = ["cargo", "run", "--release", "-q", "-p", "bullet-physics",
            "--example", "perf_scenes", "--", scene, "--stages"]
     r = run(cmd, cwd=ROOT, capture_output=True, text=True)
     if r.returncode != 0:
@@ -438,7 +438,7 @@ def main():
         if not ensure_perf_exe():
             print("error: failed to build bullet_perf.exe", file=sys.stderr)
             return 2
-        r = run(["cargo", "build", "--release", "-p", "bullet",
+        r = run(["cargo", "build", "--release", "-p", "bullet-physics",
                  "--example", "perf_scenes"], cwd=ROOT)
         if r.returncode != 0:
             print("error: failed to build the Rust perf runner", file=sys.stderr)

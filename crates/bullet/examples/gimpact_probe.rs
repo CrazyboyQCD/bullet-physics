@@ -2,10 +2,10 @@
 //! numerical comparison against the C++ `tools/gimpact_probe.cpp` (real
 //! Bullet with `btGImpactMeshShape`).
 //!
-//! Usage: `cargo run -p bullet --release --example gimpact_probe -- <scene> [frames]`
+//! Usage: `cargo run -p bullet-physics --release --example gimpact_probe -- <scene> [frames]`
 //! Scenes: `inertia` | `shell_on_plane` | `shell_on_bvh` | `sphere_on_shell`
 
-use bullet::prelude::*;
+use bullet_physics::prelude::*;
 
 const DT: Real = 1.0 / 60.0;
 

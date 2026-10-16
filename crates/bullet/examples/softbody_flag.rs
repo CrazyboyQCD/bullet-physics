@@ -7,8 +7,8 @@
 //!
 //! Run with `cargo run --example softbody_flag`.
 
-use bullet::dynamics::{create_patch, patch_fixeds, AeroModel, PhysicsWorld, SoftBody};
-use bullet::math::{Real, Vector3};
+use bullet_physics::dynamics::{create_patch, patch_fixeds, AeroModel, PhysicsWorld, SoftBody};
+use bullet_physics::math::{Real, Vector3};
 
 fn main() {
     let dt: Real = 1.0 / 60.0;
