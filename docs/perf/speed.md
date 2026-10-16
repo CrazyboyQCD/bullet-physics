@@ -56,7 +56,7 @@ the analysis text below each report is hand-written).
 ## Methodology
 
 - **Runners.** `tools/bullet_perf.exe` (C++, `tools/bullet_perf.cpp`) and
-  `cargo run --release -p bullet-physics --example perf_scenes` consume the same
+  `cargo run --profile release-debug -p bullet-physics --example perf_scenes` consume the same
   generated scene tables (`tools/perf_scenes.json` ->
   `tools/generate_perf_scenes.py` -> `bullet_perf_scenes.h` +
   `src/perf_scenes_table.rs`), mirroring the parity harness's single-source
@@ -69,9 +69,11 @@ the analysis text below each report is hand-written).
 - **Fairness.**
   - Both sides build in their default release configuration: MSVC `/O2` for
     the C++ runner (Bullet libs are the `target/bullet3-build` Release
-    statics), `cargo --release` for Rust (the workspace profile adds fat LTO
-    + `codegen-units = 1`; measured ~0 vs the default profile, so the
-    comparison is unaffected). No arch-specific flags on either side.
+    statics). The Rust runner uses the workspace `release-debug` profile,
+    which inherits stock `release` and adds fat LTO + `codegen-units = 1` +
+    debug symbols (measured ~0 vs the default profile, so the comparison is
+    unaffected); stock `--release` is deliberately left untouched for
+    downstream users. No arch-specific flags on either side.
   - The C++ broad phase follows the scene spec (same algorithm on both
     sides): `btAxisSweep3` for the sweep scenes — the same 3-axis
     sweep-and-prune as this crate's `AxisSweep3`, scoped with the scene's

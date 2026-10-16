@@ -28,7 +28,7 @@
 //! ```
 //!
 //! Run in release for meaningful numbers:
-//! `cargo run --release -p bullet-physics --example perf_scenes -- <scene>`.
+//! `cargo run --profile release-debug -p bullet-physics --example perf_scenes -- <scene>`.
 //!
 //! Usage: perf_scenes <scene> [--repeats N] [--stages] [--mem]
 
@@ -495,7 +495,7 @@ fn run_dump(spec: &PerfSceneSpec, dt: Real) {
 
 fn main() {
     if cfg!(debug_assertions) {
-        eprintln!("perf_scenes: warning: debug build; run with `cargo run --release`");
+        eprintln!("perf_scenes: warning: debug build; run with `cargo run --profile release-debug`");
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let scene_name = args.first().cloned().unwrap_or_default();

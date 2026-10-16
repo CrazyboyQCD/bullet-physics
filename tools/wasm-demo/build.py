@@ -38,10 +38,6 @@ def build_wasm() -> None:
         "wasm32-unknown-unknown",
         "-p",
         "bullet-wasm-demo",
-        # The workspace release profile keeps debug info for host profiling;
-        # the demo page does not need it (6.1 MB -> 0.5 MB).
-        "--config",
-        "profile.release.debug=false",
     ]
     print("+", " ".join(cmd))
     subprocess.run(cmd, check=True, cwd=ROOT)

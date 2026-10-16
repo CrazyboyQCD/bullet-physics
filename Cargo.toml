@@ -20,10 +20,15 @@ repository = "https://github.com/CrazyboyQCD/bullet-physics"
 glam = { version = "0.33", default-features = false }
 approx = "0.5"
 
-# Release builds keep debug symbols so profilers (cargo-flamegraph / samply /
-# ETW) can attribute samples to functions; the MSVC linker emits them into
-# the PDB alongside the optimized code, so the runtime cost is zero.
-[profile.release]
+# Opt-in profile for profiling and the perf harness. It inherits the stock
+# release profile and only adds what our own tooling needs, so a plain
+# `cargo build --release` keeps the vanilla Cargo settings.
+#
+# Debug symbols let profilers (cargo-flamegraph / samply / ETW) attribute
+# samples to functions; the MSVC linker emits them into the PDB alongside the
+# optimized code, so the runtime cost is zero.
+[profile.release-debug]
+inherits = "release"
 debug = true
 # Cross-crate inlining for the hot narrow-phase/solver loops (glam calls live
 # in bullet-math but inline into bullet-collision only under LTO). No
