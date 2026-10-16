@@ -1,6 +1,7 @@
 zlib License
 
 Copyright (c) 2026 CrazyboyQCD
+Original Bullet Physics Copyright (c) 2003-2026 Erwin Coumans.
 
 This software is a pure Rust reimplementation of the Bullet Continuous
 Collision Detection and Physics Library (http://bulletphysics.org), which

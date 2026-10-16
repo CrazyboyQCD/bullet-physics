@@ -56,7 +56,7 @@ the analysis text below each report is hand-written).
 ## Methodology
 
 - **Runners.** `tools/bullet_perf.exe` (C++, `tools/bullet_perf.cpp`) and
-  `cargo run --release -p bullet --example perf_scenes` consume the same
+  `cargo run --release -p bullet-physics --example perf_scenes` consume the same
   generated scene tables (`tools/perf_scenes.json` ->
   `tools/generate_perf_scenes.py` -> `bullet_perf_scenes.h` +
   `src/perf_scenes_table.rs`), mirroring the parity harness's single-source

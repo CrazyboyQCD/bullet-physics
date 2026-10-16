@@ -22,7 +22,7 @@ Under the hood:
   static `LinearMath`/`BulletCollision`/`BulletDynamics` libs only. Recorder:
   `tools/bullet_record.cpp` (`tools/build_recorder.py`), solver mode =
   defaults with `SOLVER_RANDMIZE_ORDER` cleared, `dt = 1/60`, 10 iterations.
-- Rust: `cargo run -p bullet --example record_scenes` (f32 default). Both
+- Rust: `cargo run -p bullet-physics --example record_scenes` (f32 default). Both
   recorders read scene tables generated from `tools/scenes.json` (single
   source of truth, see `tools/generate_scenes.py`).
 - Output: `target/<scene>_<body>_bullet.csv`, `target/<scene>_<body>_rust.csv`
@@ -860,7 +860,7 @@ f64 pair of the f32 scene above: identical pattern and classification - one-step
 The §7 collider scenes of `docs/design/multibody-collision.md` (phase C's missing
 numerical validation) recorded as extended probe scenes rather than the
 scenes.json pipeline: `tools/multibody_probe(.cpp/_f64.exe) <scene>` vs
-`cargo run -p bullet [--features f64] --example multibody_probe -- <scene>`,
+`cargo run -p bullet-physics [--features f64] --example multibody_probe -- <scene>`,
 compared with `python tools/mbdiff.py` (tolerance-based — plain diff flips on
 %.6f rounding boundaries). Build via `python tools/build_multibody_probe.py
 [f32|f64|both]`.

@@ -53,8 +53,8 @@ cargo test --workspace --features f64                    # f64
 cargo clippy --workspace --all-targets                   # must be clean
 cargo clippy --workspace --all-targets --features f64    # f64-only lints exist
 python tools/check.py                                    # tests + 14 demo assertions
-cargo check -p bullet --no-default-features --features libm,f32   # no_std
-cargo check -p bullet --no-default-features --features libm,f64   # no_std
+cargo check -p bullet-physics --no-default-features --features libm,f32   # no_std
+cargo check -p bullet-physics --no-default-features --features libm,f64   # no_std
 ```
 
 Toolchain notes:

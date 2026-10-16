@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the design of `bullet_physics`, a pure Rust
+This document describes the design of `bullet-physics`, a pure Rust
 reimplementation of the core of Bullet Physics. It reflects the code as of
 commit `64ab184` (2026-09-07): the full rigid-body pipeline, Featherstone
 multibodies with collision integration, the classic SoftBody system, and the
@@ -23,9 +23,9 @@ bullet-math  ──►  bullet-collision  ──►  bullet-dynamics  ──► 
 | `bullet-math`     | `Real` scalar + `Vector3`/`Quaternion`/`Matrix3`/`Transform` aliases, `Aabb`, inertia helpers, spatial algebra (`btSpatialAlgebra.h` port) |
 | `bullet-collision`| `shapes` (10 shape kinds), `broadphase`, `narrowphase` (GJK/EPA/SAT/convex cast), `manifold`, `raycast` |
 | `bullet-dynamics` | `body` (RigidBody), `world` (PhysicsWorld), `solver`, `constraint` (joints), `character`, `vehicle`, `multibody` |
-| `bullet`          | Re-exports the crates plus a `prelude` for convenience                     |
+| `bullet-physics`  | Re-exports the crates plus a `prelude` for convenience                     |
 
-Each crate is independently versioned and publishable; the `bullet` facade is
+Each crate is independently versioned and publishable; the `bullet-physics` facade is
 the recommended entry point for downstream users.
 
 ## 2. Precision (f32 / f64)

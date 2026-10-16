@@ -315,7 +315,7 @@ full test suite: PASS   (f32: PASS, f64: PASS)
 ```
 
 (Pre-round baseline: 417.) Toolchain gates at the fix round: `cargo clippy`
-clean on both features, `cargo check -p bullet --no-default-features
+clean on both features, `cargo check -p bullet-physics --no-default-features
 --features libm` clean for f32/f64 (no_std), `python tools/check.py` green
 (demos + assertions), parity fresh.
 

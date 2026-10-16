@@ -1,12 +1,8 @@
-# bullet_physics
+# bullet-physics
 
 A pure Rust physics engine reimplementing the core of
 [Bullet Physics](https://github.com/bulletphysics/bullet3), filling the gap for
 a high-performance, modern physics library in the Rust ecosystem.
-
-- **Math**: [`glam`](https://crates.io/crates/glam) with SIMD acceleration.
-- **License**: zlib (same as upstream Bullet Physics).
-- **Safety**: `#![deny(unsafe_code)]`.
 
 ## Workspace layout
 
@@ -18,7 +14,7 @@ library boundaries:
 | `bullet-math`     | SIMD-accelerated linear math, precision-swappable glam aliases     | `LinearMath`      |
 | `bullet-collision`| Shapes, broad phase, narrow phase, contact manifolds               | `BulletCollision` |
 | `bullet-dynamics` | Rigid bodies, simulation world, constraint solvers                 | `BulletDynamics`  |
-| `bullet`          | Facade crate re-exporting the full API                             | —                 |
+| `bullet-physics`  | Facade crate re-exporting the full API                             | —                 |
 
 See [docs/design/architecture.md](docs/design/architecture.md) for the detailed design.
 
@@ -29,7 +25,7 @@ See [docs/design/architecture.md](docs/design/architecture.md) for the detailed 
   `BT_USE_DOUBLE_PRECISION`).
 
 ```toml
-bullet = { path = "crates/bullet", features = ["f64"] }
+bullet-physics = { path = "crates/bullet", features = ["f64"] }
 ```
 
 ## no_std
@@ -40,7 +36,7 @@ pure-Rust `libm` crate) and drop the default features:
 
 ```toml
 [dependencies]
-bullet = { path = "crates/bullet", default-features = false, features = ["libm"] }
+bullet-physics = { path = "crates/bullet", default-features = false, features = ["libm"] }
 ```
 
 - Default/std builds are bit-identical to always; only `libm` builds may
@@ -63,15 +59,15 @@ cargo test
 cargo test --features f64
 
 # Run the falling-box demo
-cargo run -p bullet --example falling_box
+cargo run -p bullet-physics --example falling_box
 ```
 
 ## Usage
 
 ```rust
-use bullet::dynamics::{PhysicsWorld, RigidBody};
-use bullet::math::Vector3;
-use bullet::shapes::CollisionShape;
+use bullet_physics::dynamics::{PhysicsWorld, RigidBody};
+use bullet_physics::math::Vector3;
+use bullet_physics::shapes::CollisionShape;
 
 let mut world = PhysicsWorld::new();
 world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
@@ -101,7 +97,7 @@ for _ in 0..300 {
 ### Kinematic bodies (moving platforms)
 
 ```rust
-use bullet::dynamics::RigidBody;
+use bullet_physics::dynamics::RigidBody;
 
 // Infinite mass, pose driven by the velocities you set; gravity, damping
 // and forces never touch it, and it pushes dynamic bodies through contacts.

@@ -177,5 +177,5 @@ builds:
 - **`vec!`/`Vec`/`Box`/`BTreeSet`**: lib code reaches them through
   `#[macro_use] extern crate alloc` plus per-module `use alloc::...`
   imports; `std` builds resolve the identical std types. Verified:
-  `cargo check -p bullet --no-default-features --features libm,f32|f64`
+  `cargo check -p bullet-physics --no-default-features --features libm,f32|f64`
   and a `wasm32-unknown-unknown` cross-check, zero errors/warnings.

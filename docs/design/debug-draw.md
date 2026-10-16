@@ -735,7 +735,7 @@ that every future debug feature is non-breaking.
 Conceptual usage only (not an implementation, not a renderer):
 
 ```rust
-use bullet::prelude::*;
+use bullet_physics::prelude::*;
 
 // after world.step_simulation(dt):
 world.debug_primitives(

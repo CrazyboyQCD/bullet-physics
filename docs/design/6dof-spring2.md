@@ -337,7 +337,7 @@ Setters on `Generic6DofSpring2Constraint` (upstream 1:1):
 
 Facade: re-export `Generic6DofSpring2Constraint`,
 `RotationalLimitMotor2`, `TranslationalLimitMotor2`, `RotateOrder` from
-the `bullet` facade alongside the classic 6DOF names.
+the `bullet-physics` facade alongside the classic 6DOF names.
 
 ## 9. Upstream-dead / deviation notes (draft §1 entries for
 `bullet-deviations.md`)
