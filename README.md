@@ -3,6 +3,9 @@
 A pure Rust physics engine reimplementing the core of
 [Bullet Physics](https://github.com/bulletphysics/bullet3).
 
+Requires Rust **1.88** or newer (declared as `rust-version` in `Cargo.toml`;
+the code uses let-chains, which edition 2024 stabilized in 1.88).
+
 ## Workspace layout
 
 The project is a Cargo workspace of focused crates, mirroring Bullet's official

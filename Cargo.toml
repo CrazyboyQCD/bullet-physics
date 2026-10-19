@@ -10,7 +10,8 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
+rust-version = "1.88"
 edition = "2024"
 license = "Zlib"
 authors = ["CrazyboyQCD <yzc13697716338@gmail.com>"]

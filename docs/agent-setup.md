@@ -39,8 +39,9 @@
 
 ## 2. Tier 1 — Rust-side development (no extra setup)
 
-Requirements: **Rust** (no toolchain pin committed; the project is validated
-on `rustc 1.99.0-nightly (0e29c21d9 2026-07-21)` — match it when in doubt),
+Requirements: **Rust** (MSRV **1.88**, declared in `Cargo.toml` and enforced
+by cargo; development is validated on
+`rustc 1.101.0-nightly (b6eeb93c9 2026-10-18)` — match it when in doubt),
 **Python 3** (tools), **Git**.
 
 On Windows, Git-for-Windows ships a `/usr/bin/link.exe` (GNU coreutils) that can
