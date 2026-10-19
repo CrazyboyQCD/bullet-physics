@@ -148,8 +148,11 @@ fn local_inside(
         }
         CollisionShape::Capsule(c) => {
             let p = orientation.inverse() * (point - position);
-            segment_distance_squared(Vector3::ZERO, Vector3::new(0.0, c.half_height, 0.0), p)
-                <= c.radius * c.radius
+            segment_distance_squared(
+                Vector3::new(0.0, -c.half_height, 0.0),
+                Vector3::new(0.0, c.half_height, 0.0),
+                p,
+            ) <= c.radius * c.radius
         }
         CollisionShape::Cylinder(c) => {
             let p = orientation.inverse() * (point - position);
@@ -274,7 +277,7 @@ fn plane_raycast(normal: Vector3, constant: Real, from: Vector3, to: Vector3) ->
 fn capsule_raycast(radius: Real, half_height: Real, from: Vector3, to: Vector3) -> Option<LocalHit> {
     let d = to - from;
     if segment_distance_squared(
-        Vector3::ZERO,
+        Vector3::new(0.0, -half_height, 0.0),
         Vector3::new(0.0, half_height, 0.0),
         from,
     ) <= radius * radius
@@ -736,6 +739,38 @@ mod tests {
         let c = CollisionShape::capsule(0.5, 1.0);
         let h = ray(&c, Vector3::ZERO, Vector3::new(0.0, 2.0, 0.0)).unwrap();
         assert_eq!(h.fraction, 0.0);
+    }
+
+    #[test]
+    fn capsule_interior_start_lower_cylinder_half() {
+        let c = CollisionShape::capsule(0.5, 1.0);
+        let h = ray(&c, Vector3::new(0.0, -0.5, 0.0), Vector3::new(0.0, -3.0, 0.0)).unwrap();
+        assert_eq!(h.fraction, 0.0);
+    }
+
+    #[test]
+    fn capsule_interior_start_lower_cap() {
+        let c = CollisionShape::capsule(0.5, 1.0);
+        // Inside the lower hemisphere (center y = -1, radius 0.5).
+        let h = ray(&c, Vector3::new(0.0, -1.2, 0.0), Vector3::new(0.0, -3.0, 0.0)).unwrap();
+        assert_eq!(h.fraction, 0.0);
+    }
+
+    #[test]
+    fn capsule_inside_point_covers_the_lower_half() {
+        let c = CollisionShape::capsule(0.5, 1.0);
+        assert!(super::local_inside(
+            &c,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::new(0.0, -0.8, 0.0),
+        ));
+        assert!(!super::local_inside(
+            &c,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::new(0.0, -1.8, 0.0),
+        ));
     }
 
     #[test]
