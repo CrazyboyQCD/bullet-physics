@@ -71,7 +71,3 @@ consumer of the published crates should know.
   pair filters, minimal read-only debug draw.
 - Precision and platform: `f32` (default) and `f64` features; `no_std`
   support with a pure-Rust `libm` math backend behind the `libm` feature.
-
-[Unreleased]: https://github.com/CrazyboyQCD/bullet-physics/compare/0.1.1...HEAD
-[0.1.1]: https://github.com/CrazyboyQCD/bullet-physics/compare/0.1.0...0.1.1
-[0.1.0]: https://github.com/CrazyboyQCD/bullet-physics/releases/tag/0.1.0
