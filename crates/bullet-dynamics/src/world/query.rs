@@ -165,9 +165,9 @@ impl PhysicsWorld {
     /// except `ignore`, returning the hit body handle and the closest hit.
     ///
     /// Mirrors `btCollisionWorld::convexSweep` feeding a
-    /// `ClosestConvexResultCallback` (the character controller's step
-    /// sweeps). The broad phase prunes bodies whose AABB does not touch the
-    /// swept AABB of the moving shape.
+    /// `ClosestConvexResultCallback` with the callback-default filter
+    /// (the character controller's step sweeps). The broad phase prunes
+    /// bodies whose AABB does not touch the swept AABB of the moving shape.
     pub fn convex_sweep_closest(
         &self,
         shape: &bullet_collision::shapes::CollisionShape,
@@ -175,6 +175,21 @@ impl PhysicsWorld {
         ori: Quaternion,
         to: Vector3,
         ignore: Option<BodyHandle>,
+    ) -> Option<(BodyHandle, SweepHit)> {
+        self.convex_sweep_closest_filtered(shape, from, ori, to, ignore, RayFilter::DEFAULT)
+    }
+
+    /// Closest convex sweep among the bodies the `filter` accepts — the
+    /// symmetric group & mask test of
+    /// `ClosestConvexResultCallback::needsCollision`.
+    pub fn convex_sweep_closest_filtered(
+        &self,
+        shape: &bullet_collision::shapes::CollisionShape,
+        from: Vector3,
+        ori: Quaternion,
+        to: Vector3,
+        ignore: Option<BodyHandle>,
+        filter: RayFilter,
     ) -> Option<(BodyHandle, SweepHit)> {
         let swept = shape
             .world_aabb(from, ori)
@@ -189,6 +204,9 @@ impl PhysicsWorld {
                 continue;
             }
             let body = &self.bodies[i];
+            if !filter.accepts(body) {
+                continue;
+            }
             if let Some(hit) = narrowphase::convex_cast(
                 shape,
                 from,
@@ -207,13 +225,29 @@ impl PhysicsWorld {
 
     /// Contact manifolds between `shape` at `pos`/`ori` and every body except
     /// `ignore` (the character controller's touching contacts and penetration
-    /// recovery, mirroring a ghost object's overlapping-pair manifolds).
+    /// recovery, mirroring a ghost object's overlapping-pair manifolds with
+    /// the callback-default filter).
     pub fn contact_test(
         &self,
         shape: &bullet_collision::shapes::CollisionShape,
         pos: Vector3,
         ori: Quaternion,
         ignore: Option<BodyHandle>,
+    ) -> Vec<(BodyHandle, ContactManifold)> {
+        self.contact_test_filtered(shape, pos, ori, ignore, RayFilter::DEFAULT)
+    }
+
+    /// Contact manifolds against the bodies the `filter` accepts — the
+    /// symmetric group & mask test of
+    /// `ContactResultCallback::needsCollision` (the filter
+    /// `btCollisionWorld::contactTest` consults per candidate).
+    pub fn contact_test_filtered(
+        &self,
+        shape: &bullet_collision::shapes::CollisionShape,
+        pos: Vector3,
+        ori: Quaternion,
+        ignore: Option<BodyHandle>,
+        filter: RayFilter,
     ) -> Vec<(BodyHandle, ContactManifold)> {
         let aabb = shape.world_aabb(pos, ori);
         let mut out = Vec::new();
@@ -226,6 +260,9 @@ impl PhysicsWorld {
                 continue;
             }
             let body = &self.bodies[i];
+            if !filter.accepts(body) {
+                continue;
+            }
             if let Some(m) = narrowphase::collide(
                 shape,
                 pos,
@@ -462,6 +499,69 @@ mod tests {
                     Some(BodyHandle::from_index(0)),
                 )
                 .is_empty()
+        );
+    }
+
+    /// Sweep and contact queries must apply the same symmetric group & mask
+    /// filter as the rays: a body excluded from the default filter is
+    /// invisible to all three, and a matching filter sees it.
+    #[test]
+    fn sweep_and_contact_queries_honor_the_collision_filter() {
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            RigidBody::new_static(
+                bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(1.0)),
+                Vector3::ZERO,
+            )
+            .collision_filter(filter_groups::STATIC, filter_groups::STATIC),
+        );
+        let probe = bullet_collision::shapes::CollisionShape::box_shape(Vector3::splat(0.5));
+        // Default filter (group 1 / mask all): the STATIC-only body is
+        // excluded from both queries...
+        assert!(
+            world
+                .convex_sweep_closest(
+                    &probe,
+                    Vector3::new(5.0, 0.0, 0.0),
+                    Quaternion::IDENTITY,
+                    Vector3::new(-5.0, 0.0, 0.0),
+                    None,
+                )
+                .is_none()
+        );
+        assert!(
+            world
+                .contact_test(&probe, Vector3::new(0.9, 0.0, 0.0), Quaternion::IDENTITY, None)
+                .is_empty()
+        );
+        // ...while a filter whose group includes STATIC sees it again.
+        let filter = RayFilter {
+            group: filter_groups::DEFAULT | filter_groups::STATIC,
+            mask: filter_groups::ALL,
+        };
+        assert!(
+            world
+                .convex_sweep_closest_filtered(
+                    &probe,
+                    Vector3::new(5.0, 0.0, 0.0),
+                    Quaternion::IDENTITY,
+                    Vector3::new(-5.0, 0.0, 0.0),
+                    None,
+                    filter,
+                )
+                .is_some()
+        );
+        assert_eq!(
+            world
+                .contact_test_filtered(
+                    &probe,
+                    Vector3::new(0.9, 0.0, 0.0),
+                    Quaternion::IDENTITY,
+                    None,
+                    filter,
+                )
+                .len(),
+            1
         );
     }
 }
