@@ -249,13 +249,16 @@ impl CollisionFlags {
     }
 }
 
-/// Reciprocal local inertia components (the `new_dynamic` formula,
-/// clamped away from zero so a degenerate axis never divides by zero).
+/// Reciprocal local inertia components (the `new_dynamic` formula). A zero
+/// component maps to zero inverse inertia — the axis is locked, like
+/// Bullet's `setMassProps` — because inverting an epsilon instead gives a
+/// ~8e6 inverse inertia that turns any residual numerical torque into a
+/// violent spin.
 fn inv_inertia_components(inertia: Vector3) -> Vector3 {
     Vector3::new(
-        1.0 / inertia.x.max(Real::EPSILON),
-        1.0 / inertia.y.max(Real::EPSILON),
-        1.0 / inertia.z.max(Real::EPSILON),
+        if inertia.x != 0.0 { 1.0 / inertia.x } else { 0.0 },
+        if inertia.y != 0.0 { 1.0 / inertia.y } else { 0.0 },
+        if inertia.z != 0.0 { 1.0 / inertia.z } else { 0.0 },
     )
 }
 
@@ -1145,6 +1148,17 @@ impl RigidBody {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    /// A zero inertia component maps to a zero inverse inertia (the axis is
+    /// locked, Bullet's `setMassProps` ternary) instead of inverting an
+    /// epsilon into a ~8e6 inverse inertia.
+    #[test]
+    fn zero_inertia_components_lock_their_axis() {
+        let inv = inv_inertia_components(Vector3::new(2.0, 0.0, 4.0));
+        assert_relative_eq!(inv.x, 0.5);
+        assert_eq!(inv.y, 0.0);
+        assert_relative_eq!(inv.z, 0.25);
+    }
 
     /// A body with deactivation disabled must never fall asleep, no matter how
     /// long it rests below the sleeping thresholds (Bullet's `updateDeactivation`
