@@ -1654,7 +1654,7 @@ impl MultiBody {
             world_to_local[k + 1] = self.links[k].cached_rot_parent_to_this * world_to_local[parent_idx];
             local_origin[k + 1] = local_origin[parent_idx] + (world_to_local[k + 1].inverse() * self.links[k].cached_r_vector);
         }
-        for link in 0..num_links {
+        for (link, l) in self.links.iter_mut().enumerate() {
             let index = link + 1;
             let rot = Quaternion::from_xyzw(
                 -world_to_local[index].x,
@@ -1662,7 +1662,7 @@ impl MultiBody {
                 -world_to_local[index].z,
                 world_to_local[index].w,
             );
-            self.links[link].cached_world_transform =
+            l.cached_world_transform =
                 transform_from_rotation_translation(rot, local_origin[index]);
         }
     }

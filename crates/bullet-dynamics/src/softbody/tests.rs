@@ -248,9 +248,14 @@ fn world_stepping_matches_manual_loop() {
         world.step_simulation(DT);
         manual.predict_motion(DT, GRAVITY);
         SoftBody::solve_constraints(0, core::slice::from_mut(&mut manual), &mut [], None);
-        for i in 0..manual.nodes.len() {
-            let a = world.soft_body(handle).nodes[i].x;
-            let b = manual.nodes[i].x;
+        for (i, (wa, wb)) in world
+            .soft_body(handle)
+            .nodes
+            .iter()
+            .zip(&manual.nodes)
+            .enumerate()
+        {
+            let (a, b) = (wa.x, wb.x);
             // Component-wise: Vec3A equality also compares the unused w
             // lane, which is not part of the physics.
             assert!(

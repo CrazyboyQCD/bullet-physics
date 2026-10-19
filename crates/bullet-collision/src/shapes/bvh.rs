@@ -56,8 +56,8 @@ impl Bvh {
                     stack.push(right as usize);
                 }
                 BvhNodeKind::Leaf { start, count } => {
-                    for k in start as usize..(start + count) as usize {
-                        out.push(self.tri_order[k]);
+                    for tri in &self.tri_order[start as usize..(start + count) as usize] {
+                        out.push(*tri);
                     }
                 }
             }
@@ -95,9 +95,9 @@ impl Bvh {
                     BvhNodeKind::Leaf { start: sa, count: ca },
                     BvhNodeKind::Leaf { start: sb, count: cb },
                 ) => {
-                    for ka in *sa as usize..(*sa + *ca) as usize {
-                        for kb in *sb as usize..(*sb + *cb) as usize {
-                            out.push((self.tri_order[ka], other.tri_order[kb]));
+                    for ta in &self.tri_order[*sa as usize..(*sa + *ca) as usize] {
+                        for tb in &other.tri_order[*sb as usize..(*sb + *cb) as usize] {
+                            out.push((*ta, *tb));
                         }
                     }
                 }

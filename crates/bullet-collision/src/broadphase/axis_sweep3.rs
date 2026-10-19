@@ -238,8 +238,8 @@ impl AxisSweep3 {
             .enumerate()
             .filter_map(|(i, h)| h.map(|aabb| (i, aabb)))
             .collect();
-        for k in 0..3 {
-            self.edges[k] = vec![
+        for edges in &mut self.edges {
+            *edges = vec![
                 Edge { pos: 0, handle: SENTINEL_HANDLE },
                 Edge { pos: SENTINEL_POS, handle: SENTINEL_HANDLE },
             ];
