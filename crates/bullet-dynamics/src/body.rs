@@ -1,4 +1,6 @@
 use bullet_math::{math, Matrix3, Quaternion, Real, Transform, Vector3};
+use bullet_math::compat::matrix3_from_diagonal;
+use bullet_math::spatial::skew;
 use bullet_collision::shapes::{CollisionShape, CompoundChild};
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
@@ -1116,24 +1118,54 @@ impl RigidBody {
         self.linear_velocity += (self.gravity + self.force * self.inv_mass) * dt;
         let iw = self.inv_inertia_world();
         self.angular_velocity += iw * (self.torque * dt);
+        // Implicit gyroscopic impulse (Bullet's default
+        // `BT_ENABLE_GYROSCOPIC_FORCE_IMPLICIT_BODY`, applied per step in
+        // `convertBodies`): without it a free-tumbling body keeps ω constant
+        // and visibly violates angular momentum conservation.
+        self.angular_velocity += self.gyroscopic_impulse_implicit_body(dt);
     }
 
-    /// Integrate the pose from the current velocities. Sleeping and disabled
+    /// Angular velocity correction of
+    /// `computeGyroscopicImpulseImplicit_Body` (btRigidBody.cpp:297-334) —
+    /// one Newton-Raphson step on `I·ω̇ + ω × I·ω = 0` in body coordinates.
+    /// Returns zero for a degenerate (zero-component) local inertia: a
+    /// locked axis has no finite inertia to couple through, and the solve
+    /// would pick up unbounded terms. Isotropic inertia yields exactly zero
+    /// (`ω × s·ω = 0`).
+    fn gyroscopic_impulse_implicit_body(&self, step: Real) -> Vector3 {
+        let inv = self.inv_inertia_local;
+        if inv.x <= 0.0 || inv.y <= 0.0 || inv.z <= 0.0 {
+            return Vector3::ZERO;
+        }
+        let inertia = Vector3::new(1.0 / inv.x, 1.0 / inv.y, 1.0 / inv.z);
+        let ib = matrix3_from_diagonal(inertia);
+        let omega_body = self.orientation.inverse() * self.angular_velocity;
+        let ibo = inertia * omega_body;
+        let residual = step * omega_body.cross(ibo);
+        let jacobian = ib + (skew(omega_body) * ib - skew(ibo)) * step;
+        let delta = jacobian.inverse() * residual;
+        self.orientation * (omega_body - delta) - self.angular_velocity
+    }
+
+    /// Integrate the pose from the current velocities with the exponential
+    /// map (`btTransformUtil::integrateTransform`, the same kernel as the
+    /// motion-state interpolation — the first-order quaternion update lost
+    /// `O((ω·dt)³/12)` of rotation angle per step). Sleeping and disabled
     /// bodies are not touched.
     #[inline]
     pub fn integrate_position(&mut self, dt: Real) {
         if self.is_static || !self.is_active() {
             return;
         }
-        self.position += self.linear_velocity * dt;
-        // Quaternion integration: dq = 0.5 * (0, w) * q * dt.
-        let dq = Quaternion::from_xyzw(
-            self.angular_velocity.x * dt * 0.5,
-            self.angular_velocity.y * dt * 0.5,
-            self.angular_velocity.z * dt * 0.5,
-            0.0,
-        ) * self.orientation;
-        self.orientation = (self.orientation + dq).normalize();
+        let (position, orientation) = interpolate_pose(
+            self.position,
+            self.orientation,
+            self.linear_velocity,
+            self.angular_velocity,
+            dt,
+        );
+        self.position = position;
+        self.orientation = orientation;
     }
 
     /// Predicted position after integrating the current velocity for `dt`,
@@ -1365,5 +1397,91 @@ mod tests {
         body.linear_velocity = Vector3::new(0.002, 0.0, 0.0);
         body.integrate_velocities(dt);
         assert_eq!(body.linear_velocity, Vector3::ZERO);
+    }
+
+    /// A constant spin integrates to the exact axis-angle rotation: the
+    /// exponential map carries no first-order angle loss.
+    #[test]
+    fn integrate_position_matches_the_exact_rotation() {
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0);
+        body.angular_velocity = Vector3::new(0.0, 0.0, 0.5);
+        body.integrate_position(1.0);
+        let expected = Quaternion::from_xyzw(0.0, 0.0, math::sin(0.25), math::cos(0.25));
+        assert!(body.orientation.dot(expected).abs() > 1.0 - 1e-5);
+    }
+
+    /// At ω·dt = 0.7 rad (below the `ANGULAR_MOTION_THRESHOLD` clamp) the old
+    /// first-order update lost θ³/12 ≈ 0.029 rad of angle; the exponential
+    /// map stays within 1e-5 of the analytic value.
+    #[test]
+    fn integrate_position_keeps_the_rotation_angle() {
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0);
+        body.angular_velocity = Vector3::new(0.0, 0.7, 0.0);
+        body.integrate_position(1.0);
+        let angle = 2.0 * body.orientation.w.acos();
+        assert!((angle - 0.7).abs() < 1e-5, "angle {angle}");
+    }
+
+    /// Isotropic inertia produces exactly zero gyroscopic impulse
+    /// (`ω × s·ω = 0`), so spheres spin exactly as before the port.
+    #[test]
+    fn gyroscopic_is_zero_for_isotropic_inertia() {
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0);
+        body.orientation = Quaternion::from_xyzw(0.2, 0.4, 0.6, 0.65).normalize();
+        body.angular_velocity = Vector3::new(0.3, -1.0, 2.0);
+        let impulse = body.gyroscopic_impulse_implicit_body(1.0 / 60.0);
+        assert!(impulse.length() < 1e-6);
+    }
+
+    /// Spin along a principal axis of an anisotropic body is gyroscopically
+    /// stationary (`ω × I·ω = 0`).
+    #[test]
+    fn gyroscopic_leaves_principal_axis_spin_alone() {
+        let mut body = RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::new(0.5, 0.25, 0.1)),
+            Vector3::ZERO,
+            1.0,
+        );
+        body.angular_velocity = Vector3::new(2.0, 0.0, 0.0);
+        let impulse = body.gyroscopic_impulse_implicit_body(1.0 / 60.0);
+        assert!(impulse.length() < 1e-6);
+    }
+
+    /// Free tumbling of an asymmetric body keeps the world angular momentum
+    /// `R·(I∘ω_body)` pointing (to within the single-Newton-step error) and
+    /// roughly constant in magnitude. The pre-port behavior kept ω constant,
+    /// which spins the momentum vector with the body — over the same two
+    /// seconds L sweeps several radians of direction.
+    #[test]
+    fn gyroscopic_conserves_angular_momentum_of_a_tumbling_body() {
+        let mut body = RigidBody::new_dynamic(
+            CollisionShape::box_shape(Vector3::new(0.5, 0.25, 0.1)),
+            Vector3::ZERO,
+            1.0,
+        );
+        body.orientation = Quaternion::from_xyzw(0.2, 0.3, 0.4, 0.5).normalize();
+        body.angular_velocity = Vector3::new(3.0, 1.0, -2.0);
+        let l0 = world_angular_momentum(&body);
+        let mut max_deflection: Real = 0.0;
+        let mut max_drift: Real = 0.0;
+        for _ in 0..120 {
+            body.integrate_velocities(1.0 / 60.0);
+            body.integrate_position(1.0 / 60.0);
+            let l = world_angular_momentum(&body);
+            max_deflection = max_deflection.max(l0.dot(l) / (l0.length() * l.length()));
+            max_drift = max_drift.max((l - l0).length());
+        }
+        // Direction: at most a few degrees off the initial momentum (the
+        // frozen-ω build would sweep through radians).
+        assert!(max_deflection > (0.15_f64).cos() as Real, "cos {max_deflection}");
+        // Magnitude: the single Newton step is O(h²) accurate per frame.
+        assert!(max_drift < 0.3 * l0.length(), "drift {max_drift}");
+    }
+
+    fn world_angular_momentum(body: &RigidBody) -> Vector3 {
+        let inv = body.inv_inertia_local;
+        let inertia = Vector3::new(1.0 / inv.x, 1.0 / inv.y, 1.0 / inv.z);
+        let omega_body = body.orientation.inverse() * body.angular_velocity;
+        body.orientation * (inertia * omega_body)
     }
 }
