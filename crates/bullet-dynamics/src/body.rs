@@ -827,25 +827,29 @@ impl RigidBody {
     /// Apply an impulse at a world-space point offset from the center of mass
     /// (Bullet's `applyImpulse`): an instant velocity change
     /// `Δv = impulse · inv_mass` and `Δω = inv_inertia_world · (rel_pos ×
-    /// impulse)`. Unlike `apply_force`, this does not wake the body up — it is
-    /// a raw velocity change, matching Bullet.
+    /// impulse)`. Wakes the body up, like every force/impulse API here — a
+    /// deliberate deviation from Bullet, where none of these APIs wake
+    /// (deviations §1).
     #[inline]
     pub fn apply_impulse(&mut self, impulse: Vector3, rel_pos: Vector3) {
         if self.inv_mass == 0.0 {
             return;
         }
+        self.activate();
         self.linear_velocity += impulse * self.inv_mass;
         self.angular_velocity += self.inv_inertia_world() * rel_pos.cross(impulse);
     }
 
     /// Apply a torque impulse (Bullet's `applyTorqueImpulse`): an instant
-    /// angular velocity change `Δω = inv_inertia_world · impulse`. Static
+    /// angular velocity change `Δω = inv_inertia_world · impulse`. Wakes the
+    /// body up, like every force/impulse API here (deviations §1). Static
     /// bodies ignore it.
     #[inline]
     pub fn apply_torque_impulse(&mut self, impulse: Vector3) {
         if self.inv_mass == 0.0 {
             return;
         }
+        self.activate();
         self.angular_velocity += self.inv_inertia_world() * impulse;
     }
 
@@ -869,18 +873,19 @@ impl RigidBody {
         self.inv_mass + normal.dot(vec)
     }
 
-    /// Accumulate a force applied at the center of mass.
-    ///
-    /// Applying a force wakes the body up, like Bullet's `applyCentralForce`.
+    /// Accumulate a force applied at the center of mass. Applying a force
+    /// wakes the body up (mainstream-engine semantics — Rapier and PhysX wake
+    /// on force application; Bullet's `applyCentralForce` does not, an
+    /// intentional deviation, deviations §1).
     #[inline]
     pub fn apply_force(&mut self, force: Vector3) {
         self.activate();
         self.force += force;
     }
 
-    /// Accumulate a force applied at a world-space point.
-    ///
-    /// Applying a force wakes the body up, like Bullet's `applyForce`.
+    /// Accumulate a force applied at a world-space point. Applying a force
+    /// wakes the body up (mainstream-engine semantics; Bullet's `applyForce`
+    /// does not, an intentional deviation, deviations §1).
     #[inline]
     pub fn apply_force_at_point(&mut self, force: Vector3, point: Vector3) {
         self.activate();
@@ -1158,6 +1163,31 @@ mod tests {
         assert_relative_eq!(inv.x, 0.5);
         assert_eq!(inv.y, 0.0);
         assert_relative_eq!(inv.z, 0.25);
+    }
+
+    /// Every force/impulse API wakes a sleeping body (deviations §1): an
+    /// applied impulse or force must take effect on the next step, not sit on
+    /// a body that stays asleep.
+    #[test]
+    fn force_and_impulse_apis_wake_sleeping_bodies() {
+        let mut body = RigidBody::new_dynamic(CollisionShape::sphere(0.5), Vector3::ZERO, 1.0);
+        body.go_to_sleep();
+        assert!(!body.is_active());
+
+        body.apply_impulse(Vector3::new(1.0, 0.0, 0.0), Vector3::ZERO);
+        assert!(body.is_active());
+
+        body.go_to_sleep();
+        body.apply_torque_impulse(Vector3::new(0.0, 0.1, 0.0));
+        assert!(body.is_active());
+
+        body.go_to_sleep();
+        body.apply_force(Vector3::new(0.0, 1.0, 0.0));
+        assert!(body.is_active());
+
+        body.go_to_sleep();
+        body.apply_force_at_point(Vector3::new(0.0, 1.0, 0.0), Vector3::new(0.2, 0.0, 0.0));
+        assert!(body.is_active());
     }
 
     /// A body with deactivation disabled must never fall asleep, no matter how
