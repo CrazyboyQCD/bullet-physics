@@ -7,6 +7,13 @@ history lives in `docs/`.
 
 ## [Unreleased]
 
+### Fixed
+
+- quickhull: flat point clouds could produce a hull with missing faces (a
+  vertex could drive repeated expansions and figure-eight horizons could
+  fold fans onto one edge); the output is now always a closed surface
+  containing every input point.
+
 ## [0.1.1] - 2026-10-19
 
 ### Changed

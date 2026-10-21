@@ -53,6 +53,7 @@ decision.
 |---|---|
 | `multibody_probe.cpp`, `softbody_probe.cpp` | probe rigs with Rust twins (`crates/bullet-physics/examples/*_probe.rs`) and build scripts (`build_*_probe.py`) |
 | `conetwist_stress_probe.cpp` | a gravity-lateral chain/pendulum riding its cone swing limit — quantifies limit chatter and the `limit_softness`/`relaxation_factor` effect (A/B within an engine; frame-level engine comparison is chaotic-class). Rust twin `examples/conetwist_stress_probe.rs`, built by `build_conetwist_stress_probe.py` |
+| `quickhull_probe.cpp` | feeds the minimal flat-slab cloud from the 2026-10-19 P2-C06 quickhull investigation to the stock `HullLibrary` (`btConvexHull`) and checks its triangle output for closure — upstream collapses such clouds to a coarse (5-vertex) valid hull where our index-preserving builder may fold; built by `build_quickhull_probe.py`, cloud pinned by the quickhull tests in `bullet-math` |
 | `gimpact_probe.cpp` | probe rig with a Rust twin (`examples/gimpact_probe.rs`), cited by `design/architecture.md` and `bullet-compare.md` |
 | `island_probe.cpp` | activation / sleeping / island semantics — cited by `bullet-deviations.md` §2 and `design/multibody-collision.md` §9, built by `build_island_probe.py` |
 | `rope_press_probe.cpp` | the rope-pressing-a-box scenario cited by the softbody tests (`rope_pushes_dynamic_box`) |
