@@ -908,7 +908,12 @@ mod tests {
     #[test]
     fn heightfield_raycast_through_shape_api() {
         let hf = CollisionShape::heightfield(vec![0.0; 9], 3, 3, Vector3::ONE);
-        let h = ray(&hf, Vector3::new(1.0, 5.0, 1.0), Vector3::new(1.0, -1.0, 1.0)).unwrap();
+        let h = ray(
+            &hf,
+            Vector3::new(0.5, 5.0, 0.5),
+            Vector3::new(0.5, -1.0, 0.5),
+        )
+        .unwrap();
         assert_relative_eq!(h.fraction, 5.0 / 6.0, epsilon = 1e-4);
         assert_relative_eq!(h.normal.y, 1.0, epsilon = 1e-4);
     }

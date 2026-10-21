@@ -442,7 +442,9 @@ mod tests {
     fn heightfield_vs_box_through_collide() {
         let hf = CollisionShape::heightfield(vec![0.0; 9], 3, 3, Vector3::ONE);
         let box_shape = CollisionShape::box_shape(Vector3::splat(0.5));
-        let m = collide_pair(&hf, Vector3::ZERO, &box_shape, Vector3::new(1.0, 0.4, 1.0)).unwrap();
+        // The centered 3x3 grid spans [-1, 1]^2; the box sits over an
+        // interior flat cell.
+        let m = collide_pair(&hf, Vector3::ZERO, &box_shape, Vector3::new(0.5, 0.4, 0.5)).unwrap();
         let p = m.points[0];
         assert_relative_eq!(p.normal.y, 1.0, epsilon = 1e-3);
         assert_relative_eq!(p.penetration, 0.1, epsilon = 1e-3);
@@ -498,7 +500,9 @@ mod tests {
     fn mesh_vs_heightfield_through_collide() {
         let hf = CollisionShape::heightfield(vec![0.0; 9], 3, 3, Vector3::ONE);
         let mesh = unit_plate();
-        let m = collide_pair(&mesh, Vector3::new(1.0, 0.01, 1.0), &hf, Vector3::ZERO).unwrap();
+        // The centered 3x3 grid spans [-1, 1]^2; the plate spans [0, 1]^2
+        // over its +x/+z quadrant.
+        let m = collide_pair(&mesh, Vector3::new(0.0, 0.01, 0.0), &hf, Vector3::ZERO).unwrap();
         let p = m.points[0];
         // A-to-B normal: from the mesh (above) toward the heightfield, -Y;
         // margin-shell penetration 0.1 - 0.01.

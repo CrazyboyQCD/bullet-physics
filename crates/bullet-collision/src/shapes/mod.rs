@@ -29,7 +29,7 @@ pub use compound::{Compound, CompoundChild};
 pub use cone::Cone;
 pub use convex_hull::ConvexHull;
 pub use cylinder::Cylinder;
-pub use heightfield::Heightfield;
+pub use heightfield::{Heightfield, HeightfieldOptions, UpAxis};
 pub use internal_edges::{TriangleInfo, TriangleInfoMap};
 pub use plane::Plane;
 pub use shape_hull::ShapeHull;

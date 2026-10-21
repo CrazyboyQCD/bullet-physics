@@ -23,7 +23,8 @@
 #include "btBulletDynamicsCommon.h"
 #include "BulletCollision/CollisionDispatch/btInternalEdgeUtility.h"
 #include "BulletCollision/CollisionDispatch/btManifoldResult.h"
-#include "BulletCollision/CollisionShapes/btScaledBvhTriangleMeshShape.h"       
+#include "BulletCollision/CollisionShapes/btHeightfieldTerrainShape.h"
+#include "BulletCollision/CollisionShapes/btScaledBvhTriangleMeshShape.h"
 #include "BulletCollision/CollisionShapes/btUniformScalingShape.h"
 #include "bullet_scenes.h"
 
@@ -163,6 +164,24 @@ btCollisionShape* make_shape(
       bvh_storage.push_back(std::unique_ptr<btBvhTriangleMeshShape>(child_bvh));
       return new btScaledBvhTriangleMeshShape(child_bvh,
                                               btVector3(p[0], p[1], p[2]));
+    }
+    case SHAPE_HEIGHTFIELD: {
+      // btHeightfieldTerrainShape over the shared grid: float data, the
+      // min/max the generator computed (both engines center height on the
+      // same midpoint), the flip flags, and the cell size via localScaling
+      // (upstream's unit-cell grid scaled post-centering, height axis
+      // unscaled - identical to this crate's materialized vertices). The
+      // heights array is static in the generated header, so the shape can
+      // reference it without ownership.
+      const HeightfieldSpec& hf = *b.heightfield;
+      btHeightfieldTerrainShape* terrain = new btHeightfieldTerrainShape(
+          hf.width, hf.length, hf.heights, btScalar(1.0), hf.min_height,
+          hf.max_height, hf.up_axis, PHY_FLOAT, hf.flip_quad_edges != 0);
+      terrain->setUseDiamondSubdivision(hf.use_diamond_subdivision != 0);
+      terrain->setUseZigzagSubdivision(hf.use_zigzag_subdivision != 0);
+      terrain->setFlipTriangleWinding(hf.flip_triangle_winding != 0);
+      terrain->setLocalScaling(btVector3(hf.cell_x, btScalar(1.0), hf.cell_z));
+      return terrain;
     }
   }
   return nullptr;

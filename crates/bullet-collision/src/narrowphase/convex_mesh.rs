@@ -461,10 +461,11 @@ mod tests {
             unreachable!()
         };
         let box_shape = CollisionShape::box_shape(Vector3::splat(0.5));
-        // Box bottom at y = -0.1: penetration 0.1.
+        // Box bottom at y = -0.1: penetration 0.1. The centered 3x3 grid
+        // spans [-1, 1]^2; the box sits over an interior flat cell.
         let m = convex_mesh(
             &box_shape,
-            Vector3::new(1.0, 0.4, 1.0),
+            Vector3::new(0.5, 0.4, 0.5),
             Quaternion::IDENTITY,
             hf.as_mesh(),
             Vector3::ZERO,
@@ -557,9 +558,11 @@ mod tests {
             unreachable!()
         };
         let box_shape = CollisionShape::box_shape(Vector3::splat(0.5));
+        // The centered 5x5 grid spans [-2, 2]^2; the box straddles the four
+        // cells around the origin.
         let m = convex_mesh(
             &box_shape,
-            Vector3::new(2.0, 0.4, 2.0),
+            Vector3::new(0.0, 0.4, 0.0),
             Quaternion::IDENTITY,
             hf.as_mesh(),
             Vector3::ZERO,

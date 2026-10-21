@@ -24,12 +24,32 @@ C_HEADER = os.path.join(ROOT, "tools", "bullet_scenes.h")
 RS_TABLE = os.path.join(ROOT, "crates", "bullet-physics", "generated", "parity_scenes.rs")
 
 SHAPE_TYPES = {"box", "sphere", "capsule", "cylinder", "cone", "plane", "mesh",
-               "mesh_parts", "uniform_scaling", "scaled_mesh"}
+               "mesh_parts", "uniform_scaling", "scaled_mesh", "heightfield"}
 SHAPE_ENUM = {"box": "SHAPE_BOX", "sphere": "SHAPE_SPHERE", "capsule": "SHAPE_CAPSULE",
               "cylinder": "SHAPE_CYLINDER", "cone": "SHAPE_CONE", "plane": "SHAPE_PLANE",
               "mesh": "SHAPE_MESH", "mesh_parts": "SHAPE_MESH_PARTS",
               "uniform_scaling": "SHAPE_UNIFORM_SCALING",
-              "scaled_mesh": "SHAPE_SCALED_MESH"}
+              "scaled_mesh": "SHAPE_SCALED_MESH",
+              "heightfield": "SHAPE_HEIGHTFIELD"}
+
+
+def heightfield_spec(shape):
+    """Normalize a heightfield shape dict into (w, l, cx, cz, up_axis, flips,
+    min_h, max_h, heights); min/max over the data match what both engines
+    derive (the midpoint offsets the height exactly for our integer grids)."""
+    w, l = shape["grid"]
+    cx, cz = shape["cell"]
+    heights = shape["heights"]
+    if len(heights) != w * l:
+        raise ValueError(f"heightfield heights: expected {w * l} values, got {len(heights)}")
+    axis = {"x": 0, "y": 1, "z": 2}[shape.get("up_axis", "y")]
+    flips = (
+        1 if shape.get("flip_quad_edges") else 0,
+        1 if shape.get("use_diamond_subdivision") else 0,
+        1 if shape.get("use_zigzag_subdivision") else 0,
+        1 if shape.get("flip_triangle_winding") else 0,
+    )
+    return w, l, cx, cz, axis, flips, min(heights), max(heights), heights
 
 
 def shape_params(shape):
@@ -57,7 +77,7 @@ def shape_params(shape):
         return t, [shape["radius"], shape["half_height"]]
     if t == "plane":
         return t, list(shape["normal"]) + [shape["constant"]]
-    if t in ("mesh", "mesh_parts"):
+    if t in ("mesh", "mesh_parts", "heightfield"):
         return t, [0.0] * 6
     raise ValueError(f"unknown shape type {t!r}")
 
@@ -111,13 +131,22 @@ def gen_c(scenes):
         "",
         "#include \"btBulletDynamicsCommon.h\"",
         "",
-        "enum ShapeType { SHAPE_BOX, SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_CYLINDER, SHAPE_CONE, SHAPE_PLANE, SHAPE_MESH, SHAPE_MESH_PARTS, SHAPE_UNIFORM_SCALING, SHAPE_SCALED_MESH };",
+        "enum ShapeType { SHAPE_BOX, SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_CYLINDER, SHAPE_CONE, SHAPE_PLANE, SHAPE_MESH, SHAPE_MESH_PARTS, SHAPE_UNIFORM_SCALING, SHAPE_SCALED_MESH, SHAPE_HEIGHTFIELD };",
         "",
         "struct MeshSpec {",
         "  int num_vertices;",
         "  const btScalar* vertices;  // num_vertices * 3 (x y z)",
         "  int num_triangles;",
         "  const int* indices;        // num_triangles * 3",
+        "};",
+        "",
+        "struct HeightfieldSpec {",
+        "  int width, length;",
+        "  btScalar cell_x, cell_z;",
+        "  int up_axis;  // 0=x 1=y 2=z",
+        "  int flip_quad_edges, use_diamond_subdivision, use_zigzag_subdivision, flip_triangle_winding;",
+        "  btScalar min_height, max_height;  // passed to the terrain ctor (height centering)",
+        "  const btScalar* heights;  // width*length, row-major (row index first)",
         "};",
         "",
         "struct BodySpec {",
@@ -144,6 +173,7 @@ def gen_c(scenes):
         "  int internal_edges;  // btGenerateInternalEdgeInfo opt-in (mesh bodies)",
         "  int num_mesh_parts;  // > 0 only for SHAPE_MESH_PARTS",
         "  const MeshSpec* mesh_parts;  // non-null only for SHAPE_MESH_PARTS",
+        "  const HeightfieldSpec* heightfield;  // non-null only for SHAPE_HEIGHTFIELD",
         "};",
         "",
         "struct RaySpec {",
@@ -203,6 +233,15 @@ def gen_c(scenes):
                 lines.append(f"static const MeshSpec k{name}_{b['name']}_mesh = "
                              f"{{ {len(verts) // 3}, k{name}_{b['name']}_verts, "
                              f"{len(idx) // 3}, k{name}_{b['name']}_idx }};")
+            elif t == "heightfield":
+                w, l, cx, cz, axis, flips, mn, mx, heights = heightfield_spec(b["shape"])
+                hs = ", ".join(f"btScalar({fmt(v)})" for v in heights)
+                lines.append(f"static const btScalar k{name}_{b['name']}_heights[] = {{ {hs} }};")
+                lines.append(
+                    f"static const HeightfieldSpec k{name}_{b['name']}_hf = "
+                    f"{{ {w}, {l}, btScalar({fmt(cx)}), btScalar({fmt(cz)}), {axis}, "
+                    f"{flips[0]}, {flips[1]}, {flips[2]}, {flips[3]}, "
+                    f"btScalar({fmt(mn)}), btScalar({fmt(mx)}), k{name}_{b['name']}_heights }};")
             elif t == "mesh_parts":
                 # Independent IndexedMesh buffers: one vert/idx pair per part,
                 # then the MeshSpec array the shape constructor walks.
@@ -249,6 +288,7 @@ def gen_c(scenes):
             ccd_sr = ccd.get("swept_sphere_radius", 0.0) if ccd else 0.0
             mesh_ref = (f"&k{name}_{b['name']}_mesh"
                         if t in ("mesh", "scaled_mesh") else "nullptr")
+            hf_ref = f"&k{name}_{b['name']}_hf" if t == "heightfield" else "nullptr"
             nmp = len(b["shape"]["parts"]) if t == "mesh_parts" else 0
             nmp_s = str(nmp)
             mp_ref = f"k{name}_{b['name']}_parts" if t == "mesh_parts" else "nullptr"
@@ -268,7 +308,7 @@ def gen_c(scenes):
                          f"{{{aniso_s}}}, btScalar({cks_s}), btScalar({ckd}), {cks_set}, {st}, "
                          f"{{{vel_s}}}, {{{ang_s}}}, {ccd_on}, btScalar({fmt(ccd_mt)}), "
                          f"btScalar({fmt(ccd_sr)}), {{{bg_s}}}, {dwg}, {ncr}, {grp}, {msk}, "
-                         f"{mesh_ref}, {ie}, {nmp_s}, {mp_ref}}},")
+                         f"{mesh_ref}, {ie}, {nmp_s}, {mp_ref}, {hf_ref}}},")
         lines.append("};")
         lines.append("")
         rec = ", ".join(f"\"{r}\"" for r in sc["record"])
@@ -357,6 +397,21 @@ def gen_rs(scenes):
         "    MeshParts(&'static [(&'static [f32], &'static [u32])]),",
         "    UniformScaling(f32, i32, [f32; 3]),",
         "    ScaledMesh(&'static [f32], &'static [u32], [f32; 3]),",
+        "    Heightfield(HeightfieldSpec),",
+        "}",
+        "",
+        "#[derive(Clone, Copy)]",
+        "pub struct HeightfieldSpec {",
+        "    pub heights: &'static [f32],",
+        "    pub width: u32,",
+        "    pub length: u32,",
+        "    pub cell_x: f32,",
+        "    pub cell_z: f32,",
+        "    pub up_axis: u32,  // 0=x 1=y 2=z",
+        "    pub flip_quad_edges: bool,",
+        "    pub use_diamond_subdivision: bool,",
+        "    pub use_zigzag_subdivision: bool,",
+        "    pub flip_triangle_winding: bool,",
         "}",
         "",
         "pub struct BodySpec {",
@@ -461,6 +516,18 @@ def gen_rs(scenes):
                     sx, sy, sz = b["shape"]["scaling"]
                     shape = (f"ShapeSpec::ScaledMesh(&[{vs}], &[{is_}], "
                              f"[{fmt(sx)}, {fmt(sy)}, {fmt(sz)}])")
+            elif t == "heightfield":
+                w, l, cx, cz, axis, flips, _, _, heights = heightfield_spec(b["shape"])
+                hs = ", ".join(fmt(v) for v in heights)
+                rs_bool = lambda v: "true" if v else "false"
+                shape = (
+                    f"ShapeSpec::Heightfield(HeightfieldSpec {{ heights: &[{hs}], "
+                    f"width: {w}, length: {l}, cell_x: {fmt(cx)}, cell_z: {fmt(cz)}, "
+                    f"up_axis: {axis}, flip_quad_edges: {rs_bool(flips[0])}, "
+                    f"use_diamond_subdivision: {rs_bool(flips[1])}, "
+                    f"use_zigzag_subdivision: {rs_bool(flips[2])}, "
+                    f"flip_triangle_winding: {rs_bool(flips[3])} }})"
+                )
             elif t == "uniform_scaling":
                 f, k = b["shape"]["factor"], 0
                 child = b["shape"]["child"]

@@ -164,6 +164,32 @@ fn main() {
                     .collect();
                 CollisionShape::triangle_mesh_parts(parts)
             }
+            ShapeSpec::Heightfield(hf) => {
+                // btHeightfieldTerrainShape semantics: the centered grid
+                // with the shared flip flags (the C++ side bridges the cell
+                // size through localScaling; we bake it into the vertices).
+                use bullet_collision::shapes::{Heightfield, HeightfieldOptions, UpAxis};
+                let options = HeightfieldOptions {
+                    up_axis: match hf.up_axis {
+                        0 => UpAxis::X,
+                        2 => UpAxis::Z,
+                        _ => UpAxis::Y,
+                    },
+                    flip_quad_edges: hf.flip_quad_edges,
+                    use_diamond_subdivision: hf.use_diamond_subdivision,
+                    use_zigzag_subdivision: hf.use_zigzag_subdivision,
+                    flip_triangle_winding: hf.flip_triangle_winding,
+                };
+                let heights: Vec<Real> =
+                    hf.heights.iter().map(|&h| h as Real).collect();
+                CollisionShape::Heightfield(Heightfield::with_options(
+                    options,
+                    heights,
+                    hf.width as usize,
+                    hf.length as usize,
+                    Vector3::new(hf.cell_x as Real, 1.0 as Real, hf.cell_z as Real),
+                ))
+            }
         };
         let position = Vector3::new(
             b.position[0] as Real, b.position[1] as Real, b.position[2] as Real,

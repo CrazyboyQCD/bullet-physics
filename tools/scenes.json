@@ -2005,6 +2005,380 @@
       "record": [
         "ball"
       ]
+    },
+    "heightfield": {
+      "comment": "heightfield option surface (btHeightfieldTerrainShape): Y-up defaults, centered origin, integer bump terrain materialized by each engine from the shared grid; a sphere and a box settle on the slopes.",
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 420,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "ground",
+          "shape": {
+            "type": "heightfield",
+            "grid": [
+              13,
+              13
+            ],
+            "cell": [
+              0.5,
+              0.5
+            ],
+            "heights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              2.0,
+              2.0,
+              2.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              2.0,
+              2.0,
+              2.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              2.0,
+              2.0,
+              2.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "name": "ball",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.3
+          },
+          "position": [
+            0.0,
+            4.0,
+            0.0
+          ],
+          "mass": 1,
+          "friction": 0.6
+        },
+        {
+          "name": "box",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.25,
+              0.25,
+              0.25
+            ]
+          },
+          "position": [
+            -2.0,
+            1.5,
+            1.0
+          ],
+          "mass": 1,
+          "friction": 0.6
+        }
+      ],
+      "record": [
+        "ball",
+        "box"
+      ]
+    },
+    "heightfield_x": {
+      "comment": "heightfield X-up + flipQuadEdges: the staircase wall rises along +X (grid width index maps to world Y); a ball rolls into it and a box drops against the steps.",
+      "dt": [
+        1,
+        60
+      ],
+      "frames": 420,
+      "iterations": 10,
+      "gravity": [
+        0,
+        -9.81,
+        0
+      ],
+      "bodies": [
+        {
+          "name": "wall",
+          "shape": {
+            "type": "heightfield",
+            "grid": [
+              6,
+              6
+            ],
+            "cell": [
+              0.4,
+              0.4
+            ],
+            "up_axis": "x",
+            "flip_quad_edges": true,
+            "heights": [
+              0.0,
+              1.0,
+              2.0,
+              3.0,
+              4.0,
+              0.0,
+              1.0,
+              2.0,
+              3.0,
+              4.0,
+              0.0,
+              1.0,
+              2.0,
+              3.0,
+              4.0,
+              0.0,
+              1.0,
+              2.0,
+              3.0,
+              4.0,
+              0.0,
+              1.0,
+              2.0,
+              3.0,
+              4.0,
+              0.0,
+              1.0,
+              2.0,
+              3.0,
+              4.0,
+              0.0,
+              1.0,
+              2.0,
+              3.0,
+              4.0,
+              0.0
+            ]
+          },
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "name": "floor",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              3.0,
+              0.25,
+              2.0
+            ]
+          },
+          "position": [
+            0,
+            -0.25,
+            0
+          ]
+        },
+        {
+          "name": "ball",
+          "shape": {
+            "type": "sphere",
+            "radius": 0.3
+          },
+          "position": [
+            2.2,
+            0.31,
+            0.0
+          ],
+          "mass": 1,
+          "friction": 0.6,
+          "velocity": [
+            -1.5,
+            0,
+            0
+          ]
+        },
+        {
+          "name": "box",
+          "shape": {
+            "type": "box",
+            "half_extents": [
+              0.25,
+              0.25,
+              0.25
+            ]
+          },
+          "position": [
+            0.75,
+            0.26,
+            -0.2
+          ],
+          "mass": 1,
+          "friction": 0.6
+        }
+      ],
+      "record": [
+        "ball",
+        "box"
+      ]
     }
   }
 }

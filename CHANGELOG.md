@@ -7,6 +7,20 @@ history lives in `docs/`.
 
 ## [Unreleased]
 
+### Added
+
+- Heightfield: the `btHeightfieldTerrainShape` option surface —
+  `HeightfieldOptions` with `up_axis` (X/Y/Z), `flip_quad_edges`,
+  `use_diamond_subdivision`, `use_zigzag_subdivision` and
+  `flip_triangle_winding`; parity scenes `heightfield` / `heightfield_x`.
+
+### Changed
+
+- Heightfield (breaking): the grid is centered on the local origin like
+  upstream — in-plane coordinates shift by `-(n-1)/2 * cell` and heights
+  are offset by the min/max midpoint, so the terrain AABB centers on the
+  body transform.
+
 ### Fixed
 
 - quickhull: flat point clouds could produce a hull with missing faces (a
