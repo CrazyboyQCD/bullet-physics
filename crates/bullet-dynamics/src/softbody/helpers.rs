@@ -11,7 +11,7 @@ use bullet_math::{math, Real, Vector3};
 
 use super::body::SoftBody;
 use bullet_math::quickhull::quick_hull;
-use super::rng::CrtRand;
+use bullet_math::CrtRand;
 
 /// Bit flag for [`create_rope`]: pin the first node (Bullet's `fixeds & 1`).
 pub const ROPE_FIX_START: u32 = 1;
@@ -76,7 +76,8 @@ pub fn create_rope(from: Vector3, to: Vector3, res: usize, fixeds: u32) -> SoftB
 /// interleaved per cell) matches Bullet exactly — PBD is order-sensitive.
 ///
 /// `perturbation` jitters the y of both edge interpolants using the C runtime
-/// `rand()` sequence Bullet calls, replayed portably by [`super::rng`] (pass 0
+/// `rand()` sequence Bullet calls, replayed portably by
+/// [`bullet_math::CrtRand`] (pass 0
 /// for a deterministic patch; a non-zero value only matters when comparing
 /// against MSVC-built probes).
 #[allow(clippy::too_many_arguments)]

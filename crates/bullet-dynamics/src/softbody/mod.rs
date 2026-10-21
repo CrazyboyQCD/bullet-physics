@@ -22,7 +22,6 @@ pub mod forces;
 pub mod geometry;
 pub mod helpers;
 pub mod joints;
-mod rng;
 pub mod solver;
 #[cfg(test)]
 mod tests;

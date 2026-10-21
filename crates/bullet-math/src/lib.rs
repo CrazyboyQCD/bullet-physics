@@ -58,6 +58,9 @@ pub use glam::DAffine3 as Transform;
 pub mod compat;
 pub mod quickhull;
 pub mod math;
+mod crt_rand;
+
+pub use crt_rand::CrtRand;
 
 /// `pi` at the active precision.
 #[cfg(not(feature = "f64"))]
