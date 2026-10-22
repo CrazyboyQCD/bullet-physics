@@ -2968,3 +2968,52 @@ Exceedance frames (box):
 
 Total exceedances: 834 (pos tol 0.01, ang tol 0.01, frac tol 0.001)
 
+## Inverse-dynamics probes (2026-10-22, M1/M2)
+
+Bit-level `cmp` comparison (not mbdiff tolerance) against the stock
+`BulletInverseDynamics` library: `tools/inverse_dynamics_probe.cpp` plus the
+Rust twin `crates/bullet-physics/examples/id_probe.rs` (which exercises the
+facade's optional `inverse-dynamics` re-export), built by
+`tools/build_inverse_dynamics_probe.py` against the IEEE-precise BID in
+`target/bullet3-build-id[-double]` — the main-rig `/fp:fast` default swaps in
+approximate trig that diverges 1 ulp from ucrt and would drown the comparison
+(design doc `docs/design/inverse-dynamics.md` §4). Protocol: 7 scenes × 3
+states × 4 groups, every scalar printed at C `%.17g` — `S1` inverse dynamics
+(generalized forces + world getters, gravity folded into the accelerations),
+`S2` gravity-free kinematics, `M` the joint-space mass matrix (n², row
+major), `J` the world-frame jacobians (per body dot(J_T)u, dot(J_R)u, jac_T,
+jac_R). Scenes 0–3 are canonical trees (revolute arm / mixed chain / floating
+base / spherical arm); scenes 4–6 are seeded random trees — `srand(seed)` vs
+`CrtRand::seeded` replicating the MSVC sequence under a shared draw protocol
+(upstream's generator `Extras/IDRandomUtil` sits in the zlib-excluded zone,
+so the probe carries its own).
+
+The rig caught three port-side deviations during M2, all fixed and pinned in
+code comments: `btVector3 operator/(vec, scalar)` is `v * (1.0/s)`, not true
+division (`btVector3.h:843-856`) — three call sites; the CRBA subtree
+centroid accumulates the child terms first (`a += (b + c)`); joint-axis
+normalization squares via `btPow(x, 2)` (`MultiBodyTree.cpp:269-271`),
+guarded against LLVM strength reduction with `black_box`.
+
+| Precision | Result |
+|---|---|
+| f64 | **84/84 group lines byte-identical** (7 scenes × 3 states × 4 groups; 0 diff after CRLF strip) |
+| f32 | Scenes 0–5 fully identical. Scene 6 (5 bodies / 19 dofs — revolute root, two floating links, a spherical branch) residual: **45 of 10083 emitted tokens** — `M` differs in all 3 states (coupling entries of dof 14, the branched spherical joint's middle axis, against body 1's floating translation dofs and the body-0 revolute dof, plus mirrors), `S1`/`S2` one state each at a single tau slot; `J` clean and all `S2` kinematic slots clean |
+
+Classification: **floating-point rounding-order noise, accepted** — the f64
+bit-exactness pins the operation sequence as semantically identical, and the
+f32 residual is deterministic, exactly 1 ulp per differing entry, and
+confined to one branched-tree scene. The earlier dense-axis suspicion is
+refuted by scenes 4–5: they exercise the dense-axis normalization and
+revolute axis-angle paths and are bit-exact, so the residual is specific to
+scene 6's coupling arithmetic, not to any axis-handling path. `S2`'s single
+diff token is the tau echo of the `S1` row (both probes reprint the last
+computed generalized forces), not a kinematic value. Per the project bar —
+aligned-or-better simulation, parity as the floor rather than the goal — the
+residual is recorded here instead of being chased to bit equality.
+
+Run:
+`cargo run -p bullet-physics --example id_probe --features inverse-dynamics[,f64]`
+vs `tools/inverse_dynamics_probe[_f64].exe`; compare with
+`cmp` / `diff --strip-trailing-cr` (MSVC CRLF).
+

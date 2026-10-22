@@ -319,8 +319,8 @@ the implementing commits; every row cites upstream file:line):
 
 - **Probe pair**: `tools/inverse_dynamics_probe.cpp` +
   `tools/build_inverse_dynamics_probe.py` (f32/f64, `build_multibody_probe.py`
-  pattern); Rust twin `crates/bullet-inverse-dynamics/examples/id_probe.rs`
-  (added to facade-style `package.exclude`). Output diffed with
+  pattern); Rust twin `crates/bullet-physics/examples/id_probe.rs`
+  (`required-features = ["inverse-dynamics"]`). Output diffed with
   `tools/mbdiff.py --strip-trailing-cr`.
 - **Trees**:
   1. *Canonical set* — hand-pinned: 2R planar arm; prismatic+revolute+fixed
@@ -382,11 +382,27 @@ no_std ×2) + one atomic Conventional Commit.
   trig (see §4 outcome). Probe rig:
   `tools/inverse_dynamics_probe.cpp` + `tools/build_inverse_dynamics_probe.py`
   (IEEE-precise BID in `target/bullet3-build-id[-double]`) + twin
-  `crates/bullet-inverse-dynamics/examples/id_probe.rs`.
-- **M2** — CRBA mass matrix + jacobians + getters + user wrenches + mass
-  setters. Probe extended; seeded random-tree parity.
+  `crates/bullet-physics/examples/id_probe.rs` (since moved to the facade
+  examples under the `inverse-dynamics` feature).
+- **M2** ✅ (2026-10-22) — CRBA mass matrix (`calculate_mass_matrix[_ex]` +
+  runtime mass setters), jacobians (position/velocity levels, world getters,
+  dot-J terms, `KinUpdate::PositionOnly`). Facade integration ruling: the
+  facade re-exports the crate as `inverse_dynamics` behind an optional
+  `inverse-dynamics` feature, **off by default** (the leaf stays out of the
+  default dependency tree); the probe twin lives in
+  `crates/bullet-physics/examples/id_probe.rs` under `required-features`,
+  like every other probe twin. Probe extended with the M/J groups and three
+  seeded random trees (CrtRand ↔ MSVC `rand`): f64 byte-identical 84/84
+  lines; f32 residual confined to one branched-tree scene, exactly 1 ulp per
+  differing entry — classified as rounding noise in `docs/bullet-compare.md`
+  ("Inverse-dynamics probes"; parity is the floor, not the goal). Rig-fixed
+  port deviations: btVector3 reciprocal division (3 sites), CRBA child-first
+  centroid associativity, `btPow(x, 2)` axis normalization.
 - **M3** — Bench + allocation audit + `docs/perf/inverse-dynamics.md`;
   deviation rows in `docs/bullet-deviations.md`; api-priorities row → Done.
+  Candidate from the M2 access-pattern sweep (not applied blind): flatten the
+  per-body jacobian storage `Vec<Vec<Real>>` into one `Vec<Real>` with
+  `as_chunks` windows — bench-arbitrated.
 - **M4** — Crate README + AGENTS.md project-map line + CHANGELOG Unreleased
   + crates.io name check; publish ruling with the next release train.
 

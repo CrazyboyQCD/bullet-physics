@@ -1,7 +1,7 @@
 //! The finalized tree — port of `MultiBodyTree::MultiBodyImpl`
 //! (`details/MultiBodyTreeImpl.cpp`): three-level kinematics, the inverse
-//! dynamics pass, and the world-frame getters. The mass matrix and the
-//! jacobian surface follow in M2.
+//! dynamics pass, and the world-frame getters. The mass matrix lives in
+//! [`crate::mass_matrix`], the jacobian surface in [`crate::jacobians`].
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -19,12 +19,20 @@ use bullet_math::{Matrix3, Real, Vector3};
 pub enum TreeError {
     /// A q/u/dot_u/joint_forces slice did not match `num_dofs`.
     SliceLength { expected: usize, got: usize },
+    /// A jacobian slice did not match `3 * num_dofs`.
+    JacobianSlice { expected: usize, got: usize },
+    /// A mass-matrix slice did not match `num_dofs * num_dofs`.
+    MassMatrixSlice { expected: usize, got: usize },
+    /// A body index out of range (`CHECK_IF_BODY_INDEX_IS_VALID`).
+    BodyIndex { got: usize, num_bodies: usize },
 }
 
-/// Kinematic update depth (`MultiBodyTreeImpl.hpp:137-142`); the
-/// `POSITION_ONLY` level joins with the M2 jacobian surface.
+/// Kinematic update depth (`MultiBodyTreeImpl.hpp:137-142`); the variant
+/// names mirror the upstream `POSITION_*` literals.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum KinUpdate {
+pub(crate) enum KinUpdate {
+    PositionOnly,
     PositionVelocity,
     PositionVelocityAcceleration,
 }
@@ -79,6 +87,20 @@ pub struct MultiBodyTree {
     pub(crate) moment_at_joint: Vec<Vector3>,
     pub(crate) body_force_user: Vec<Vector3>,
     pub(crate) body_moment_user: Vec<Vector3>,
+    // ── CRBA subtree composites (`m_subtree_mass`, `m_body_subtree_mass_com`,
+    // `m_body_subtree_I_body`) ──
+    pub(crate) subtree_mass: Vec<Real>,
+    pub(crate) body_subtree_mass_com: Vec<Vector3>,
+    pub(crate) body_subtree_i_body: Vec<Matrix3>,
+    // ── per-body jacobians, flat row-major 3×num_dofs
+    // (`m_body_Jac_R`/`m_body_Jac_T`, zeroed like `calculateStaticData`)
+    // ──
+    pub(crate) body_jac_r: Vec<Vec<Real>>,
+    pub(crate) body_jac_t: Vec<Vec<Real>>,
+    pub(crate) body_dot_jac_r_u: Vec<Vector3>,
+    pub(crate) body_dot_jac_t_u: Vec<Vector3>,
+    /// 3×num_dofs scratch, the `m_m3x` member (`MultiBodyTreeImpl.hpp`).
+    pub(crate) mat3x_scratch: Vec<Real>,
     // ── policy flags carried from the builder ──
     pub(crate) accept_invalid_mass_parameters: bool,
     pub(crate) mass_parameters_are_valid: bool,
@@ -132,7 +154,7 @@ impl MultiBodyTree {
         }
     }
 
-    fn check_slices(&self, slices: [&[Real]; 3]) -> Result<(), TreeError> {
+    pub(crate) fn check_slices<const N: usize>(&self, slices: [&[Real]; N]) -> Result<(), TreeError> {
         for slice in slices {
             if slice.len() != self.num_dofs {
                 return Err(TreeError::SliceLength {
@@ -440,7 +462,7 @@ impl MultiBodyTree {
         }
     }
 
-    fn check_body(&self, body: usize) -> bool {
+    pub(crate) fn check_body(&self, body: usize) -> bool {
         body < self.num_bodies
     }
 
@@ -453,14 +475,17 @@ impl MultiBodyTree {
     }
 
     /// Center of mass in world coordinates (the frame origin for zero-mass
-    /// bodies, `MultiBodyTreeImpl.cpp:1055-1069`).
+    /// bodies, `MultiBodyTreeImpl.cpp:1055-1069`). Vector ÷ scalar is the
+    /// upstream `btVector3` `v * (1.0/s)` reciprocal form, not true division
+    /// (`btVector3.h:843-856`) — mirrored here and in every other
+    /// vector-scalar divide of this crate.
     pub fn body_com(&self, body: usize) -> Option<Vector3> {
         if !self.check_body(body) {
             return None;
         }
         let t = self.body_t_world[body].transpose();
         if self.mass[body] > 0.0 {
-            Some(t * (self.body_pos[body] + self.mass_com[body] / self.mass[body]))
+            Some(t * (self.body_pos[body] + self.mass_com[body] * (1.0 / self.mass[body])))
         } else {
             Some(t * self.body_pos[body])
         }
@@ -496,7 +521,7 @@ impl MultiBodyTree {
             return None;
         }
         let com = if self.mass[body] > 0.0 {
-            self.mass_com[body] / self.mass[body]
+            self.mass_com[body] * (1.0 / self.mass[body])
         } else {
             Vector3::ZERO
         };

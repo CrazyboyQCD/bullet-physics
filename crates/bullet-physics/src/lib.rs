@@ -11,6 +11,12 @@
 //! - `f64`: double-precision math types (matches Bullet's default
 //!   `BT_USE_DOUBLE_PRECISION`).
 //!
+//! ## Optional subsystems
+//!
+//! - `inverse-dynamics` (off by default): re-exports
+//!   [`bullet-inverse-dynamics`] as [`inverse_dynamics`] — tree-structured
+//!   multibody inverse dynamics as an independent leaf crate.
+//!
 //! ## License
 //!
 //! zlib (same as upstream Bullet Physics).
@@ -23,6 +29,9 @@ pub use bullet_dynamics as dynamics;
 pub use bullet_math as math;
 pub use bullet_collision::raycast;
 pub use bullet_collision::shapes;
+
+#[cfg(feature = "inverse-dynamics")]
+pub use bullet_inverse_dynamics as inverse_dynamics;
 
 /// Convenience re-exports for common imports.
 pub mod prelude {

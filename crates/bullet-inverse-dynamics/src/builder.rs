@@ -149,8 +149,14 @@ impl TreeBuilder {
         match joint_type {
             JointType::Revolute | JointType::Prismatic => {
                 if !is_unit_vector(axis) {
-                    let length =
-                        math::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+                    // btPow(x, 2), verbatim (`MultiBodyTree.cpp:269-271`); the
+                    // constant exponent is black-boxed so LLVM cannot rewrite
+                    // pow(x, 2.0) into x·x (the two disagree on some inputs).
+                    let length = math::sqrt(
+                        math::powf(axis.x, core::hint::black_box(2.0))
+                            + math::powf(axis.y, core::hint::black_box(2.0))
+                            + math::powf(axis.z, core::hint::black_box(2.0)),
+                    );
                     if length < math::sqrt(Real::MIN_POSITIVE) {
                         return Err(AddBodyError::AxisTooShort);
                     }
@@ -264,6 +270,14 @@ impl TreeBuilder {
             body_moment_user: vec![Vector3::ZERO; num_bodies],
             accept_invalid_mass_parameters: self.accept_invalid_mass_parameters,
             mass_parameters_are_valid: self.mass_parameters_are_valid,
+            subtree_mass: vec![0.0; num_bodies],
+            body_subtree_mass_com: vec![Vector3::ZERO; num_bodies],
+            body_subtree_i_body: vec![Matrix3::ZERO; num_bodies],
+            body_jac_r: vec![vec![0.0; 3 * num_dofs]; num_bodies],
+            body_jac_t: vec![vec![0.0; 3 * num_dofs]; num_bodies],
+            body_dot_jac_r_u: vec![Vector3::ZERO; num_bodies],
+            body_dot_jac_t_u: vec![Vector3::ZERO; num_bodies],
+            mat3x_scratch: vec![0.0; 3 * num_dofs],
         };
 
         for (joint, inertia) in self.joints.iter().zip(&self.inertias) {

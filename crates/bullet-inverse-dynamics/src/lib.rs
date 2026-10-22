@@ -25,6 +25,8 @@ compile_error!(
 pub use bullet_math::{Matrix3, Real, Vector3};
 
 pub mod builder;
+pub mod jacobians;
+pub mod mass_matrix;
 pub mod math;
 pub mod tree;
 

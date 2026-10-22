@@ -18,12 +18,26 @@ exclude = ["examples/record_scenes.rs", "examples/perf_scenes.rs"]
 
 [features]
 default = ["std", "f32"]
-f32 = ["bullet-math/f32", "bullet-collision/f32", "bullet-dynamics/f32"]        
-f64 = ["bullet-math/f64", "bullet-collision/f64", "bullet-dynamics/f64"]        
-std = ["bullet-dynamics/std"]
-libm = ["bullet-dynamics/libm"]
+f32 = ["bullet-math/f32", "bullet-collision/f32", "bullet-dynamics/f32",
+    "bullet-inverse-dynamics?/f32"]
+f64 = ["bullet-math/f64", "bullet-collision/f64", "bullet-dynamics/f64",
+    "bullet-inverse-dynamics?/f64"]
+std = ["bullet-dynamics/std", "bullet-inverse-dynamics?/std"]
+libm = ["bullet-dynamics/libm", "bullet-inverse-dynamics?/libm"]
+# Tree-structured multibody inverse dynamics (`bullet-inverse-dynamics`),
+# re-exported as `inverse_dynamics`. Off by default: the subsystem is an
+# independent leaf crate and stays out of the default dependency tree.
+inverse-dynamics = ["dep:bullet-inverse-dynamics"]
 
 [dependencies]
 bullet-math = { version = "0.1", path = "../bullet-math", default-features = false }
 bullet-collision = { version = "0.1", path = "../bullet-collision", default-features = false }
 bullet-dynamics = { version = "0.1", path = "../bullet-dynamics", default-features = false }
+bullet-inverse-dynamics = { version = "0.1", path = "../bullet-inverse-dynamics",
+    default-features = false, optional = true }
+
+# The probe twins are verification rigs (docs/parity-harness.md), not demos;
+# this one exercises the optional inverse-dynamics re-export.
+[[example]]
+name = "id_probe"
+required-features = ["inverse-dynamics"]
