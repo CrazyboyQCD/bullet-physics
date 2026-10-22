@@ -19,7 +19,7 @@ std = ["bullet-math/std"]
 libm = ["bullet-math/libm"]
 
 [dependencies]
-bullet-math = { version = "0.1", path = "../bullet-math", default-features = false }
+bullet-math = { version = "0.2", path = "../bullet-math", default-features = false }
 
 [dev-dependencies]
 approx = { workspace = true }

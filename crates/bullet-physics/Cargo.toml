@@ -30,14 +30,18 @@ libm = ["bullet-dynamics/libm", "bullet-inverse-dynamics?/libm"]
 inverse-dynamics = ["dep:bullet-inverse-dynamics"]
 
 [dependencies]
-bullet-math = { version = "0.1", path = "../bullet-math", default-features = false }
-bullet-collision = { version = "0.1", path = "../bullet-collision", default-features = false }
-bullet-dynamics = { version = "0.1", path = "../bullet-dynamics", default-features = false }
-bullet-inverse-dynamics = { version = "0.1", path = "../bullet-inverse-dynamics",
+bullet-math = { version = "0.2", path = "../bullet-math", default-features = false }
+bullet-collision = { version = "0.2", path = "../bullet-collision", default-features = false }
+bullet-dynamics = { version = "0.2", path = "../bullet-dynamics", default-features = false }
+bullet-inverse-dynamics = { version = "0.2", path = "../bullet-inverse-dynamics",
     default-features = false, optional = true }
 
 # The probe twins are verification rigs (docs/parity-harness.md), not demos;
-# this one exercises the optional inverse-dynamics re-export.
+# these two exercise the optional inverse-dynamics re-export.
 [[example]]
 name = "id_probe"
+required-features = ["inverse-dynamics"]
+
+[[example]]
+name = "inverse_dynamics"
 required-features = ["inverse-dynamics"]

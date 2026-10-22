@@ -19,8 +19,8 @@ std = ["bullet-collision/std"]
 libm = ["bullet-collision/libm"]
 
 [dependencies]
-bullet-math = { version = "0.1", path = "../bullet-math", default-features = false }
-bullet-collision = { version = "0.1", path = "../bullet-collision", default-features = false }
+bullet-math = { version = "0.2", path = "../bullet-math", default-features = false }
+bullet-collision = { version = "0.2", path = "../bullet-collision", default-features = false }
 
 [dev-dependencies]
 approx = { workspace = true }

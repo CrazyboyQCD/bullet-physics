@@ -1,32 +1,26 @@
 # Changelog
 
 All notable changes to the `bullet-*` crates are documented in this file.
-The four crates share a single version line, in the spirit of
+The crates share a single version line, in the spirit of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Full development
 history lives in `docs/`.
 
-## [Unreleased]
+## [0.2.0] - 2026-10-22
 
 ### Added
 
-- Heightfield: the `btHeightfieldTerrainShape` option surface —
-  `HeightfieldOptions` with `up_axis` (X/Y/Z), `flip_quad_edges`,
-  `use_diamond_subdivision`, `use_zigzag_subdivision` and
-  `flip_triangle_winding`; parity scenes `heightfield` / `heightfield_x`.
+- New crate `bullet-inverse-dynamics`: tree-structured multibody inverse dynamics (builder, kinematics, Newton-Euler forces, CRBA mass matrix, jacobians), probed byte-level against the C++ library.
+- Optional `inverse-dynamics` feature on `bullet-physics`, re-exporting the crate as `inverse_dynamics` (off by default).
+- `bullet_math::CrtRand`, the portable MSVC `rand()` replica, is now public.
+- Heightfield option surface: `up_axis`, `flip_quad_edges`, diamond/zigzag subdivision, `flip_triangle_winding`.
 
 ### Changed
 
-- Heightfield (breaking): the grid is centered on the local origin like
-  upstream — in-plane coordinates shift by `-(n-1)/2 * cell` and heights
-  are offset by the min/max midpoint, so the terrain AABB centers on the
-  body transform.
+- Heightfield (breaking): grids are centered on the local origin, matching upstream.
 
 ### Fixed
 
-- quickhull: flat point clouds could produce a hull with missing faces (a
-  vertex could drive repeated expansions and figure-eight horizons could
-  fold fans onto one edge); the output is now always a closed surface
-  containing every input point.
+- quickhull: flat point clouds could fold into non-closed hulls; hulls are now always closed and contain every input point.
 
 ## [0.1.1] - 2026-10-19
 
