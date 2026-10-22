@@ -244,5 +244,5 @@ tree.calculate_mass_matrix(&[0.0], &mut mass).unwrap();
 ## Precision and `no_std`
 
 The `f64` and `libm` feature combinations are documented in the
-[workspace README](README.md#precision-features); both examples above are
+[workspace README](../README.md#precision-features); both examples above are
 precision-agnostic (types alias over `f32`/`f64`).
