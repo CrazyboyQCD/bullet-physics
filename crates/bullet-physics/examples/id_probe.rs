@@ -23,13 +23,60 @@
 //! Run:
 //!     cargo run -p bullet-physics --example id_probe --features inverse-dynamics
 //!     cargo run -p bullet-physics --example id_probe --features inverse-dynamics,f64
+//!     ... -- --bench   perf mode (docs/perf/inverse-dynamics.md): the
+//!                      chain_16 / chain_64 / chain_256 / random_64 scenes x
+//!                      {kin, id, mass, jac}, ns/call medians over interleaved
+//!                      rounds plus per-call allocation counts (the zero-alloc
+//!                      contract is asserted hard on this side) and the
+//!                      finalized-tree live bytes.
 //! The scene body orders and parameters are transcribed 1:1 from the C++
 //! probe — keep the two files in lockstep.
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use bullet_physics::inverse_dynamics::builder::{JointType, TreeBuilder};
 use bullet_physics::inverse_dynamics::math;
 use bullet_physics::inverse_dynamics::{Matrix3, MultiBodyTree, Real, Vector3};
 use bullet_physics::math::CrtRand;
+
+/// Allocator accounting for the `--bench` run mode: a pass-through wrapper of
+/// `System` tracking allocation counts and live requested bytes while
+/// `TRACKING` is set (the twin of the C++ probe's operator-new hook; both
+/// sides report requested bytes).
+struct CountingAlloc;
+
+static TRACKING: AtomicBool = AtomicBool::new(false);
+static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
+static ALLOCS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() && TRACKING.load(Ordering::Relaxed) {
+            LIVE_BYTES.fetch_add(layout.size() as i64, Ordering::Relaxed);
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            TOTAL_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if TRACKING.load(Ordering::Relaxed) {
+            // Clamp: chunks allocated before tracking was switched on free
+            // late and would otherwise drag the total below zero.
+            let old = LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
+            if old < layout.size() as i64 {
+                LIVE_BYTES.fetch_add(layout.size() as i64, Ordering::Relaxed);
+            }
+        }
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOC: CountingAlloc = CountingAlloc;
 
 /// C `%.17g`: 17 significant digits, trailing zeros stripped, fixed
 /// notation when the decimal exponent is in [-4, 17), scientific
@@ -162,6 +209,61 @@ fn v3(x: Real, y: Real, z: Real) -> Vector3 {
     Vector3::new(x, y, z)
 }
 
+/// One drawn body: the shared per-body draw sequence of the random-tree
+/// builder and the bench chains (identical order on both sides; the parent
+/// and joint type are the caller's, so the chains skip their draws).
+fn add_drawn_body(b: &mut TreeBuilder, body: usize, parent: isize, jt: JointType,
+                  rand: &mut CrtRand) {
+    let r = v3(draw(rand, -0.4, 0.8), draw(rand, -0.4, 0.8), draw(rand, -0.4, 0.8));
+    let a0 = draw(rand, -0.4, 0.8);
+    let a1 = draw(rand, -0.4, 0.8);
+    let a2 = draw(rand, -0.4, 0.8);
+    let t_ref = math::transform_z(a2) * math::transform_y(a1) * math::transform_x(a0);
+    let axis = v3(draw(rand, 0.05, 0.95), draw(rand, 0.05, 0.95), draw(rand, 0.05, 0.95));
+    let mass = draw(rand, 0.1, 1.9);
+    let com = v3(draw(rand, -0.5, 1.0), draw(rand, -0.5, 1.0), draw(rand, -0.5, 1.0));
+    // Enforce the inertia triangle inequality on the largest entry
+    // (lowest-index tie-break), so the add_body gate accepts every tree.
+    // Upstream keeps the draws in double until the diagonal() construction.
+    let mut m = [draw(rand, 0.05, 0.95), draw(rand, 0.05, 0.95), draw(rand, 0.05, 0.95)];
+    let sum = m[0] + m[1] + m[2];
+    let mut mx = 0usize;
+    if m[1] > m[mx] {
+        mx = 1;
+    }
+    if m[2] > m[mx] {
+        mx = 2;
+    }
+    if m[mx] > sum - m[mx] {
+        m[mx] = (sum - m[mx]) * 0.9;
+    }
+    let inertia = diagonal(m[0] as Real, m[1] as Real, m[2] as Real);
+    add(b, body, parent, jt, r, t_ref, axis, mass, com, inertia);
+}
+
+fn build_random_tree_n(b: &mut TreeBuilder, nb: usize, rand: &mut CrtRand) {
+    for i in 0..nb {
+        let parent: isize = if i == 0 { -1 } else { (rand.next_rand() % i as i32) as isize };
+        let jt = match rand.next_rand() % 5 {
+            0 => JointType::Fixed,
+            1 => JointType::Revolute,
+            2 => JointType::Prismatic,
+            3 => JointType::Floating,
+            _ => JointType::Spherical,
+        };
+        add_drawn_body(b, i, parent, jt, rand);
+    }
+}
+
+/// Fixed-root serial chain: body 0 FIXED, bodies 1..nb-1 drawn revolute links.
+fn build_chain(b: &mut TreeBuilder, nb: usize, rand: &mut CrtRand) {
+    add(b, 0, -1, JointType::Fixed, v3(0.0, 0.0, 0.0), Matrix3::IDENTITY,
+        v3(0.0, 0.0, 0.0), 0.0, v3(0.0, 0.0, 0.0), diagonal(1.0, 1.0, 1.0));
+    for i in 1..nb {
+        add_drawn_body(b, i, i as isize - 1, JointType::Revolute, rand);
+    }
+}
+
 fn run_scene<const N: usize>(scene: usize, tree: &mut MultiBodyTree, num_dofs: usize,
                              qs: &[[Real; N]; 3], us: &[[Real; N]; 3],
                              dot_us: &[[Real; N]; 3]) {
@@ -213,6 +315,10 @@ fn run_scene<const N: usize>(scene: usize, tree: &mut MultiBodyTree, num_dofs: u
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--bench") {
+        run_bench();
+        return;
+    }
     // scene 0: arm2r — planar two-revolute arm, default gravity.
     {
         let mut b = TreeBuilder::new();
@@ -314,47 +420,7 @@ fn main() {
         let mut rand = CrtRand::seeded(t + 1);
         let mut b = TreeBuilder::new();
         let nb = 2 + (rand.next_rand() % 5) as usize;
-        for i in 0..nb {
-            let parent: isize = if i == 0 { -1 } else { (rand.next_rand() % i as i32) as isize };
-            let jt = match rand.next_rand() % 5 {
-                0 => JointType::Fixed,
-                1 => JointType::Revolute,
-                2 => JointType::Prismatic,
-                3 => JointType::Floating,
-                _ => JointType::Spherical,
-            };
-            let r = v3(draw(&mut rand, -0.4, 0.8), draw(&mut rand, -0.4, 0.8),
-                draw(&mut rand, -0.4, 0.8));
-            let a0 = draw(&mut rand, -0.4, 0.8);
-            let a1 = draw(&mut rand, -0.4, 0.8);
-            let a2 = draw(&mut rand, -0.4, 0.8);
-            let t_ref =
-                math::transform_z(a2) * math::transform_y(a1) * math::transform_x(a0);
-            let axis = v3(draw(&mut rand, 0.05, 0.95), draw(&mut rand, 0.05, 0.95),
-                draw(&mut rand, 0.05, 0.95));
-            let mass = draw(&mut rand, 0.1, 1.9);
-            let com = v3(draw(&mut rand, -0.5, 1.0), draw(&mut rand, -0.5, 1.0),
-                draw(&mut rand, -0.5, 1.0));
-            // Enforce the inertia triangle inequality on the largest entry
-            // (lowest-index tie-break), so the add_body gate accepts every
-            // tree. Upstream keeps the draws in double until the diagonal()
-            // construction.
-            let mut m = [draw(&mut rand, 0.05, 0.95), draw(&mut rand, 0.05, 0.95),
-                draw(&mut rand, 0.05, 0.95)];
-            let sum = m[0] + m[1] + m[2];
-            let mut mx = 0usize;
-            if m[1] > m[mx] {
-                mx = 1;
-            }
-            if m[2] > m[mx] {
-                mx = 2;
-            }
-            if m[mx] > sum - m[mx] {
-                m[mx] = (sum - m[mx]) * 0.9;
-            }
-            let inertia = diagonal(m[0] as Real, m[1] as Real, m[2] as Real);
-            add(&mut b, i, parent, jt, r, t_ref, axis, mass, com, inertia);
-        }
+        build_random_tree_n(&mut b, nb, &mut rand);
         let mut tree = b.finalize().unwrap();
         tree.set_gravity_in_world_frame(v3(0.0, 0.0, -9.8));
         let nd = tree.num_dofs();
@@ -370,4 +436,123 @@ fn main() {
         }
         run_scene(4 + t as usize, &mut tree, nd, &qs, &us, &du);
     }
+}
+
+// --- bench mode --------------------------------------------------------------
+// The twin of the C++ probe's --bench (same scenes, seeds, draw stream,
+// calibration and protocol). The zero-alloc contract is asserted hard on this
+// side: a nonzero per-call allocation count aborts the run with exit code 1.
+
+struct BenchScene {
+    name: &'static str,
+    seed: u32,
+    bodies: usize,
+    random: bool,
+}
+
+const BENCH_SCENES: [BenchScene; 4] = [
+    BenchScene { name: "chain_16", seed: 2101, bodies: 16, random: false },
+    BenchScene { name: "chain_64", seed: 2102, bodies: 64, random: false },
+    BenchScene { name: "chain_256", seed: 2103, bodies: 256, random: false },
+    BenchScene { name: "random_64", seed: 2104, bodies: 64, random: true },
+];
+
+const ALGO_NAMES: [&str; 4] = ["kin", "id", "mass", "jac"];
+
+fn call_algo(a: usize, tree: &mut MultiBodyTree, q: &[Real], u: &[Real], du: &[Real],
+             tau: &mut [Real], mm: &mut [Real]) -> bool {
+    match a {
+        0 => tree.calculate_kinematics(q, u, du).is_ok(),
+        1 => tree.calculate_inverse_dynamics(q, u, du, tau).is_ok(),
+        2 => tree.calculate_mass_matrix(q, mm).is_ok(),
+        3 => tree.calculate_jacobians(q, u).is_ok(),
+        _ => false,
+    }
+}
+
+fn bench_scene(s: &BenchScene) {
+    TRACKING.store(true, Ordering::Relaxed);
+    let live0 = LIVE_BYTES.load(Ordering::Relaxed);
+    let mut rand = CrtRand::seeded(s.seed);
+    let mut b = TreeBuilder::new();
+    if s.random {
+        build_random_tree_n(&mut b, s.bodies, &mut rand);
+    } else {
+        build_chain(&mut b, s.bodies, &mut rand);
+    }
+    let mut tree = b.finalize().unwrap();
+    tree.set_gravity_in_world_frame(v3(0.0, 0.0, -9.8));
+    let tree_live = LIVE_BYTES.load(Ordering::Relaxed) - live0;
+    let nd = tree.num_dofs();
+
+    // One drawn state, the same draw(-1.5, 3.0) stream as the parity scenes.
+    let mut q = vec![0.0 as Real; nd];
+    let mut u = vec![0.0 as Real; nd];
+    let mut du = vec![0.0 as Real; nd];
+    for d in 0..nd {
+        q[d] = draw(&mut rand, -1.5, 3.0);
+        u[d] = draw(&mut rand, -1.5, 3.0);
+        du[d] = draw(&mut rand, -1.5, 3.0);
+    }
+    let mut tau = vec![0.0 as Real; nd];
+    let mut mm = vec![0.0 as Real; nd * nd];
+
+    println!("bench_mem {} tree_live_bytes {}", s.name, tree_live);
+
+    const ROUNDS: usize = 5;
+    let mut ns = [[0.0f64; ROUNDS]; 4];
+    let mut calls = [0u64; 4];
+    for (a, calls_a) in calls.iter_mut().enumerate() {
+        for _ in 0..5 {
+            assert!(call_algo(a, &mut tree, &q, &u, &du, &mut tau, &mut mm));
+        }
+        // Auto-calibrated round size: ~50 ms of calls, clamped.
+        let mut one = f64::INFINITY;
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            assert!(call_algo(a, &mut tree, &q, &u, &du, &mut tau, &mut mm));
+            one = one.min(t0.elapsed().as_nanos() as f64);
+        }
+        let c = (50.0e6 / one.max(1.0)) as u64;
+        *calls_a = c.clamp(1, 200_000);
+    }
+    // Interleaved rounds: the round loop is outer, the algorithm loop inner.
+    for r in 0..ROUNDS {
+        for (a, row) in ns.iter_mut().enumerate() {
+            let t0 = std::time::Instant::now();
+            for _ in 0..calls[a] {
+                assert!(call_algo(a, &mut tree, &q, &u, &du, &mut tau, &mut mm));
+            }
+            row[r] = t0.elapsed().as_nanos() as f64 / calls[a] as f64;
+        }
+    }
+    for (a, name) in ALGO_NAMES.iter().enumerate() {
+        let mut sorted = ns[a];
+        sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        let mean: f64 = sorted.iter().sum::<f64>() / ROUNDS as f64;
+        println!("bench {} {} median_ns {:.1} min_ns {:.1} mean_ns {:.1} rounds {} calls_per_round {}",
+            s.name, name, sorted[ROUNDS / 2], sorted[0], mean, ROUNDS, calls[a]);
+    }
+    // Per-call allocation counts of one tracked call (monotonic counters).
+    for (a, name) in ALGO_NAMES.iter().enumerate() {
+        let c0 = ALLOCS.load(Ordering::Relaxed);
+        let b0 = TOTAL_BYTES.load(Ordering::Relaxed);
+        assert!(call_algo(a, &mut tree, &q, &u, &du, &mut tau, &mut mm));
+        let allocs = ALLOCS.load(Ordering::Relaxed) - c0;
+        let bytes = TOTAL_BYTES.load(Ordering::Relaxed) - b0;
+        if allocs != 0 || bytes != 0 {
+            eprintln!("ZERO-ALLOC VIOLATION {} {} allocs {} bytes {}",
+                s.name, name, allocs, bytes);
+            std::process::exit(1);
+        }
+        println!("bench_alloc {} {} allocs {} bytes {}", s.name, name, allocs, bytes);
+    }
+    TRACKING.store(false, Ordering::Relaxed);
+}
+
+fn run_bench() {
+    for s in &BENCH_SCENES {
+        bench_scene(s);
+    }
+    eprintln!("bench done");
 }

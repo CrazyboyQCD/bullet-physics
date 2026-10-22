@@ -23,8 +23,26 @@
 // target/bullet3-build-id[-double] — the /fp:fast default of bullet3's
 // CMakeLists swaps in approximate sin/cos that diverge from ucrt by 1 ulp);
 // usage:
-//     inverse_dynamics_probe[ _f64].exe
+//     inverse_dynamics_probe[ _f64].exe            parity mode (this file's
+//                                                  default output)
+//     inverse_dynamics_probe[ _f64].exe --bench    perf mode: the chain_16 /
+//                                                  chain_64 / chain_256 /
+//                                                  random_64 scenes x
+//                                                  {kin, id, mass, jac},
+//                                                  ns/call medians over
+//                                                  interleaved rounds plus
+//                                                  per-call allocation counts
+//                                                  (docs/perf/
+//                                                  inverse-dynamics.md)
 #include <cstdio>
+#include <chrono>
+#include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+
+#include <LinearMath/btAlignedAllocator.h>
 
 #include "Bullet3Common/b3Logging.h"
 #include "BulletInverseDynamics/MultiBodyTree.hpp"
@@ -237,8 +255,35 @@ static double draw(double lo, double width) {
 	return lo + (rand() % 2001) / 2000.0 * width;
 }
 
-static int build_random_tree(MultiBodyTree &tree, int *num_bodies_out) {
-	const int nb = 2 + rand() % 5;
+// One drawn body: the shared per-body draw sequence of the random-tree
+// builder and the bench chains (identical order on both sides; the parent
+// and joint type are the caller's, so the chains skip their draws).
+static void add_drawn_body(MultiBodyTree &tree, int body, int parent, JointType jt) {
+	const double rx = draw(-0.4, 0.8), ry = draw(-0.4, 0.8), rz = draw(-0.4, 0.8);
+	const vec3 r = v3(rx, ry, rz);
+	const double a0 = draw(-0.4, 0.8), a1 = draw(-0.4, 0.8), a2 = draw(-0.4, 0.8);
+	const mat33 t_ref = transformZ(a2) * transformY(a1) * transformX(a0);
+	const double ax = draw(0.05, 0.95), ay = draw(0.05, 0.95), az = draw(0.05, 0.95);
+	const vec3 axis = v3(ax, ay, az);
+	const double mass = draw(0.1, 1.9);
+	const double cx = draw(-0.5, 1.0), cy = draw(-0.5, 1.0), cz = draw(-0.5, 1.0);
+	const vec3 com = v3(cx, cy, cz);
+	double m[3] = {draw(0.05, 0.95), draw(0.05, 0.95), draw(0.05, 0.95)};
+	// Enforce the inertia triangle inequality on the largest entry
+	// (lowest-index tie-break), so the addBody gate accepts every tree.
+	double sum = m[0] + m[1] + m[2];
+	int mx = 0;
+	if (m[1] > m[mx])
+		mx = 1;
+	if (m[2] > m[mx])
+		mx = 2;
+	if (m[mx] > sum - m[mx])
+		m[mx] = (sum - m[mx]) * 0.9;
+	const mat33 inertia = diagonal(m[0], m[1], m[2]);
+	add(tree, body, parent, jt, r, t_ref, axis, mass, com, inertia);
+}
+
+static void build_random_tree_n(MultiBodyTree &tree, int nb) {
 	for (int i = 0; i < nb; i++) {
 		const int parent = (i == 0) ? -1 : rand() % i;
 		JointType jt;
@@ -259,39 +304,305 @@ static int build_random_tree(MultiBodyTree &tree, int *num_bodies_out) {
 				jt = SPHERICAL;
 				break;
 		}
-		// MSVC evaluates call arguments right-to-left — draw into locals so
-		// the consumption order matches the Rust twin.
-		const double rx = draw(-0.4, 0.8), ry = draw(-0.4, 0.8), rz = draw(-0.4, 0.8);
-		const vec3 r = v3(rx, ry, rz);
-		const double a0 = draw(-0.4, 0.8), a1 = draw(-0.4, 0.8), a2 = draw(-0.4, 0.8);
-		const mat33 t_ref = transformZ(a2) * transformY(a1) * transformX(a0);
-		const double ax = draw(0.05, 0.95), ay = draw(0.05, 0.95), az = draw(0.05, 0.95);
-		const vec3 axis = v3(ax, ay, az);
-		const double mass = draw(0.1, 1.9);
-		const double cx = draw(-0.5, 1.0), cy = draw(-0.5, 1.0), cz = draw(-0.5, 1.0);
-		const vec3 com = v3(cx, cy, cz);
-		double m[3] = {draw(0.05, 0.95), draw(0.05, 0.95), draw(0.05, 0.95)};
-		// Enforce the inertia triangle inequality on the largest entry
-		// (lowest-index tie-break), so the addBody gate accepts every tree.
-		double sum = m[0] + m[1] + m[2];
-		int mx = 0;
-		if (m[1] > m[mx])
-			mx = 1;
-		if (m[2] > m[mx])
-			mx = 2;
-		if (m[mx] > sum - m[mx])
-			m[mx] = (sum - m[mx]) * 0.9;
-		const mat33 inertia = diagonal(m[0], m[1], m[2]);
-		add(tree, i, parent, jt, r, t_ref, axis, mass, com, inertia);
+		add_drawn_body(tree, i, parent, jt);
 	}
+}
+
+// Fixed-root serial chain: body 0 FIXED, bodies 1..nb-1 drawn revolute links.
+static void build_chain(MultiBodyTree &tree, int nb) {
+	add(tree, 0, -1, FIXED, v3(0.0, 0.0, 0.0), identity(), v3(0.0, 0.0, 0.0), 0.0,
+		v3(0.0, 0.0, 0.0), diagonal(1.0, 1.0, 1.0));
+	for (int i = 1; i < nb; i++)
+		add_drawn_body(tree, i, i - 1, REVOLUTE);
+}
+
+static int build_random_tree(MultiBodyTree &tree, int *num_bodies_out) {
+	const int nb = 2 + rand() % 5;
+	build_random_tree_n(tree, nb);
 	*num_bodies_out = nb;
 	return nb;
 }
 
-int main() {
+// --- allocation accounting (--bench run mode) -------------------------------
+// Same two hook points as tools/bullet_perf.cpp: the global operator
+// new/delete family below plus btAlignedAllocSetCustomAligned (installed only
+// by the bench mode) for Bullet's internal btAlignedObjectArray storage. The
+// bench mode reports monotonic allocation counts and requested bytes per
+// calculate call; live bytes after finalize are the tree footprint (the Rust
+// twin reports the same unit — requested bytes).
+namespace {
+std::atomic<bool> g_track{false};
+std::atomic<long long> g_live{0};
+std::atomic<long long> g_allocs{0};
+std::atomic<long long> g_bytes{0};
+
+void mem_note_alloc(std::size_t n) {
+	const long long live =
+		g_live.fetch_add(long long(n), std::memory_order_relaxed) + long long(n);
+	(void)live;
+	g_allocs.fetch_add(1, std::memory_order_relaxed);
+	g_bytes.fetch_add(long long(n), std::memory_order_relaxed);
+}
+
+void mem_note_free(std::size_t n) {
+	// Clamp: chunks allocated before tracking was switched on (the startup
+	// window) free late and would otherwise drag the total below zero.
+	const long long old = g_live.fetch_sub(long long(n), std::memory_order_relaxed);
+	if (old < long long(n))
+		g_live.fetch_add(long long(n), std::memory_order_relaxed);
+}
+
+void* bt_alloc_custom(std::size_t size, int alignment) {
+	const std::size_t align = alignment < 16 ? 16 : std::size_t(alignment);
+	unsigned char* raw = static_cast<unsigned char*>(
+		_aligned_malloc(size + 2 * sizeof(std::size_t), align));
+	if (!raw) return nullptr;
+	std::size_t* hdr = reinterpret_cast<std::size_t*>(raw);
+	hdr[0] = size;
+	hdr[1] = align;
+	if (g_track.load(std::memory_order_relaxed)) mem_note_alloc(size);
+	return raw + 2 * sizeof(std::size_t);
+}
+
+void bt_free_custom(void* ptr) {
+	if (!ptr) return;
+	unsigned char* raw =
+		static_cast<unsigned char*>(ptr) - 2 * sizeof(std::size_t);
+	if (g_track.load(std::memory_order_relaxed)) {
+		const std::size_t* hdr = reinterpret_cast<const std::size_t*>(raw);
+		mem_note_free(hdr[0]);
+	}
+	_aligned_free(raw);
+}
+}  // namespace
+
+void* operator new(std::size_t n) {
+	void* p = std::malloc(n ? n : 1);
+	if (!p) throw std::bad_alloc{};
+	if (g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+	return p;
+}
+
+void* operator new[](std::size_t n) {
+	void* p = std::malloc(n ? n : 1);
+	if (!p) throw std::bad_alloc{};
+	if (g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+	return p;
+}
+
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
+	void* p = std::malloc(n ? n : 1);
+	if (p && g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+	return p;
+}
+
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept {
+	void* p = std::malloc(n ? n : 1);
+	if (p && g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+	return p;
+}
+
+void operator delete(void* p) noexcept { std::free(p); }
+
+void operator delete[](void* p) noexcept { std::free(p); }
+
+void operator delete(void* p, std::size_t n) noexcept {
+	if (p && g_track.load(std::memory_order_relaxed)) mem_note_free(n);
+	std::free(p);
+}
+
+void operator delete[](void* p, std::size_t n) noexcept {
+	if (p && g_track.load(std::memory_order_relaxed)) mem_note_free(n);
+	std::free(p);
+}
+
+void* operator new(std::size_t n, std::align_val_t al) {
+	void* p = _aligned_malloc(n ? n : 1, std::size_t(al));
+	if (!p) throw std::bad_alloc{};
+	if (g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+	return p;
+}
+
+void* operator new[](std::size_t n, std::align_val_t al) {
+	void* p = _aligned_malloc(n ? n : 1, std::size_t(al));
+	if (!p) throw std::bad_alloc{};
+	if (g_track.load(std::memory_order_relaxed)) mem_note_alloc(n);
+	return p;
+}
+
+void operator delete(void* p, std::align_val_t) noexcept { _aligned_free(p); }
+
+void operator delete[](void* p, std::align_val_t) noexcept { _aligned_free(p); }
+
+void operator delete(void* p, std::size_t n, std::align_val_t) noexcept {
+	if (p && g_track.load(std::memory_order_relaxed)) mem_note_free(n);
+	_aligned_free(p);
+}
+
+void operator delete[](void* p, std::size_t n, std::align_val_t) noexcept {
+	if (p && g_track.load(std::memory_order_relaxed)) mem_note_free(n);
+	_aligned_free(p);
+}
+
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept {
+	_aligned_free(p);
+}
+
+void operator delete[](void* p, std::align_val_t,
+					   const std::nothrow_t&) noexcept {
+	_aligned_free(p);
+}
+
+// --- bench mode --------------------------------------------------------------
+// Scenes x algorithms of docs/perf/inverse-dynamics.md. Protocol per scene:
+// one `bench_mem` line (finalized-tree live bytes under the allocation hook),
+// then per algorithm one timing line (median/min ns per call over 5
+// interleaved rounds of auto-calibrated call counts) and one allocation line
+// (monotonic count/bytes delta of a single tracked call). The Rust twin
+// (examples/id_probe.rs --bench) prints the same lines.
+
+namespace {
+struct BenchScene {
+	const char* name;
+	int seed;
+	int bodies;
+	bool random;
+};
+const BenchScene kBenchScenes[] = {
+	{"chain_16", 2101, 16, false}, {"chain_64", 2102, 64, false},
+	{"chain_256", 2103, 256, false}, {"random_64", 2104, 64, true},
+};
+
+enum Algo { A_KIN = 0, A_ID = 1, A_MASS = 2, A_JAC = 3, kAlgos = 4 };
+const char* kAlgoNames[kAlgos] = {"kin", "id", "mass", "jac"};
+
+bool call_algo(Algo a, MultiBodyTree &tree, const vecx &q, const vecx &u,
+			   const vecx &du, vecx &tau, matxx &mm) {
+	switch (a) {
+		case A_KIN:
+			return 0 == tree.calculateKinematics(q, u, du);
+		case A_ID:
+			return 0 == tree.calculateInverseDynamics(q, u, du, &tau);
+		case A_MASS:
+			return 0 == tree.calculateMassMatrix(q, &mm);
+		case A_JAC:
+			return 0 == tree.calculateJacobians(q, u);
+	}
+	return false;
+}
+
+void bench_scene(const BenchScene &s) {
+	const long long live0 = g_live.load(std::memory_order_relaxed);
+	srand(s.seed);
+	MultiBodyTree tree;
+	if (s.random)
+		build_random_tree_n(tree, s.bodies);
+	else
+		build_chain(tree, s.bodies);
+	if (0 != tree.finalize()) {
+		fprintf(stderr, "finalize failed (%s)\n", s.name);
+		exit(2);
+	}
+	tree.setGravityInWorldFrame(v3(0.0, 0.0, -9.8));
+	const long long tree_live =
+		g_live.load(std::memory_order_relaxed) - live0;
+	const int nd = tree.numDoFs();
+
+	// One drawn state, the same draw(-1.5, 3.0) stream as the parity scenes.
+	vecx q(nd), u(nd), du(nd), tau(nd);
+	for (int d = 0; d < nd; d++) {
+		q(d) = draw(-1.5, 3.0);
+		u(d) = draw(-1.5, 3.0);
+		du(d) = draw(-1.5, 3.0);
+	}
+	matxx mm(nd, nd);
+	mm.setZero();
+
+	printf("bench_mem %s tree_live_bytes %lld\n", s.name, tree_live);
+
+	const int kRounds = 5;
+	double ns[kAlgos][kRounds];
+	long long calls[kAlgos];
+	for (int a = 0; a < kAlgos; a++) {
+		const Algo algo = Algo(a);
+		for (int w = 0; w < 5; w++)
+			if (!call_algo(algo, tree, q, u, du, tau, mm)) {
+				fprintf(stderr, "%s warmup failed (%s)\n", kAlgoNames[a], s.name);
+				exit(3);
+			}
+		// Auto-calibrated round size: ~50 ms of calls, clamped.
+		double one = 1e300;
+		for (int k = 0; k < 3; k++) {
+			const auto t0 = std::chrono::steady_clock::now();
+			if (!call_algo(algo, tree, q, u, du, tau, mm)) {
+				fprintf(stderr, "%s calibration failed (%s)\n", kAlgoNames[a],
+						s.name);
+				exit(3);
+			}
+			const auto t1 = std::chrono::steady_clock::now();
+			one = std::min(
+				one, std::chrono::duration<double, std::nano>(t1 - t0).count());
+		}
+		long long c = long long(50.0e6 / std::max(one, 1.0));
+		calls[a] = std::max(1LL, std::min(200000LL, c));
+	}
+	// Interleaved rounds: the round loop is outer, the algorithm loop inner.
+	for (int r = 0; r < kRounds; r++) {
+		for (int a = 0; a < kAlgos; a++) {
+			const Algo algo = Algo(a);
+			const auto t0 = std::chrono::steady_clock::now();
+			for (long long i = 0; i < calls[a]; i++)
+				if (!call_algo(algo, tree, q, u, du, tau, mm)) {
+					fprintf(stderr, "%s timed call failed (%s)\n", kAlgoNames[a],
+							s.name);
+					exit(3);
+				}
+			const auto t1 = std::chrono::steady_clock::now();
+			ns[a][r] = std::chrono::duration<double, std::nano>(t1 - t0).count() /
+					   double(calls[a]);
+		}
+	}
+	for (int a = 0; a < kAlgos; a++) {
+		double sorted[kRounds];
+		for (int r = 0; r < kRounds; r++) sorted[r] = ns[a][r];
+		std::sort(sorted, sorted + kRounds);
+		double total = 0.0;
+		for (int r = 0; r < kRounds; r++) total += ns[a][r];
+		printf("bench %s %s median_ns %.1f min_ns %.1f mean_ns %.1f rounds %d calls_per_round %lld\n",
+			   s.name, kAlgoNames[a], sorted[kRounds / 2], sorted[0],
+			   total / double(kRounds), kRounds, calls[a]);
+	}
+	// Per-call allocation counts of one tracked call (monotonic counters).
+	for (int a = 0; a < kAlgos; a++) {
+		const long long c0 = g_allocs.load(std::memory_order_relaxed);
+		const long long b0 = g_bytes.load(std::memory_order_relaxed);
+		if (!call_algo(Algo(a), tree, q, u, du, tau, mm)) {
+			fprintf(stderr, "%s tracked call failed (%s)\n", kAlgoNames[a], s.name);
+			exit(3);
+		}
+		printf("bench_alloc %s %s allocs %lld bytes %lld\n", s.name, kAlgoNames[a],
+			   g_allocs.load(std::memory_order_relaxed) - c0,
+			   g_bytes.load(std::memory_order_relaxed) - b0);
+	}
+	fflush(stdout);
+}
+}  // namespace
+
+static int run_bench() {
+	// Route Bullet's internal aligned allocations through the accounting hook.
+	btAlignedAllocSetCustomAligned(&bt_alloc_custom, &bt_free_custom);
+	g_track.store(true, std::memory_order_relaxed);
+	for (const BenchScene &s : kBenchScenes) bench_scene(s);
+	fprintf(stderr, "bench done\n");
+	return 0;
+}
+
+int main(int argc, char **argv) {
 	// The port logs nothing; silence the upstream axis-normalization warning
 	// so it cannot pollute the compare protocol.
 	b3SetCustomWarningMessageFunc([](const char *) {});
+	if (argc > 1 && 0 == strcmp(argv[1], "--bench"))
+		return run_bench();
 	// scene 0: arm2r — planar two-revolute arm, default gravity.
 	{
 		MultiBodyTree tree;

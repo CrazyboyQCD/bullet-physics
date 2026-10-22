@@ -43,6 +43,11 @@ def run(cmd, **kw):
 
 DEMOS = ["falling_box", "falling_capsule", "falling_mesh", "ccd", "character", "vehicle", "joints", "multibody", "mixed_stress", "softbody_rope", "softbody_rope_ground", "softbody_flag", "softbody_ellipsoid", "softbody_joints"]
 
+# Demos behind required-features: name -> extra cargo arguments.
+FEATURED_DEMOS = {
+    "id_alloc": ["--features", "inverse-dynamics"],
+}
+
 
 def ensure_scenes_generated():
     """Regenerate the scene tables when scenes.json or the generator is newer
@@ -134,6 +139,11 @@ def main():
         r = run(["cargo", "run", "-p", "bullet-physics", "--example", demo], capture_output=True)
         if r.returncode != 0 or b"OK" not in r.stdout:
             failed.append(f"demo {demo}")
+    for demo, extra in FEATURED_DEMOS.items():
+        r = run(["cargo", "run", "-p", "bullet-physics", "--example", demo] + extra,
+                capture_output=True)
+        if r.returncode != 0 or b"OK" not in r.stdout:
+            failed.append(f"demo {demo}")
 
     # 4. Optional parity snapshot. The pipeline must run cleanly; known
     # exceedances (recorded trade-offs in docs/bullet-compare.md) are printed
@@ -152,7 +162,7 @@ def main():
     if failed:
         print(f"FAIL: {', '.join(failed)}")
         return 1
-    print(f"OK: tests (f32{'/f64' if not args.no_f64 else ''}) + {len(DEMOS)} demos"
+    print(f"OK: tests (f32{'/f64' if not args.no_f64 else ''}) + {len(DEMOS) + len(FEATURED_DEMOS)} demos"
           + (" + parity falling_box" if args.parity else ""))
     return 0
 

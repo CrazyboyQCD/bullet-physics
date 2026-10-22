@@ -43,5 +43,9 @@ name = "id_probe"
 required-features = ["inverse-dynamics"]
 
 [[example]]
+name = "id_alloc"
+required-features = ["inverse-dynamics"]
+
+[[example]]
 name = "inverse_dynamics"
 required-features = ["inverse-dynamics"]
