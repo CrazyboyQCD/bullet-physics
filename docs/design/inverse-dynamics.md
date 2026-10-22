@@ -126,6 +126,19 @@ Precedent: the glam column-major outer-product trap (two incidents in the
 dynamics port). M1 gate: canonical-tree probe bit-exact in f64 **and** f32;
 if any op drifts, replace that op with the explicit form.
 
+**M1 outcome (2026-10-22)**: glam ops are bit-identical to the BID builtin
+math (`IDMatVec.hpp` uses the same `((t0+t1)+t2)` element expressions glam
+compiles to) — no explicit-ops fallback needed; the floating-joint scene
+(no trig) matches byte-for-byte. The one drift source was the *reference*:
+bullet3's CMakeLists defaults `USE_MSVC_FAST_FLOATINGPOINT=ON`, and under
+`/fp:fast` MSVC swaps in approximate `sin`/`cos` that diverge from ucrt by
+1 ulp at some arguments. Resolution: the BID probe links an IEEE-precise
+BID build (`target/bullet3-build-id[-double]`, `-DUSE_MSVC_FAST_FLOATINGPOINT=OFF`):
+`btCos/btSin` are plain `cos/sin` under `BT_USE_DOUBLE_PRECISION`
+(`btScalar.h:442-443`), and precise MSVC trig equals ucrt equals Rust std.
+The main `bullet3-build[-double]` parity/perf rigs stay on `/fp:fast` with
+their recorded binaries untouched.
+
 Per-body jacobian storage: two flat `Vec<Real>` of length `3 * num_dofs` per
 body, indexed `[dof_column][component]` (3 floats per column — matches the
 column-write access pattern of `addRelativeJacobianComponent` and the
@@ -357,12 +370,19 @@ the implementing commits; every row cites upstream file:line):
 Each milestone: full gate (dual-precision tests, clippy ×2, `check.py`,
 no_std ×2) + one atomic Conventional Commit.
 
-- **M0** — Crate skeleton (manifest, workspace member, features, MSRV) +
-  `CrtRand` lift to `bullet-math` (softbody probes byte-identical) + math
-  helper module with hand-computed unit tests (transforms, tilde, axis-angle).
-- **M1** — Builder + validation gates + finalize + kinematics (3 levels) +
-  inverse dynamics. Canonical-tree probe parity bit-exact (f64 + f32).
-  Glam-vs-btMatrix3x3 product-order risk retired here.
+- **M0** ✅ (2026-10-21) — Crate skeleton (manifest, workspace member,
+  features, MSRV) + `CrtRand` lift to `bullet-math` (softbody probes
+  byte-identical) + math helper module with hand-computed unit tests
+  (transforms, tilde, axis-angle).
+- **M1** ✅ (2026-10-22) — Builder + validation gates + finalize + kinematics
+  (3 levels) + inverse dynamics. Canonical-tree probe bit-exact in f64 and
+  f32 (4 scenes × 3 states × ID + kinematics groups, `cmp`-level after
+  CRLF strip): glam-vs-btMatrix3x3 product-order risk retired — glam ops
+  pinned bit-identical; the sole drift source was the `/fp:fast` reference
+  trig (see §4 outcome). Probe rig:
+  `tools/inverse_dynamics_probe.cpp` + `tools/build_inverse_dynamics_probe.py`
+  (IEEE-precise BID in `target/bullet3-build-id[-double]`) + twin
+  `crates/bullet-inverse-dynamics/examples/id_probe.rs`.
 - **M2** — CRBA mass matrix + jacobians + getters + user wrenches + mass
   setters. Probe extended; seeded random-tree parity.
 - **M3** — Bench + allocation audit + `docs/perf/inverse-dynamics.md`;

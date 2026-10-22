@@ -13,6 +13,10 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(not(feature = "std"))]
+#[macro_use]
+extern crate alloc;
+
 #[cfg(all(not(feature = "std"), not(feature = "libm")))]
 compile_error!(
     "select a scalar math backend: the \"std\" feature (default) or \"libm\" for no_std builds"
@@ -20,4 +24,9 @@ compile_error!(
 
 pub use bullet_math::{Matrix3, Real, Vector3};
 
+pub mod builder;
 pub mod math;
+pub mod tree;
+
+pub use builder::{AddBodyError, BuildError, JointType, TreeBuilder};
+pub use tree::{MultiBodyTree, TreeError};

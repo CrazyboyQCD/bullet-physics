@@ -9,6 +9,13 @@
 
 use bullet_math::{math, Matrix3, Real, Vector3};
 
+/// Upstream `kIsZero`: `5 * epsilon` at the active precision
+/// (`IDMath.cpp:8`).
+pub(crate) const K_IS_ZERO: Real = 5.0 * Real::EPSILON;
+
+/// Upstream `kAxisLengthEpsilon`: `10 * kIsZero` (`IDMath.cpp:11`).
+pub(crate) const K_AXIS_LENGTH_EPSILON: Real = 10.0 * K_IS_ZERO;
+
 /// Rows `[[1,0,0],[0,c,s],[0,-s,c]]` (`IDMath.cpp:150-171`).
 pub fn transform_x(alpha: Real) -> Matrix3 {
     let c = math::cos(alpha);
@@ -89,17 +96,116 @@ pub fn determinant(m: &Matrix3) -> Real {
         - m.y_axis.x * m.x_axis.y * m.z_axis.z
 }
 
+/// `|‖v‖² − 1| < kIsZero` (`IDMath.cpp:496-499`).
+pub(crate) fn is_unit_vector(v: Vector3) -> bool {
+    (v.x * v.x + v.y * v.y + v.z * v.z - 1.0).abs() < K_IS_ZERO
+}
+
+/// Fuzzy positive-semi-definiteness on the leading principal minors with
+/// `kIsZero` slack (`IDMath.cpp:321-339`).
+pub(crate) fn is_positive_semi_definite_fuzzy(m: &Matrix3) -> bool {
+    if m.x_axis.x < -K_IS_ZERO {
+        return false;
+    }
+    if m.x_axis.x * m.y_axis.y - m.y_axis.x * m.x_axis.y < -K_IS_ZERO {
+        return false;
+    }
+    if (m.x_axis.x * (m.y_axis.y * m.z_axis.z - m.y_axis.z * m.z_axis.y)
+        - m.y_axis.x * (m.x_axis.y * m.z_axis.z - m.y_axis.z * m.x_axis.z)
+        + m.z_axis.x * (m.x_axis.y * m.z_axis.y - m.y_axis.y * m.x_axis.z))
+        < -K_IS_ZERO
+    {
+        return false;
+    }
+    true
+}
+
+/// Upstream inertia gates (`IDMath.cpp:347-443`): fuzzy PSD, the triangle
+/// inequality — skipped for bodies joined by a fixed joint, and preserving
+/// the reference implementation's duplicated `I00 + I11 < I22` branch
+/// (`:385-396`; `I00 + I22 < I11` is never checked) — non-negative diagonal,
+/// and symmetry within `kIsZero`.
+pub(crate) fn is_valid_inertia_matrix(i: &Matrix3, has_fixed_joint: bool) -> bool {
+    if !is_positive_semi_definite_fuzzy(i) {
+        return false;
+    }
+    if !has_fixed_joint {
+        if i.x_axis.x + i.y_axis.y < i.z_axis.z {
+            return false;
+        }
+        if i.x_axis.x + i.y_axis.y < i.z_axis.z {
+            return false;
+        }
+        if i.y_axis.y + i.z_axis.z < i.x_axis.x {
+            return false;
+        }
+    }
+    for diag in [i.x_axis.x, i.y_axis.y, i.z_axis.z] {
+        if diag < 0.0 {
+            return false;
+        }
+    }
+    if (i.y_axis.x - i.x_axis.y).abs() > K_IS_ZERO {
+        return false;
+    }
+    if (i.z_axis.x - i.x_axis.z).abs() > K_IS_ZERO {
+        return false;
+    }
+    if (i.z_axis.y - i.y_axis.z).abs() > K_IS_ZERO {
+        return false;
+    }
+    true
+}
+
+/// Rotation-matrix gates (`IDMath.cpp:445-494`): unit-length columns within
+/// `kAxisLengthEpsilon`, pairwise-orthogonal columns, strict positive
+/// determinant.
+pub(crate) fn is_valid_transform_matrix(m: &Matrix3) -> bool {
+    for col in [m.x_axis, m.y_axis, m.z_axis] {
+        let length_minus_1 = (col.x * col.x + col.y * col.y + col.z * col.z - 1.0).abs();
+        if length_minus_1 > K_AXIS_LENGTH_EPSILON {
+            return false;
+        }
+    }
+    if (m.x_axis.x * m.y_axis.x + m.x_axis.y * m.y_axis.y + m.x_axis.z * m.y_axis.z).abs()
+        > K_AXIS_LENGTH_EPSILON
+    {
+        return false;
+    }
+    if (m.x_axis.x * m.z_axis.x + m.x_axis.y * m.z_axis.y + m.x_axis.z * m.z_axis.z).abs()
+        > K_AXIS_LENGTH_EPSILON
+    {
+        return false;
+    }
+    if (m.y_axis.x * m.z_axis.x + m.y_axis.y * m.z_axis.y + m.y_axis.z * m.z_axis.z).abs()
+        > K_AXIS_LENGTH_EPSILON
+    {
+        return false;
+    }
+    determinant(m) > 0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        body_t_parent_from_axis_angle, determinant, tilde_operator, transform_x, transform_y,
-        transform_z,
+        body_t_parent_from_axis_angle, determinant, is_positive_semi_definite_fuzzy,
+        is_unit_vector, is_valid_inertia_matrix, is_valid_transform_matrix, tilde_operator,
+        transform_x, transform_y, transform_z, K_AXIS_LENGTH_EPSILON, K_IS_ZERO,
     };
     use bullet_math::{FRAC_PI_2, Matrix3, Real, Vector3};
 
     fn get(m: &Matrix3, row: usize, col: usize) -> Real {
         let c = m.col(col);
         [c.x, c.y, c.z][row]
+    }
+
+    /// Row-major literal to glam column-major.
+    fn m(rows: [[Real; 3]; 3]) -> Matrix3 {
+        Matrix3::from_cols(
+            Vector3::new(rows[0][0], rows[1][0], rows[2][0]),
+            Vector3::new(rows[0][1], rows[1][1], rows[2][1]),
+            Vector3::new(rows[0][2], rows[1][2], rows[2][2]),
+        )
     }
 
     #[test]
@@ -219,5 +325,97 @@ mod tests {
             Vector3::new(0.0, 0.0, 3.0),
         );
         assert_eq!(determinant(&m), 6.0);
+    }
+
+    #[test]
+    fn tolerance_constants_follow_the_reference_ratios() {
+        assert_eq!(K_IS_ZERO, 5.0 * Real::EPSILON);
+        assert_eq!(K_AXIS_LENGTH_EPSILON, 10.0 * K_IS_ZERO);
+    }
+
+    #[test]
+    fn unit_vector_gate() {
+        assert!(is_unit_vector(Vector3::X));
+        assert!(is_unit_vector(Vector3::new(0.6, 0.8, 0.0)));
+        // Just outside kIsZero (5e) is rejected.
+        assert!(!is_unit_vector(Vector3::new(1.0 + 1e-5, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn psd_fuzzy_gate() {
+        // Diagonal non-negative: PSD.
+        assert!(is_positive_semi_definite_fuzzy(&m([
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 3.0],
+        ])));
+        // First minor negative beyond slack: rejected.
+        assert!(!is_positive_semi_definite_fuzzy(&m([
+            [-1e-4, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 3.0],
+        ])));
+        // Zero matrix: PSD within slack.
+        assert!(is_positive_semi_definite_fuzzy(&m([
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ])));
+    }
+
+    #[test]
+    fn inertia_gate_preserves_the_duplicated_triangle_branch() {
+        // Triangle inequality violated through I(0,0)+I(1,1) < I(2,2):
+        // rejected.
+        assert!(!is_valid_inertia_matrix(
+            &m([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 3.0]]),
+            false
+        ));
+        // I(0,0)+I(2,2) < I(1,1) is never checked upstream (the duplicated
+        // branch occupies that slot) — accepted.
+        assert!(is_valid_inertia_matrix(
+            &m([[1.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 1.0]]),
+            false
+        ));
+        // Same shape passes for a fixed-joint body (checks skipped).
+        assert!(is_valid_inertia_matrix(
+            &m([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 3.0]]),
+            true
+        ));
+        // Asymmetric entry beyond kIsZero: rejected.
+        assert!(!is_valid_inertia_matrix(
+            &m([[2.0, 0.0, 0.0], [1e-3, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+            false
+        ));
+        // Negative diagonal: rejected.
+        assert!(!is_valid_inertia_matrix(
+            &m([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+            false
+        ));
+    }
+
+    #[test]
+    fn transform_gate() {
+        // A proper rotation from the axis-angle builder passes.
+        let r = body_t_parent_from_axis_angle(Vector3::new(1.0, 2.0, -0.5).normalize(), 0.9);
+        assert!(is_valid_transform_matrix(&r));
+        // Scaled column (non-unit): rejected.
+        assert!(!is_valid_transform_matrix(&m([
+            [2.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ])));
+        // Reflection (det < 0): rejected.
+        assert!(!is_valid_transform_matrix(&m([
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ])));
+        // Degenerate (non-orthogonal, zero) columns: rejected.
+        assert!(!is_valid_transform_matrix(&m([
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+        ])));
     }
 }
