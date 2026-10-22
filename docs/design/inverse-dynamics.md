@@ -398,11 +398,21 @@ no_std ×2) + one atomic Conventional Commit.
   ("Inverse-dynamics probes"; parity is the floor, not the goal). Rig-fixed
   port deviations: btVector3 reciprocal division (3 sites), CRBA child-first
   centroid associativity, `btPow(x, 2)` axis normalization.
-- **M3** — Bench + allocation audit + `docs/perf/inverse-dynamics.md`;
+- **M3** ✅ (2026-10-22) — Bench + allocation audit + `docs/perf/inverse-dynamics.md`;
   deviation rows in `docs/bullet-deviations.md`; api-priorities row → Done.
-  Candidate from the M2 access-pattern sweep (not applied blind): flatten the
-  per-body jacobian storage `Vec<Vec<Real>>` into one `Vec<Real>` with
-  `as_chunks` windows — bench-arbitrated.
+  The probe pair gained a `--bench` mode (identical protocol both sides:
+  `chain_16/64/256` + `random_64` scenes drawn with the shared CrtRand↔srand
+  protocol × {kin, id, mass, jac}; five interleaved auto-calibrated rounds;
+  per-call allocation counts; finalized-tree live bytes). The zero-alloc
+  contract is gate-enforced by the `id_alloc` facade demo (check.py).
+  Results: every scene × algorithm × precision faster than the upstream
+  library (f32 0.20–0.47x, f64 0.25–0.79x — the f64 ratios are the honest
+  headline, the f32 reference rig is slower than its own f64 build);
+  footprint ~1.1x at scale; upstream is also allocation-free per call.
+  Flattening candidate A/B'd and closed: the `Vec<Vec<Real>>` → flat
+  `Vec<Real>` rewrite measured inside the cross-build noise band (±5–9 pp),
+  so the per-body windows stay (they mirror upstream's `std::vector<mat3x>`
+  structure).
 - **M4** — Crate README + AGENTS.md project-map line + CHANGELOG Unreleased
   + crates.io name check; publish ruling with the next release train.
 
