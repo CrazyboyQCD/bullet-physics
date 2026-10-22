@@ -6,7 +6,9 @@ collision detection, constraints, multibody dynamics and soft bodies, built on
 `glam` with SIMD. No C/C++ toolchain, no FFI.
 
 This is the facade crate: it re-exports `bullet-math`, `bullet-collision` and
-`bullet-dynamics`, plus a `prelude` for the common imports.
+`bullet-dynamics`, plus a `prelude` for the common imports — and, behind the
+optional `inverse-dynamics` feature, `bullet-inverse-dynamics` as
+`bullet_physics::inverse_dynamics`.
 
 ```rust
 use bullet_physics::dynamics::{PhysicsWorld, RigidBody};
@@ -36,6 +38,9 @@ for _ in 0..300 {
 
 - `f32` (default) or `f64` — matching Bullet's `BT_USE_DOUBLE_PRECISION` build.
 - `std` (default) or `libm` for `no_std` targets.
+- `inverse-dynamics` (optional, off by default) — adds
+  `bullet_physics::inverse_dynamics`, the tree-structured multibody
+  inverse-dynamics crate.
 
 ## Evidence
 

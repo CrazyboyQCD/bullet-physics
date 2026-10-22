@@ -18,6 +18,7 @@ library boundaries:
 | `bullet-collision`| Shapes, broad phase, narrow phase, contact manifolds               | `BulletCollision` |
 | `bullet-dynamics` | Rigid bodies, simulation world, constraint solvers                 | `BulletDynamics`  |
 | `bullet-physics`  | Facade crate re-exporting the full API                             | —                 |
+| `bullet-inverse-dynamics` | Tree-structured multibody inverse dynamics (optional feature) | `BulletInverseDynamics` |
 
 See [docs/design/architecture.md](docs/design/architecture.md) for the detailed design.
 
@@ -65,50 +66,17 @@ cargo test --features f64
 cargo run -p bullet-physics --example falling_box
 ```
 
-## Usage
+## Examples
 
-```rust
-use bullet_physics::dynamics::{PhysicsWorld, RigidBody};
-use bullet_physics::math::Vector3;
-use bullet_physics::shapes::CollisionShape;
+Worked snippets for every subsystem — rigid bodies, kinematic platforms,
+joints, Featherstone multibodies, soft bodies, raycast vehicles, the
+character controller, heightfields and inverse dynamics — live in
+[docs/examples.md](docs/examples.md). Runnable demos are under
+`crates/bullet-physics/examples/`:
 
-let mut world = PhysicsWorld::new();
-world.set_gravity(Vector3::new(0.0, -9.81, 0.0));
-
-// Static ground plane (a wide, thin box).
-world.add_body(RigidBody::new_static(
-    CollisionShape::box_shape(Vector3::new(25.0, 0.5, 25.0)),
-    Vector3::new(0.0, -0.5, 0.0),
-));
-
-// A 1x1x1 dynamic cube dropped from 5 m.
-world.add_body(
-    RigidBody::new_dynamic(
-        CollisionShape::box_shape(Vector3::splat(0.5)),
-        Vector3::new(0.0, 5.0, 0.0),
-        1.0,
-    )
-    .friction(0.6)
-    .restitution(0.0),
-);
-
-for _ in 0..300 {
-    world.step_simulation(1.0 / 60.0);
-}
-```
-
-### Kinematic bodies (moving platforms)
-
-```rust
-use bullet_physics::dynamics::RigidBody;
-
-// Infinite mass, pose driven by the velocities you set; gravity, damping
-// and forces never touch it, and it pushes dynamic bodies through contacts.
-let platform = world.add_body(RigidBody::new_kinematic(
-    CollisionShape::box_shape(Vector3::new(2.0, 0.25, 2.0)),
-    Vector3::new(0.0, 1.0, 0.0),
-));
-world.body_mut(platform).linear_velocity = Vector3::new(1.5, 0.0, 0.0);
+```bash
+cargo run -p bullet-physics --example falling_box
+cargo run -p bullet-physics --example joints
 ```
 
 ## Correctness and performance evidence
