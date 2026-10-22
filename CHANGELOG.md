@@ -5,6 +5,12 @@ The crates share a single version line, in the spirit of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Full development
 history lives in `docs/`.
 
+## [Unreleased]
+
+### Added
+
+- inverse-dynamics: `--bench` mode on both parity probes (speed + per-call allocation counts over chain/random scenes) and the gate-enforced `id_alloc` zero-alloc demo; results ledgered in `docs/perf/inverse-dynamics.md`.
+
 ## [0.2.0] - 2026-10-22
 
 ### Added

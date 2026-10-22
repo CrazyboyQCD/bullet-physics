@@ -413,8 +413,12 @@ no_std ×2) + one atomic Conventional Commit.
   `Vec<Real>` rewrite measured inside the cross-build noise band (±5–9 pp),
   so the per-body windows stay (they mirror upstream's `std::vector<mat3x>`
   structure).
-- **M4** — Crate README + AGENTS.md project-map line + CHANGELOG Unreleased
-  + crates.io name check; publish ruling with the next release train.
+- **M4** ✅ (2026-10-22) — Crate README (leaf shape with a usage snippet,
+  mirroring `bullet-math`) + AGENTS.md project-map line (five crates) +
+  CHANGELOG Unreleased opened with the M3 rig entries + crates.io name check
+  (the crate shipped in the 0.2.0 train, so the name is ours; verified via
+  the registry API). Publish rides the release train — 0.2.0 already carried
+  the crate.
 
 ## 11. Decisions needing maintainer ruling (block M0)
 

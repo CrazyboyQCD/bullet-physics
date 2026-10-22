@@ -6,12 +6,13 @@ Environment setup lives in [docs/agent-setup.md](docs/agent-setup.md).
 ## Project map
 
 Pure Rust + glam reimplementation of the Bullet Physics core (zlib, like
-upstream). Four crates, strict one-way dependencies:
+upstream). Five crates, strict one-way dependencies:
 
 - `crates/bullet-math` — LinearMath: `Real`/vector/quat aliases (f32/f64), AABB, inertia, quickhull.
 - `crates/bullet-collision` — shapes, broadphase, narrowphase (GJK/EPA), manifolds, raycast/sweep.
 - `crates/bullet-dynamics` — bodies, world, solver, multibody, softbody, vehicle, character.
 - `crates/bullet-physics` — facade: re-exports, prelude, examples.
+- `crates/bullet-inverse-dynamics` — `BulletInverseDynamics` (MultiBodyTree); depends only on `bullet-math`, re-exported by the facade behind the off-by-default `inverse-dynamics` feature.
 
 `tools/` is the verification rig: parity/perf harnesses, scene generators,
 C++ recorders, probes, and `check.py` (the one-command gate).
