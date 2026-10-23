@@ -9,6 +9,7 @@ history lives in `docs/`.
 
 ### Added
 
+- Hinge-2 and universal joints: `world.add_hinge2` / `world.add_universal` (Bullet's `btHinge2Constraint` / `btUniversalConstraint` as configurations of the spring-2 / classic 6DOF rows), with `hinge2_mut()` / `universal_mut()` tuning access and debug-draw support. Probed frame-level against the C++ library (suspension, steering, locked-axis spin).
 - inverse-dynamics: `--bench` mode on both parity probes (speed + per-call allocation counts over chain/random scenes) and the gate-enforced `id_alloc` zero-alloc demo; results ledgered in `docs/perf/inverse-dynamics.md`.
 
 ## [0.2.0] - 2026-10-22
