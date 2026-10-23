@@ -93,6 +93,17 @@ pub enum ConstraintKind {
     /// `btGeneric6DofSpring2Constraint`, the 2014 rewrite). The joint type
     /// PMX/MMD-style model physics is built on.
     Generic6DofSpring2(Generic6DofSpring2Constraint),
+    /// Hinge-2 (wheel) joint: a spring-2 configuration with steering about
+    /// `axis1`, free spin about `axis2` and the suspension spring along
+    /// `axis1` (Bullet's `btHinge2Constraint`, a
+    /// `btGeneric6DofSpring2Constraint` subclass upstream — the rows are
+    /// the spring-2 rows). Built by [`PhysicsWorld::add_hinge2`].
+    Hinge2(Generic6DofSpring2Constraint),
+    /// Universal (shaft) joint: two perpendicular bend axes with all other
+    /// degrees of freedom locked (Bullet's `btUniversalConstraint`, a
+    /// `btGeneric6DofConstraint` subclass upstream — the rows are the
+    /// classic 6DOF rows). Built by [`PhysicsWorld::add_universal`].
+    Universal(Generic6DofConstraint),
 }
 
 impl ConstraintKind {
@@ -106,6 +117,8 @@ impl ConstraintKind {
             ConstraintKind::Slider(_) => "slider",
             ConstraintKind::Generic6Dof(_) => "generic 6DOF",
             ConstraintKind::Generic6DofSpring2(_) => "generic 6DOF spring 2",
+            ConstraintKind::Hinge2(_) => "hinge 2",
+            ConstraintKind::Universal(_) => "universal",
         }
     }
 
@@ -256,6 +269,42 @@ impl ConstraintKind {
                 "not a generic 6DOF spring 2 constraint (found {})",
                 other.kind_name()
             ),
+        }
+    }
+
+    /// Access to the [`Hinge2`][ConstraintKind::Hinge2] joint's spring-2
+    /// parameters (panics on any other kind).
+    pub fn hinge2(&self) -> &Generic6DofSpring2Constraint {
+        match self {
+            ConstraintKind::Hinge2(dof) => dof,
+            other => panic!("not a hinge-2 constraint (found {})", other.kind_name()),
+        }
+    }
+
+    /// Mutable access to the [`Hinge2`][ConstraintKind::Hinge2] joint's
+    /// spring-2 parameters (panics on any other kind).
+    pub fn hinge2_mut(&mut self) -> &mut Generic6DofSpring2Constraint {
+        match self {
+            ConstraintKind::Hinge2(dof) => dof,
+            other => panic!("not a hinge-2 constraint (found {})", other.kind_name()),
+        }
+    }
+
+    /// Access to the [`Universal`][ConstraintKind::Universal] joint's 6DOF
+    /// parameters (panics on any other kind).
+    pub fn universal(&self) -> &Generic6DofConstraint {
+        match self {
+            ConstraintKind::Universal(dof) => dof,
+            other => panic!("not a universal constraint (found {})", other.kind_name()),
+        }
+    }
+
+    /// Mutable access to the [`Universal`][ConstraintKind::Universal]
+    /// joint's 6DOF parameters (panics on any other kind).
+    pub fn universal_mut(&mut self) -> &mut Generic6DofConstraint {
+        match self {
+            ConstraintKind::Universal(dof) => dof,
+            other => panic!("not a universal constraint (found {})", other.kind_name()),
         }
     }
 }
@@ -455,6 +504,18 @@ impl Constraint {
         &self.kind
     }
 
+    /// Crate-internal assembly for the world-level factories whose joints
+    /// need body poses at construction (hinge-2 / universal).
+    pub(crate) fn from_kind(kind: ConstraintKind, body_a: BodyHandle, body_b: BodyHandle) -> Self {
+        Self {
+            kind,
+            body_a,
+            body_b,
+            enabled: true,
+            disable_collisions: true,
+        }
+    }
+
     pub fn kind_mut(&mut self) -> &mut ConstraintKind {
         &mut self.kind
     }
@@ -503,6 +564,18 @@ impl Constraint {
     /// (limits, motors, springs, servos).
     pub fn generic_6dof_spring2_mut(&mut self) -> &mut Generic6DofSpring2Constraint {
         self.kind_mut().generic_6dof_spring2_mut()
+    }
+
+    /// Mutable access to the [`Hinge2`][ConstraintKind::Hinge2] joint's
+    /// spring-2 parameters (suspension spring, steering limits, motors).
+    pub fn hinge2_mut(&mut self) -> &mut Generic6DofSpring2Constraint {
+        self.kind_mut().hinge2_mut()
+    }
+
+    /// Mutable access to the [`Universal`][ConstraintKind::Universal]
+    /// joint's 6DOF parameters (limits, motors).
+    pub fn universal_mut(&mut self) -> &mut Generic6DofConstraint {
+        self.kind_mut().universal_mut()
     }
 
     pub fn enabled(&self) -> bool {
@@ -704,6 +777,12 @@ pub fn prepare_rows(
         }
         ConstraintKind::Generic6DofSpring2(dof) => {
             dof.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, global_cfm, out);
+        }
+        ConstraintKind::Hinge2(dof) => {
+            dof.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, global_cfm, out);
+        }
+        ConstraintKind::Universal(dof) => {
+            dof.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, out);
         }
     }
 }

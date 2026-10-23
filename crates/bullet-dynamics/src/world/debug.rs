@@ -74,6 +74,8 @@ pub enum ConstraintTag {
     Slider,
     Generic6Dof,
     Generic6DofSpring2,
+    Hinge2,
+    Universal,
 }
 
 /// One debug primitive: a *physical fact* read from the world's
@@ -245,6 +247,12 @@ impl PhysicsWorld {
                         g.frame_a.origin,
                         g.frame_b.origin,
                     ),
+                    ConstraintKind::Hinge2(g) => {
+                        (ConstraintTag::Hinge2, g.frame_a.origin, g.frame_b.origin)
+                    }
+                    ConstraintKind::Universal(g) => {
+                        (ConstraintTag::Universal, g.frame_a.origin, g.frame_b.origin)
+                    }
                 };
                 let (a, b) = (constraint.body_a(), constraint.body_b());
                 let body_a = &self.bodies[a.index()];

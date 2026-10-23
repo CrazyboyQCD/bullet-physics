@@ -312,6 +312,71 @@ impl Generic6DofSpring2Constraint {
         }
     }
 
+    /// A Hinge-2 joint (Bullet's `btHinge2Constraint`, the ODE-style wheel
+    /// joint): steering about `axis1`, free wheel spin about `axis2`, and
+    /// the pivot translating along `axis1` against a suspension spring
+    /// (stiffness `4π²`, damping `0.01` — upstream's constructor values).
+    /// The anchor and both axes are world coordinates at construction;
+    /// `axis1` must be orthogonal to `axis2` — upstream normalizes both but
+    /// never orthogonalizes (the `y = z × x` third basis is unit only for
+    /// orthogonal inputs), preserved verbatim. Linear X/Y lock, Z carries
+    /// the spring over `[-1, 1]`; angular X is free, Y locked and Z limited
+    /// to ±π/4 ("like front wheels of a car"). The spring equilibrium is
+    /// the construction pose — upstream's no-argument
+    /// `setEquilibriumPoint`, so a spawned suspension carries zero spring
+    /// force (raw pivot diff and raw Euler angles, before any limit
+    /// adjustment, exactly like `calculateTransforms` at the same pose).
+    pub fn hinge2(
+        pos_a: Vector3,
+        quat_a: Quaternion,
+        pos_b: Vector3,
+        quat_b: Quaternion,
+        anchor: Vector3,
+        axis1: Vector3,
+        axis2: Vector3,
+    ) -> Self {
+        // Build the constraint frame in world coordinates first (upstream's
+        // basis construction): axis1 is the frame Z, axis2 the frame X and
+        // `y = z × x` completes the system.
+        let z_axis = axis1.normalize();
+        let x_axis = axis2.normalize();
+        let y_axis = z_axis.cross(x_axis); // we want right coordinate system
+        let basis = Matrix3::from_cols(x_axis, y_axis, z_axis);
+        // Now the constraint frame in each local coordinate system
+        // (`comTransform.inverse() * frameInW`).
+        let rot_a = Matrix3::from_quat(quat_a);
+        let rot_b = Matrix3::from_quat(quat_b);
+        let frame_a = JointFrame::new(rot_a.transpose() * (anchor - pos_a), rot_a.transpose() * basis);
+        let frame_b = JointFrame::new(rot_b.transpose() * (anchor - pos_b), rot_b.transpose() * basis);
+
+        let mut c = Self::new(frame_a, frame_b, RotateOrder::Xyz);
+        c.set_linear_limits(Vector3::new(0.0, 0.0, -1.0), Vector3::new(0.0, 0.0, 1.0));
+        // X free (lo > hi), Y locked (lo == hi), Z limited: the steering.
+        c.set_angular_limits(
+            Vector3::new(1.0, 0.0, -bullet_math::FRAC_PI_2 * 0.5),
+            Vector3::new(-1.0, 0.0, bullet_math::FRAC_PI_2 * 0.5),
+        );
+        // Enable suspension (`setStiffness`/`setDamping` default
+        // `limitIfNeeded = true` upstream).
+        c.enable_spring(2, true);
+        c.set_stiffness(2, bullet_math::PI * bullet_math::PI * 4.0, true);
+        c.set_damping(2, 0.01, true);
+        // `setEquilibriumPoint()` at the construction pose.
+        let tr_a = Matrix3::from_quat(quat_a) * c.frame_a.basis;
+        let tr_b = Matrix3::from_quat(quat_b) * c.frame_b.basis;
+        let pivot_a = pos_a + quat_a * c.frame_a.origin;
+        let pivot_b = pos_b + quat_b * c.frame_b.origin;
+        let diff = tr_a.transpose() * (pivot_b - pivot_a);
+        let (euler, _) = calculate_angle_info(&tr_a, &tr_b, RotateOrder::Xyz);
+        for i in 0..3 {
+            c.set_equilibrium_point(i, diff[i]);
+        }
+        for i in 0..3 {
+            c.set_equilibrium_point(i + 3, euler[i]);
+        }
+        c
+    }
+
     // -- limits ----------------------------------------------------------
 
     /// Set the linear lower/upper limits along the frame axes (Bullet's
@@ -1870,5 +1935,178 @@ mod tests {
         assert!(c.has_static_body);
         assert!((c.fact_a - 1.0).abs() < 1e-6, "fact_a = {}", c.fact_a);
         assert!((c.fact_b - 0.0).abs() < 1e-6, "fact_b = {}", c.fact_b);
+    }
+
+    // -- hinge 2 ------------------------------------------------------------
+
+    /// The ODE wheel-joint configuration at hand-computed values: the basis
+    /// columns are (axis2, z×x, axis1), both frames sit at the anchor for
+    /// identity poses, the limit tables are upstream's constructor values
+    /// (linear X/Y locked, Z free over [-1, 1]; angular X free, Y locked,
+    /// Z ±π/4 steering) and the suspension spring rides linear axis 2 with
+    /// the constructor stiffness/damping.
+    #[test]
+    fn hinge2_config_hand_computed() {
+        let c = Generic6DofSpring2Constraint::hinge2(
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::Z,
+            Vector3::X,
+        );
+        assert!((c.frame_a.origin.x - 1.0).abs() < 1e-6);
+        assert!((c.frame_a.origin.y - 2.0).abs() < 1e-6);
+        assert!((c.frame_a.origin.z - 3.0).abs() < 1e-6);
+        assert_eq!(c.frame_a, c.frame_b);
+        let cols = c.frame_a.basis.to_cols_array_2d();
+        for r in 0..3 {
+            assert_eq!(cols[0][r], [1.0, 0.0, 0.0][r]);
+            assert_eq!(cols[1][r], [0.0, 1.0, 0.0][r]);
+            assert_eq!(cols[2][r], [0.0, 0.0, 1.0][r]);
+        }
+        // Linear: X/Y locked, Z carries the suspension over [-1, 1].
+        for i in 0..2 {
+            assert_eq!(c.linear.lower_limit[i], 0.0);
+            assert_eq!(c.linear.upper_limit[i], 0.0);
+        }
+        assert_eq!(c.linear.lower_limit[2], -1.0);
+        assert_eq!(c.linear.upper_limit[2], 1.0);
+        // Angular: X free (lo > hi), Y locked, Z limited — the steering.
+        let steer = FRAC_PI_2 * 0.5;
+        assert_eq!(c.angular[0].lower_limit, 1.0);
+        assert_eq!(c.angular[0].upper_limit, -1.0);
+        assert_eq!(c.angular[1].lower_limit, 0.0);
+        assert_eq!(c.angular[1].upper_limit, 0.0);
+        assert!((c.angular[2].lower_limit + steer).abs() < 1e-6);
+        assert!((c.angular[2].upper_limit - steer).abs() < 1e-6);
+        // Suspension: spring on linear axis 2, upstream constructor
+        // constants (`setStiffness`/`setDamping` with the default
+        // `limitIfNeeded = true`).
+        assert!(c.linear.enable_spring[2]);
+        assert!((c.linear.spring_stiffness[2] - PI * PI * 4.0).abs() < 1e-5);
+        assert!((c.linear.spring_damping[2] - 0.01).abs() < 1e-9);
+    }
+
+    /// The equilibrium is the construction pose (upstream's no-argument
+    /// `setEquilibriumPoint`): the raw pivot diff and the raw Euler angles
+    /// at the spawn transforms. Since both frames derive from the *same*
+    /// world anchor at the same poses, the calculated transforms collapse
+    /// back onto the world frame (`R_a · frame_a = frameInW`) — the
+    /// relative rotation is the identity and the call writes (f32
+    /// round-trip) zeros, i.e. upstream's call is a construction-pose
+    /// no-op kept verbatim: the suspension rests at the anchor and the
+    /// wheel rests at the spawn steering angle.
+    #[test]
+    fn hinge2_equilibrium_is_the_construction_pose() {
+        // Body A yawed 90° about Z; body B spawned pre-steered +0.5 rad.
+        let quat_a = Quaternion::from_rotation_z(FRAC_PI_2);
+        let quat_b = Quaternion::from_rotation_z(0.5);
+        let c = Generic6DofSpring2Constraint::hinge2(
+            Vector3::ZERO,
+            quat_a,
+            Vector3::new(1.0, 0.0, 0.5),
+            quat_b,
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::Z,
+            Vector3::X,
+        );
+        for i in 0..3 {
+            assert!(c.linear.equilibrium_point[i].abs() < 1e-5);
+            assert!(c.angular[i].equilibrium_point.abs() < 1e-5);
+        }
+    }
+
+    /// The suspension holds a hanging wheel under gravity: the equilibrium
+    /// sits at the anchor (zero offset), so the wheel spawned 0.3 below it
+    /// is pulled up against the 9.8 N weight and oscillates into the
+    /// mg/k ≈ 0.25 static sag around the anchor — inside the [-1, 1]
+    /// window, far above free fall.
+    #[test]
+    fn hinge2_suspension_holds_the_wheel() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::new(0.0, 0.0, -9.8));
+        let chassis = world.add_body(RigidBody::new_static(
+            CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        ));
+        let wheel = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::sphere(0.2),
+            Vector3::new(0.0, 0.0, -0.3),
+            1.0,
+        ));
+        world.add_hinge2(chassis, wheel, Vector3::ZERO, Vector3::Z, Vector3::X);
+        for _ in 0..240 {
+            world.step_simulation(DT);
+        }
+        let body = world.body(wheel);
+        // Spring-held: oscillating around the mg/k sag point near the
+        // anchor (weak spring, light damping), well inside the window and
+        // far above free fall.
+        assert!(
+            body.position.z > -0.45 && body.position.z < -0.10,
+            "wheel z = {}",
+            body.position.z
+        );
+        assert!(body.linear_velocity.z.abs() < 1.0, "v = {}", body.linear_velocity.z);
+    }
+
+    /// The axle spin is free while the wheel's center of mass sits on the
+    /// axle (the joint's free angular axis passes through the anchor): no
+    /// suspension stretch develops, so nothing couples into the spin.
+    /// (Off-anchor spins — a hub hanging below the strut — are coupled to
+    /// the locked linear rows by construction, upstream-faithful.)
+    #[test]
+    fn hinge2_axle_spin_is_free() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let chassis = world.add_body(RigidBody::new_static(
+            CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        ));
+        let wheel = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::sphere(0.2),
+            Vector3::ZERO,
+            1.0,
+        ));
+        world.add_hinge2(chassis, wheel, Vector3::ZERO, Vector3::Z, Vector3::X);
+        world.body_mut(wheel).angular_velocity = Vector3::new(8.0, 0.0, 0.0);
+        for _ in 0..60 {
+            world.step_simulation(DT);
+        }
+        let body = world.body(wheel);
+        assert!(body.angular_velocity.x > 7.5, "ω_x = {}", body.angular_velocity.x);
+        assert!(body.position.z.abs() < 1e-4, "wheel z = {}", body.position.z);
+    }
+
+    /// The steering limit: a spin about the steering axis clamps at the
+    /// ±π/4 elastic wall (spring-2 limit state 4) and reflects — the angle
+    /// never winds up past the wall.
+    #[test]
+    fn hinge2_steering_limit_clamps() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let chassis = world.add_body(RigidBody::new_static(
+            CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+        ));
+        let wheel = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::sphere(0.15),
+            Vector3::new(0.9, 0.0, 0.0),
+            1.0,
+        ));
+        world.add_hinge2(chassis, wheel, Vector3::ZERO, Vector3::Z, Vector3::X);
+        world.body_mut(wheel).angular_velocity = Vector3::new(0.0, 0.0, 6.0);
+        let limit = FRAC_PI_2 * 0.5;
+        for _ in 0..120 {
+            world.step_simulation(DT);
+            let c = world.constraint(0).kind().hinge2();
+            assert!(
+                c.get_angle(2).abs() < limit + 0.15,
+                "steering angle {} past the ±π/4 wall",
+                c.get_angle(2)
+            );
+        }
     }
 }

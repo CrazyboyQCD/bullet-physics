@@ -144,6 +144,53 @@ impl Generic6DofConstraint {
         }
     }
 
+    /// A universal joint (Bullet's `btUniversalConstraint`, the ODE
+    /// universal/shaft joint): the pivots stay coincident (all three linear
+    /// axes locked) and the relative rotation is free about `axis1` (frame
+    /// Z, ±π−0.01) and `axis2` (frame Y, ±π/2−0.01) while the third axis is
+    /// locked — the two shafts bend only around the two joint axes, which
+    /// stay perpendicular. The anchor and both axes are world coordinates
+    /// at construction; `axis1` must be orthogonal to `axis2` — upstream
+    /// normalizes both but never orthogonalizes (the `x = y × z` third
+    /// basis is unit only for orthogonal inputs), preserved verbatim.
+    /// Upstream's `setAxis` runtime re-derivation is not ported (the
+    /// constraint stores body handles, not references — a recorded
+    /// deviation); rebuild the joint instead.
+    pub fn universal(
+        pos_a: Vector3,
+        quat_a: Quaternion,
+        pos_b: Vector3,
+        quat_b: Quaternion,
+        anchor: Vector3,
+        axis1: Vector3,
+        axis2: Vector3,
+    ) -> Self {
+        // Build the constraint frame in world coordinates first (upstream's
+        // basis construction — note the cross order differs from the
+        // Hinge-2: here `x = y × z`).
+        let z_axis = axis1.normalize();
+        let y_axis = axis2.normalize();
+        let x_axis = y_axis.cross(z_axis); // we want right coordinate system
+        let basis = Matrix3::from_cols(x_axis, y_axis, z_axis);
+        // Now the constraint frame in each local coordinate system
+        // (`comTransform.inverse() * frameInW`).
+        let rot_a = Matrix3::from_quat(quat_a);
+        let rot_b = Matrix3::from_quat(quat_b);
+        let frame_a = JointFrame::new(rot_a.transpose() * (anchor - pos_a), rot_a.transpose() * basis);
+        let frame_b = JointFrame::new(rot_b.transpose() * (anchor - pos_b), rot_b.transpose() * basis);
+
+        let mut c = Self::new(frame_a, frame_b);
+        // Linear locked on all three axes; angular X locked, Y free over
+        // ±(π/2 − UNIV_EPS), Z free over ±(π − UNIV_EPS) — the
+        // `UNIV_EPS = 0.01` pole guard is upstream's.
+        c.set_linear_limits(Vector3::ZERO, Vector3::ZERO);
+        c.set_angular_limits(
+            Vector3::new(0.0, -bullet_math::FRAC_PI_2 + 0.01, -bullet_math::PI + 0.01),
+            Vector3::new(0.0, bullet_math::FRAC_PI_2 - 0.01, bullet_math::PI - 0.01),
+        );
+        c
+    }
+
     /// Set the linear lower/upper limits along the frame axes (Bullet's
     /// `setLinearLowerLimit`/`setLinearUpperLimit`).
     pub fn set_linear_limits(&mut self, lower: Vector3, upper: Vector3) {
@@ -494,6 +541,137 @@ impl Generic6DofConstraint {
                 limits,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::PhysicsWorld;
+    use bullet_collision::shapes::CollisionShape;
+    use bullet_math::{PI, FRAC_PI_2};
+
+    const DT: Real = 1.0 / 60.0;
+
+    /// The frame basis: z = axis1, y = axis2, `x = y × z` — the cross order
+    /// differs from the Hinge-2 (there `y = z × x`), pinned here because
+    /// the two constructors read like the same recipe.
+    #[test]
+    fn universal_frame_cross_order() {
+        let c = Generic6DofConstraint::universal(
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::Z,
+            Vector3::X,
+        );
+        // y = X, z = Z, x = X × Z = -Y.
+        let cols = c.frame_a.basis.to_cols_array_2d();
+        for r in 0..3 {
+            assert_eq!(cols[0][r], [0.0, -1.0, 0.0][r]);
+            assert_eq!(cols[1][r], [1.0, 0.0, 0.0][r]);
+            assert_eq!(cols[2][r], [0.0, 0.0, 1.0][r]);
+        }
+        assert!((c.frame_a.origin.x - 1.0).abs() < 1e-6);
+        assert!((c.frame_a.origin.y - 2.0).abs() < 1e-6);
+        assert!((c.frame_a.origin.z - 3.0).abs() < 1e-6);
+    }
+
+    /// The constructor limit table: all three linear axes locked, angular X
+    /// locked, Y free over ±(π/2 − UNIV_EPS) and Z free over ±(π −
+    /// UNIV_EPS) — the 0.01 pole guard is upstream's `UNIV_EPS`.
+    #[test]
+    fn universal_limit_table() {
+        let c = Generic6DofConstraint::universal(
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            Vector3::ZERO,
+            Vector3::Z,
+            Vector3::X,
+        );
+        for i in 0..3 {
+            assert_eq!(c.linear.lower_limit[i], 0.0);
+            assert_eq!(c.linear.upper_limit[i], 0.0);
+        }
+        assert_eq!(c.angular[0].lower_limit, 0.0);
+        assert_eq!(c.angular[0].upper_limit, 0.0);
+        assert!((c.angular[1].lower_limit - (-(FRAC_PI_2) + 0.01)).abs() < 1e-6);
+        assert!((c.angular[1].upper_limit - (FRAC_PI_2 - 0.01)).abs() < 1e-6);
+        assert!((c.angular[2].lower_limit - (-(PI) + 0.01)).abs() < 1e-6);
+        assert!((c.angular[2].upper_limit - (PI - 0.01)).abs() < 1e-6);
+    }
+
+    /// A shaft bends only around the two joint axes: an initial spin about
+    /// the free Z persists (no friction), while a spin about the locked
+    /// third axis is killed by the bilateral rows within a step. Also
+    /// pins the world factory: the kind, the tuning accessor and the
+    /// jointed-pair collision suppression all ride `add_universal`.
+    #[test]
+    fn universal_bends_only_about_the_joint_axes() {
+        // Free axis: the spin about Z persists.
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let a = world.add_body(RigidBody::new_static(
+            CollisionShape::sphere(0.3),
+            Vector3::ZERO,
+        ));
+        let b = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::sphere(0.3),
+            Vector3::new(1.0, 0.0, 0.0),
+            1.0,
+        ));
+        {
+            let joint = world.add_universal(a, b, Vector3::new(1.0, 0.0, 0.0),
+                Vector3::Z, Vector3::X);
+            assert!(matches!(joint.kind(), ConstraintKind::Universal(_)));
+            // The tuning path: raise the free axis's motor force ceiling
+            // (inert here without a motor, but the accessor must resolve).
+            joint.universal_mut().angular[2].max_motor_force = 12.0;
+        }
+        assert_eq!(
+            world.constraint(0).kind().universal().angular[2].max_motor_force,
+            12.0
+        );
+        world.body_mut(b).angular_velocity = Vector3::new(0.0, 0.0, 5.0);
+        for _ in 0..60 {
+            world.step_simulation(DT);
+        }
+        assert!(
+            world.body(b).angular_velocity.z > 4.0,
+            "free-axis spin decayed: {}",
+            world.body(b).angular_velocity.z
+        );
+        // Locked axis: a spin about the locked third direction (world Y =
+        // the basis −x) is removed by the rows.
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let a = world.add_body(RigidBody::new_static(
+            CollisionShape::sphere(0.3),
+            Vector3::ZERO,
+        ));
+        let b = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::sphere(0.3),
+            Vector3::new(1.0, 0.0, 0.0),
+            1.0,
+        ));
+        world.add_universal(a, b, Vector3::new(1.0, 0.0, 0.0), Vector3::Z, Vector3::X);
+        world.body_mut(b).angular_velocity = Vector3::new(0.0, 5.0, 0.0);
+        // The classic rotational limit has no locked state: lo == hi makes
+        // every angle violate one side of the softness window, so the row
+        // corrects with the ERP bias alone — a geometric decay (×(1 − erp)
+        // per step here), not a hard kill.
+        for _ in 0..60 {
+            world.step_simulation(DT);
+        }
+        assert!(
+            world.body(b).angular_velocity.y.abs() < 0.05,
+            "locked-axis spin survived: {}",
+            world.body(b).angular_velocity.y
+        );
     }
 }
 

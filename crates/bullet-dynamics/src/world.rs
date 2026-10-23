@@ -12,7 +12,9 @@ use bullet_collision::narrowphase::{self, epa::EpaScratch, SweepHit};
 use bullet_collision::raycast::{self, RayHit};
 use bullet_collision::shapes::CompoundChild;
 use crate::body::{CollisionFlags, RayFilter, RigidBody};
-use crate::constraint::{self, Constraint};
+use crate::constraint::{
+    self, Constraint, ConstraintKind, Generic6DofConstraint, Generic6DofSpring2Constraint,
+};
 use crate::handles::{BodyHandle, MultiBodyHandle, SoftBodyHandle};
 use crate::island::IslandScratch;
 use crate::multibody::body::{MultiBody, MultiBodyScratch};
@@ -1286,6 +1288,71 @@ impl PhysicsWorld {
 
     pub fn constraints(&self) -> &[Constraint] {
         &self.constraints
+    }
+
+    /// A Hinge-2 (wheel) joint between two bodies — Bullet's
+    /// `btHinge2Constraint`: steering about `axis1`, free wheel spin about
+    /// `axis2`, the pivot translating along `axis1` against the suspension
+    /// spring (stiffness `4π²`, damping `0.01`, equilibrium at the
+    /// construction pose). The anchor and both axes are world coordinates,
+    /// consumed against the bodies' *current* poses (upstream's constructor
+    /// reads the COM transforms the same way — add the joint before moving
+    /// the bodies). `axis1` must be orthogonal to `axis2`. Returns the
+    /// constraint for tuning, e.g.
+    /// `world.add_hinge2(..).hinge2_mut().set_angular_upper_limit(..)`.
+    pub fn add_hinge2(
+        &mut self,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        anchor: Vector3,
+        axis1: Vector3,
+        axis2: Vector3,
+    ) -> &mut Constraint {
+        let a = self.body(body_a);
+        let b = self.body(body_b);
+        let (pos_a, quat_a) = (a.position, a.orientation);
+        let (pos_b, quat_b) = (b.position, b.orientation);
+        let joint = Constraint::from_kind(
+            ConstraintKind::Hinge2(Generic6DofSpring2Constraint::hinge2(
+                pos_a, quat_a, pos_b, quat_b, anchor, axis1, axis2,
+            )),
+            body_a,
+            body_b,
+        );
+        let index = self.add_constraint(joint);
+        &mut self.constraints[index]
+    }
+
+    /// A universal (shaft) joint between two bodies — Bullet's
+    /// `btUniversalConstraint`: the pivots stay coincident and the
+    /// relative rotation is free about `axis1` (±π−0.01) and `axis2`
+    /// (±π/2−0.01) while every other degree of freedom is locked, so the
+    /// two shafts bend only around the joint axes. The anchor and both
+    /// axes are world coordinates, consumed against the bodies' *current*
+    /// poses; `axis1` must be orthogonal to `axis2`. Returns the
+    /// constraint for tuning, e.g.
+    /// `world.add_universal(..).universal_mut().enable_motor(..)`.
+    pub fn add_universal(
+        &mut self,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        anchor: Vector3,
+        axis1: Vector3,
+        axis2: Vector3,
+    ) -> &mut Constraint {
+        let a = self.body(body_a);
+        let b = self.body(body_b);
+        let (pos_a, quat_a) = (a.position, a.orientation);
+        let (pos_b, quat_b) = (b.position, b.orientation);
+        let joint = Constraint::from_kind(
+            ConstraintKind::Universal(Generic6DofConstraint::universal(
+                pos_a, quat_a, pos_b, quat_b, anchor, axis1, axis2,
+            )),
+            body_a,
+            body_b,
+        );
+        let index = self.add_constraint(joint);
+        &mut self.constraints[index]
     }
 
     /// Remove a joint, dropping its index and the collision suppression it
