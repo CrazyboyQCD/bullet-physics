@@ -57,6 +57,24 @@ replacement, if any.
 | **`Bullet 3.x` GPU pipeline** (`Bullet3OpenCL` / `Bullet3Collision` / `Bullet3Dynamics` / `Bullet3Serialize` / clew) | — | — | **Open (propose Won't do)** | Independent GPU product line (the `b3*` classes, OpenCL/CUDA); not a port target for a CPU-only Rust rewrite. Propose recording it in `00-project-status.md` Out of Scope explicitly. |
 | **Rigid API minutiae** (`setContactProcessingThreshold`, `setAnisotropicRollingFrictionDirection`) | ☆ | S | **Open** | Manifold-point admission threshold and rolling-friction anisotropy direction; tiny surface additions riding the body flags. |
 
+## Completeness sweep additions (2026-10-23)
+
+Rows below come from a file-by-file sweep of `refs/bullet3/src` (LinearMath,
+BulletCollision, BulletDynamics, BulletSoftBody) plus the `Extras/`
+disposition check. Everything outside these rows is already dispositioned:
+the table above, recorded deviations (`bullet-deviations.md`), or Out of
+Scope (`audit/00-project-status.md` — MLCP/NNCG, toy worlds, the MT solver
+family, deformable, VHACD, the ghost-object type; the Bullet3 GPU pipeline
+and BulletRobotics sit behind the GPU-pipeline Won't-do row).
+
+| Item | Frequency | Size | Verdict | Rationale |
+|---|---|---|---|---|
+| **`btGeneric6DofSpringConstraint` (classic spring-1)** | ☆ | S | **Open (propose Won't do)** | The original spring class, still shipped alongside its rewrite; spring-2 (Done 2026-10-12) covers the use case with the maintained limit/spring implementation. Its only prior record was the stale 2026-09-01 deviations note. Propose Won't do. |
+| **Capsule/Cylinder/Cone X/Z orientation variants** (`btCapsuleShapeX/Z`, `btCylinderShapeX/Z`, `btConeShapeX/Z`) | ☆ | S | **Open (propose Won't do)** | Convenience classes hard-coding the principal axis. Our shapes are Y-axis constructors with no shape-local transform — a rotated body or a one-child compound reproduces every variant. Propose documenting the workaround instead of porting. |
+| **Soft body face-vs-node CCD** (`bernsteinVFTest` / `continuousCollisionDetection` + `poly34`) | ☆ | S | **Won't do (2026-10-23, upstream dead code)** | Defined in `btSoftBodyInternals.h` with zero call sites across the entire upstream tree (src and examples); `poly34`'s only consumer is this dead pair. Same class as the per-triangle materials ruling. |
+| **Dispatch-info knobs** (`m_enableSatConvex`, `m_numPerturbationIterations`, `m_convexConservativeDistanceThreshold`) | ☆ | S | **Open (propose deviations §3 note)** | Source-audited dead-by-default: `m_enableSatConvex` defaults false (`btDispatcher.h:44`), and the polyhedral clipping branch it gates is unreachable by default — polyhedron features are built only for triangles under the same flag (`btConvexConvexAlgorithm.cpp:633`) or via the explicit `initializePolyhedralFeatures` (callers: the Bullet3 GPU line, the world importer, demos); boxes ship none, and box-box is intercepted by the dedicated SAT algorithm (`btDefaultCollisionConfiguration.cpp:295` — the path already ported). `m_allowedCcdPenetration` is already on the optional-parity list (`00-project-status.md`). Propose recording in deviations §3, no port. |
+| **Trivial accessors/knobs** (`btCompoundShape::calculatePrincipalAxisTransform`, `btCollisionShape::getBoundingSphere`, `btDiscreteDynamicsWorld::setForceUpdateAllAabbs`) | ☆ | S | **Open (propose Won't do)** | An offline-ish compound inertia-axes utility, a cached-bounding-sphere accessor (our shapes expose AABBs), and an AABB-refresh toggle whose default `true` equals our behavior. Fold into the rigid-API-minutiae adjudication. |
+
 ## Suggested order
 
 ~~kinematic → compound child transforms (same round) → ghost list → rolling
