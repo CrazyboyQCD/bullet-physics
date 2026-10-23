@@ -9,10 +9,15 @@ history lives in `docs/`.
 
 ### Added
 
-- Rigid gear constraint: `Constraint::gear(body_a, body_b, axis_a, axis_b, ratio)` (Bullet's `btGearConstraint`) — a one-row angular velocity coupling with local axes, probed frame-level against the C++ solver.
-- Multi-sphere shape: `CollisionShape::multi_sphere(&[(center, radius); n])` (Bullet's `btMultiSphereShape`) — hull-of-spheres GJK support with the upstream margin-cancellation quirk, box-approximated inertia, support-mapped raycast.
-- Hinge-2 and universal joints: `world.add_hinge2` / `world.add_universal` (Bullet's `btHinge2Constraint` / `btUniversalConstraint` as configurations of the spring-2 / classic 6DOF rows), with `hinge2_mut()` / `universal_mut()` tuning access and debug-draw support. Probed frame-level against the C++ library (suspension, steering, locked-axis spin).
-- inverse-dynamics: `--bench` mode on both parity probes (speed + per-call allocation counts over chain/random scenes) and the gate-enforced `id_alloc` zero-alloc demo; results ledgered in `docs/perf/inverse-dynamics.md`.
+- Hinge-2 and universal joints: `world.add_hinge2` / `world.add_universal` (spring-2 / classic-6DOF configurations), probed frame-level against the C++ library.
+- Rigid gear constraint: `Constraint::gear(body_a, body_b, axis_a, axis_b, ratio)` (`btGearConstraint`), probed frame-level against the C++ solver.
+- Multi-sphere shape: `CollisionShape::multi_sphere(&[(center, radius); n])` (`btMultiSphereShape`) with the upstream margin-cancellation support.
+- inverse-dynamics: `--bench` mode on the parity probes (speed and allocation counts, ledgered) and the gate-enforced zero-alloc `id_alloc` demo.
+
+### Changed
+
+- Broad-phase: the per-step pair buffer is recycled across steps.
+- Islands: the kinematic wake scan is skipped when no kinematic bodies exist.
 
 ## [0.2.0] - 2026-10-22
 
