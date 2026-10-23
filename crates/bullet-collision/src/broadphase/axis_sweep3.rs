@@ -490,18 +490,21 @@ impl BroadPhase for AxisSweep3 {
     }
 
     fn compute_pairs(&mut self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        self.compute_pairs_into(&mut out);
+        out
+    }
+
+    fn compute_pairs_into(&mut self, out: &mut Vec<(usize, usize)>) {
         // The cached set is quantized-conservative; the exact stored AABBs
         // bring the output back to brute-force-exact semantics. The set is
         // maintained in sorted order by the edge-swap pair updates, so this
         // is a single ordered walk — no per-step sort.
-        self.pairs
-            .iter()
-            .copied()
-            .filter(|&(a, b)| {
-                matches!((self.aabbs[a], self.aabbs[b]),
-                         (Some(x), Some(y)) if x.overlaps(&y))
-            })
-            .collect()
+        out.clear();
+        out.extend(self.pairs.iter().copied().filter(|&(a, b)| {
+            matches!((self.aabbs[a], self.aabbs[b]),
+                     (Some(x), Some(y)) if x.overlaps(&y))
+        }));
     }
 
     fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize> {

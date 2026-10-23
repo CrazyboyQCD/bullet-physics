@@ -367,6 +367,12 @@ pub struct PhysicsWorld {
     soft_proxies: Vec<usize>,
     /// Recycled leaf scratch for the soft-body SDF_RS queries.
     soft_scratch: Vec<usize>,
+    /// Recycled broad-phase pair buffer: taken as an owned local for the
+    /// pair pass each step (the passes below run `&mut self` methods, so no
+    /// borrow of the world may span them) and returned with its capacity at
+    /// the end — the fresh-Vec collect showed up as malloc/free churn in
+    /// the stack_1000 flamegraph.
+    pair_scratch: Vec<(usize, usize)>,
     /// Recycled (node, face) leaf-pair scratch for the soft-soft VF_SS
     /// queries.
     soft_pair_scratch: Vec<(usize, usize)>,
@@ -448,6 +454,7 @@ impl PhysicsWorld {
             soft_bodies: Vec::new(),
             soft_proxies: Vec::new(),
             soft_scratch: Vec::new(),
+            pair_scratch: Vec::new(),
             soft_pair_scratch: Vec::new(),
             soft_mb_jac: Vec::new(),
             soft_mb_delta: Vec::new(),

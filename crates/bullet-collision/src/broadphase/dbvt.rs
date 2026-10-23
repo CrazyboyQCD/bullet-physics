@@ -760,6 +760,12 @@ impl BroadPhase for DbvtBroadPhase {
     }
 
     fn compute_pairs(&mut self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        self.compute_pairs_into(&mut out);
+        out
+    }
+
+    fn compute_pairs_into(&mut self, out: &mut Vec<(usize, usize)>) {
         self.tick();
         // The cache lives at fat-overlap granularity: a pair stays cached
         // while its leaf volumes overlap even when the exact AABBs are
@@ -768,7 +774,8 @@ impl BroadPhase for DbvtBroadPhase {
         // the exact AABBs close the gap again (Bullet's cleanup pass
         // likewise only drops pairs outside the margin). The reported
         // output is the exact-filtered subset.
-        let mut out = Vec::with_capacity(self.pairs.len());
+        out.clear();
+        out.reserve(self.pairs.len());
         let pairs = &mut self.pairs;
         let proxies = &self.proxies;
         let (dynamic, fixed) = (&self.dynamic, &self.fixed);
@@ -796,7 +803,6 @@ impl BroadPhase for DbvtBroadPhase {
             }
         }
         pairs.truncate(write);
-        out
     }
 
     fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize> {

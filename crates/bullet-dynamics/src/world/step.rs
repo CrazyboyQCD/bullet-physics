@@ -398,8 +398,14 @@ impl PhysicsWorld {
         }
         clk.mark(&mut self.step_timings, StepStage::UpdateAabbs);
 
-        // 4. Broad phase: candidate overlapping pairs.
-        let pairs = self.broadphase.compute_pairs();
+        // 4. Broad phase: candidate overlapping pairs. The buffer is taken
+        // off the scratch shelf as an owned local — the passes below run
+        // `&mut self` methods, which kill any outstanding borrow of the
+        // world, so the pairs cannot stay behind a field reference — and
+        // its capacity is returned after the pair pass.
+        let mut pairs = core::mem::take(&mut self.pair_scratch);
+        pairs.clear();
+        self.broadphase.compute_pairs_into(&mut pairs);
         clk.mark(&mut self.step_timings, StepStage::Broadphase);
 
         // 4b. Simulation islands (phase D, docs/design/multibody-collision.md §9):
@@ -839,6 +845,9 @@ impl PhysicsWorld {
                 Self::cache_remove(&mut self.manifold_cache, i, j);
             }
         }
+        // Pair pass over: the buffer (and its capacity) goes back on the
+        // scratch shelf for the next step.
+        self.pair_scratch = pairs;
 
         // 5e. Collision events: diff this step's touching pairs against the
         // previous step's (Rapier's post-step event drain). Only pairs with

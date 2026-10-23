@@ -64,6 +64,13 @@ impl BroadPhase for BroadPhaseBackend {
         }
     }
 
+    fn compute_pairs_into(&mut self, out: &mut Vec<(usize, usize)>) {
+        match self {
+            Self::AxisSweep3(bp) => bp.compute_pairs_into(out),
+            Self::Dbvt(bp) => bp.compute_pairs_into(out),
+        }
+    }
+
     fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize> {
         match self {
             Self::AxisSweep3(bp) => bp.raycast_candidates(ray_from, ray_to),
@@ -100,7 +107,15 @@ pub trait BroadPhase {
     /// broadphase runs its per-step tree optimization, stage rotation and
     /// separated-pair pruning here, mirroring Bullet's
     /// `calculateOverlappingPairs`).
-    fn compute_pairs(&mut self) -> Vec<(usize, usize)>;
+    fn compute_pairs(&mut self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        self.compute_pairs_into(&mut out);
+        out
+    }
+    /// Same as [`compute_pairs`](Self::compute_pairs), refilling `out` in
+    /// place (cleared first) so a per-step caller can recycle the buffer's
+    /// capacity instead of paying malloc/free every step.
+    fn compute_pairs_into(&mut self, out: &mut Vec<(usize, usize)>);
     /// Indices of proxies whose AABB the segment `ray_from -> ray_to` crosses.
     ///
     /// Conservative: never misses a proxy a shape hit could come from, but may

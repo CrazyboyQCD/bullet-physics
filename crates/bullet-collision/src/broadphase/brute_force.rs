@@ -46,7 +46,13 @@ impl BroadPhase for BruteForceBroadPhase {
     }
 
     fn compute_pairs(&mut self) -> Vec<(usize, usize)> {
-        let mut pairs = Vec::new();
+        let mut out = Vec::new();
+        self.compute_pairs_into(&mut out);
+        out
+    }
+
+    fn compute_pairs_into(&mut self, out: &mut Vec<(usize, usize)>) {
+        out.clear();
         for i in 0..self.aabbs.len() {
             let Some(a) = &self.aabbs[i] else {
                 continue;
@@ -55,11 +61,10 @@ impl BroadPhase for BruteForceBroadPhase {
                 if let Some(b) = b
                     && a.overlaps(b)
                 {
-                    pairs.push((i, j));
+                    out.push((i, j));
                 }
             }
         }
-        pairs
     }
 
     fn raycast_candidates(&self, ray_from: Vector3, ray_to: Vector3) -> Vec<usize> {
