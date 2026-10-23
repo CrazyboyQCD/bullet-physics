@@ -30,10 +30,10 @@ libm = ["bullet-dynamics/libm", "bullet-inverse-dynamics?/libm"]
 inverse-dynamics = ["dep:bullet-inverse-dynamics"]
 
 [dependencies]
-bullet-math = { version = "0.2", path = "../bullet-math", default-features = false }
-bullet-collision = { version = "0.2", path = "../bullet-collision", default-features = false }
-bullet-dynamics = { version = "0.2", path = "../bullet-dynamics", default-features = false }
-bullet-inverse-dynamics = { version = "0.2", path = "../bullet-inverse-dynamics",
+bullet-math = { version = "0.3", path = "../bullet-math", default-features = false }
+bullet-collision = { version = "0.3", path = "../bullet-collision", default-features = false }
+bullet-dynamics = { version = "0.3", path = "../bullet-dynamics", default-features = false }
+bullet-inverse-dynamics = { version = "0.3", path = "../bullet-inverse-dynamics",
     default-features = false, optional = true }
 
 # The probe twins are verification rigs (docs/parity-harness.md), not demos;

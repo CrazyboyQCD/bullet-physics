@@ -5,7 +5,7 @@ The crates share a single version line, in the spirit of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Full development
 history lives in `docs/`.
 
-## [Unreleased]
+## [0.3.0] - 2026-10-23
 
 ### Added
 
