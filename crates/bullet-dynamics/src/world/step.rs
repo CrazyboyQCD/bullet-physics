@@ -343,16 +343,23 @@ impl PhysicsWorld {
             .extend(self.bodies.iter().map(|b| b.predicted_position(dt)));
 
         // 3. Update broad-phase AABBs from predicted poses. Sleeping bodies
-        // keep their AABB: they do not move, so it stays correct.
-        for (i, body) in self.bodies.iter().enumerate() {
+        // keep their AABB: they do not move, so it stays correct. The three
+        // parallel arrays are zipped (slots are index-aligned), so the hot
+        // per-body walk carries no bounds checks.
+        for ((body, &pose), &proxy) in self
+            .bodies
+            .iter()
+            .zip(&self.predicted_poses)
+            .zip(&self.body_proxies)
+        {
             if !body.is_active() {
                 continue;
             }
             let aabb = body
                 .shape
-                .world_aabb(self.predicted_poses[i], body.orientation)
+                .world_aabb(pose, body.orientation)
                 .expanded(BROADPHASE_AABB_MARGIN);
-            self.broadphase.set_aabb(self.body_proxies[i], aabb);
+            self.broadphase.set_aabb(proxy, aabb);
         }
 
         // 3m. Register new multibody colliders in the broad phase and refresh
@@ -391,10 +398,10 @@ impl PhysicsWorld {
         // body's collision object; soft bodies never sleep, so every proxy
         // refreshes — a resting body's bounds are unchanged and the
         // broad-phase absorbs the no-op).
-        for (i, proxy) in self.soft_proxies.iter().enumerate() {
-            let bounds = self.soft_bodies[i].bounds;
+        for (&proxy, soft) in self.soft_proxies.iter().zip(&self.soft_bodies) {
+            let bounds = soft.bounds;
             self.broadphase
-                .set_aabb(*proxy, Aabb::new(bounds[0], bounds[1]));
+                .set_aabb(proxy, Aabb::new(bounds[0], bounds[1]));
         }
         clk.mark(&mut self.step_timings, StepStage::UpdateAabbs);
 
