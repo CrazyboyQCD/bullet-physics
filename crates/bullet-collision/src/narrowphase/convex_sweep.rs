@@ -66,7 +66,10 @@ pub fn swept_sphere_cast(
 /// The simplex is seeded with the support point along a guess direction and
 /// grown toward the origin; the closest point either collapses (point inside)
 /// or stops improving when the support point repeats.
-fn point_convex_distance<F>(support: &F, point: Vector3) -> (Real, Vector3)
+/// GJK distance from a point to a support-mapped convex shape: returns the
+/// squared distance and the unit direction from the closest surface point
+/// toward `point` (zero distance when the point is inside or touching).
+pub(crate) fn point_convex_distance<F>(support: &F, point: Vector3) -> (Real, Vector3)
 where
     F: Fn(Vector3) -> Vector3,
 {

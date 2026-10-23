@@ -16,6 +16,8 @@
 //           momentum-conserving orbit (120 frames)
 //   UNIV  — universal joint: a spin about a locked/limited axis corrected
 //           through the angular limit rows (60 frames)
+//   GEAR  — rigid gear: two flywheels coupled at ratio 2, the one-row
+//           angular velocity coupling (120 frames, both bodies printed)
 // One line per frame: label, frame, position(3), quaternion(x y z w) of the
 // moving body at %.17g — strip CR, then tools/mbdiff.py compares.
 //
@@ -23,12 +25,14 @@
 #include <cstdio>
 
 #include "btBulletDynamicsCommon.h"
+#include "BulletDynamics/ConstraintSolver/btGearConstraint.h"
 #include "BulletDynamics/ConstraintSolver/btHinge2Constraint.h"
 #include "BulletDynamics/ConstraintSolver/btUniversalConstraint.h"
 
 static const int kFramesSus = 240;
 static const int kFramesSte = 120;
 static const int kFramesUniv = 60;
+static const int kFramesGear = 120;
 
 static btRigidBody *static_body(btDiscreteDynamicsWorld *world, btSphereShape *shape,
 								const btVector3 &origin) {
@@ -131,6 +135,33 @@ int main() {
 		for (int f = 1; f <= kFramesUniv; f++) {
 			world.stepSimulation(dt, 1, dt);
 			print_body("UNIV", f, b);
+		}
+	}
+	// Scene 3: rigid gear — two identical flywheels, A spun up, ratio 2.
+	// The one-row solve settles at omega_A = 4.8 / omega_B = -2.4 (equal
+	// inertias): parallel axes spinning opposite. Both bodies' poses are
+	// printed (GEARA / GEARB) — the spin shows in the quaternions.
+	{
+		btDefaultCollisionConfiguration config;
+		btCollisionDispatcher dispatcher(&config);
+		btDbvtBroadphase broadphase;
+		btSequentialImpulseConstraintSolver solver;
+		btDiscreteDynamicsWorld world(&dispatcher, &broadphase, &solver, &config);
+		world.setGravity(btVector3(0.0, 0.0, 0.0));
+		btSphereShape shape_a(0.5);
+		btSphereShape shape_b(0.5);
+		btRigidBody *a = dynamic_body(&world, &shape_a, btVector3(0, 0, 0), 2.0);
+		btRigidBody *b = dynamic_body(&world, &shape_b, btVector3(3, 0, 0), 2.0);
+		btGearConstraint joint(*a, *b, btVector3(0, 0, 1), btVector3(0, 0, 1), 2.0);
+		world.addConstraint(&joint, true);
+		a->setAngularVelocity(btVector3(0, 0, 6.0));
+		print_body("GEARA", 0, a);
+		print_body("GEARB", 0, b);
+		const btScalar dt = 1.0 / 60.0;
+		for (int f = 1; f <= kFramesGear; f++) {
+			world.stepSimulation(dt, 1, dt);
+			print_body("GEARA", f, a);
+			print_body("GEARB", f, b);
 		}
 	}
 	return 0;

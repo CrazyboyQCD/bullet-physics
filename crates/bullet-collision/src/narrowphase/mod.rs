@@ -9,7 +9,7 @@ use crate::shapes::{CollisionShape, Compound};
 mod box_box;
 mod convex_convex;
 mod convex_mesh;
-mod convex_sweep;
+pub(crate) mod convex_sweep;
 pub mod epa;
 pub mod gjk;
 mod mesh_mesh;

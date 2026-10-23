@@ -11,8 +11,9 @@ use bullet_math::{math, Quaternion, Real, Vector3};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use crate::narrowphase::convex_sweep::point_convex_distance;
 use crate::narrowphase::gjk::closest_origin;
-use crate::shapes::{CollisionShape, Compound};
+use crate::shapes::{CollisionShape, Compound, MultiSphere};
 
 /// A ray hit against a shape.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -99,6 +100,7 @@ fn local_raycast(
         CollisionShape::ConvexHull(h) => {
             convex_hull_raycast(&h.points, local_from, local_to)
         }
+        CollisionShape::MultiSphere(m) => multi_sphere_raycast(m, local_from, local_to),
         CollisionShape::TriangleMesh(m) => m.raycast(local_from, local_to),
         CollisionShape::Heightfield(h) => h.raycast(local_from, local_to),
         CollisionShape::Compound(compound) => {
@@ -166,6 +168,11 @@ fn local_inside(
         CollisionShape::ConvexHull(h) => {
             let p = orientation.inverse() * (point - position);
             hull_distance_squared(&h.points, p) <= 1e-12
+        }
+        CollisionShape::MultiSphere(m) => {
+            let p = orientation.inverse() * (point - position);
+            let support = |d: Vector3| m.support_local(d);
+            point_convex_distance(&support, p).0 <= 1e-12
         }
         CollisionShape::Plane(_) => false,
         // Open surfaces: rays pass through freely; hits report the surface     
@@ -485,8 +492,57 @@ fn smallest_root(a: Real, b: Real, c: Real) -> Option<Real> {
 /// the squared distance to a convex set is convex, so a ternary search finds
 /// the closest approach; if it touches, a binary search on the decreasing
 /// side locates the entry point.
-fn convex_hull_raycast(points: &[Vector3], from: Vector3, to: Vector3) -> Option<LocalHit> {
+/// Ray against a multi-sphere shape: a support-mapped cast against the
+/// sphere-union hull (upstream ray-tests convex shapes with the
+/// sub-simplex support walk, so the surface is the hull, not the union).
+/// The point-to-hull distance is convex along the segment, so the same
+/// ternary/binary search as [`convex_hull_raycast`] finds the entry.
+fn multi_sphere_raycast(ms: &MultiSphere, from: Vector3, to: Vector3) -> Option<LocalHit> {
     let dir = to - from;
+    let support = |d: Vector3| ms.support_local(d);
+    let dist = |p: Vector3| point_convex_distance(&support, p);
+    if dist(from).0 <= 1e-12 {
+        return Some((0.0, Vector3::X));
+    }
+    // Ternary search for the closest approach (40 iterations, more than
+    // enough on f32/f64).
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    for _ in 0..40 {
+        let m1 = lo + (hi - lo) / 3.0;
+        let m2 = hi - (hi - lo) / 3.0;
+        if dist(from + dir * m1).0 < dist(from + dir * m2).0 {
+            hi = m2;
+        } else {
+            lo = m1;
+        }
+    }
+    let s_min = (lo + hi) * 0.5;
+    if dist(from + dir * s_min).0 > 1e-8 {
+        return None; // Never touches the hull.
+    }
+    // Binary search on [0, s_min] (the distance is decreasing there) for the
+    // first fraction inside the hull.
+    let mut low = 0.0;
+    let mut high = s_min;
+    for _ in 0..60 {
+        let mid = (low + high) * 0.5;
+        if dist(from + dir * mid).0 <= 1e-8 {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    let fraction = (low + high) * 0.5;
+    // Surface normal: cast from a point slightly outside the entry (the GJK
+    // distance direction is stable there) back to its closest surface point.
+    let probe = from + dir * (fraction - 2e-4);
+    let (_, v) = dist(probe);
+    let normal = if v.length_squared() > 1e-12 { v } else { -dir / dir.length() };
+    Some((fraction, normal))
+}
+
+fn convex_hull_raycast(points: &[Vector3], from: Vector3, to: Vector3) -> Option<LocalHit> {    let dir = to - from;
     if hull_distance_squared(points, from) <= 1e-12 {
         return Some((0.0, Vector3::X));
     }

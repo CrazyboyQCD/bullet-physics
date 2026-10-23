@@ -33,6 +33,7 @@ use crate::solver::sequential_impulse::{ConstraintRow, RowLimits};
 
 mod conetwist;
 mod fixed;
+mod gear;
 mod generic6dof;
 mod generic6dof_spring2;
 mod hinge;
@@ -44,6 +45,7 @@ mod tests;
 
 pub use conetwist::{ConeTwistConstraint, ConeTwistMotor};
 pub use fixed::FixedConstraint;
+pub use gear::GearConstraint;
 pub use generic6dof::{Generic6DofConstraint, RotationalLimitMotor, TranslationalLimitMotor};
 pub use generic6dof_spring2::{
     Generic6DofSpring2Constraint, RotateOrder, RotationalLimitMotor2, TranslationalLimitMotor2,
@@ -104,6 +106,10 @@ pub enum ConstraintKind {
     /// `btGeneric6DofConstraint` subclass upstream — the rows are the
     /// classic 6DOF rows). Built by [`PhysicsWorld::add_universal`].
     Universal(Generic6DofConstraint),
+    /// Gear coupling of two rotation axes (Bullet's `btGearConstraint`):
+    /// one angular-only bilateral row `ω_A·axisA + ratio·ω_B·axisB = 0`
+    /// with zero bias. Built by [`Constraint::gear`].
+    Gear(GearConstraint),
 }
 
 impl ConstraintKind {
@@ -119,6 +125,7 @@ impl ConstraintKind {
             ConstraintKind::Generic6DofSpring2(_) => "generic 6DOF spring 2",
             ConstraintKind::Hinge2(_) => "hinge 2",
             ConstraintKind::Universal(_) => "universal",
+            ConstraintKind::Gear(_) => "gear",
         }
     }
 
@@ -307,6 +314,24 @@ impl ConstraintKind {
             other => panic!("not a universal constraint (found {})", other.kind_name()),
         }
     }
+
+    /// Access to the [`Gear`][ConstraintKind::Gear] joint's parameters
+    /// (panics on any other kind).
+    pub fn gear(&self) -> &GearConstraint {
+        match self {
+            ConstraintKind::Gear(gear) => gear,
+            other => panic!("not a gear constraint (found {})", other.kind_name()),
+        }
+    }
+
+    /// Mutable access to the [`Gear`][ConstraintKind::Gear] joint's
+    /// parameters (panics on any other kind).
+    pub fn gear_mut(&mut self) -> &mut GearConstraint {
+        match self {
+            ConstraintKind::Gear(gear) => gear,
+            other => panic!("not a gear constraint (found {})", other.kind_name()),
+        }
+    }
 }
 
 /// A joint between two bodies (Bullet's `btTypedConstraint`). The common
@@ -493,6 +518,27 @@ impl Constraint {
                 frame_b,
                 rotate_order,
             )),
+            body_a,
+            body_b,
+            enabled: true,
+            disable_collisions: true,
+        }
+    }
+
+    /// A gear coupling of two rotation axes (Bullet's `btGearConstraint`):
+    /// the axes are in each body's center-of-mass frame, the ratio relates
+    /// the angular velocities (`ω_A·axisA + ratio·ω_B·axisB = 0`, so
+    /// parallel axes mesh like external gears). Add it with
+    /// `PhysicsWorld::add_constraint` — the constructor reads no body state.
+    pub fn gear(
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        axis_a: Vector3,
+        axis_b: Vector3,
+        ratio: Real,
+    ) -> Self {
+        Self {
+            kind: ConstraintKind::Gear(GearConstraint::new(axis_a, axis_b, ratio)),
             body_a,
             body_b,
             enabled: true,
@@ -783,6 +829,9 @@ pub fn prepare_rows(
         }
         ConstraintKind::Universal(dof) => {
             dof.prepare_rows(body_a_idx, body_b_idx, bodies, inv_dt, erp, out);
+        }
+        ConstraintKind::Gear(gear) => {
+            gear.prepare_rows(body_a_idx, body_b_idx, bodies, out);
         }
     }
 }

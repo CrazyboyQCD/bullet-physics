@@ -76,6 +76,7 @@ pub enum ConstraintTag {
     Generic6DofSpring2,
     Hinge2,
     Universal,
+    Gear,
 }
 
 /// One debug primitive: a *physical fact* read from the world's
@@ -253,6 +254,10 @@ impl PhysicsWorld {
                     ConstraintKind::Universal(g) => {
                         (ConstraintTag::Universal, g.frame_a.origin, g.frame_b.origin)
                     }
+                    // A gear has no anchors — the tag is emitted with zero
+                    // anchors (nothing geometric to draw; the tag exists for
+                    // renderer routing).
+                    ConstraintKind::Gear(_) => (ConstraintTag::Gear, Vector3::ZERO, Vector3::ZERO),
                 };
                 let (a, b) = (constraint.body_a(), constraint.body_b());
                 let body_a = &self.bodies[a.index()];

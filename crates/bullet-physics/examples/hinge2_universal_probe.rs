@@ -10,14 +10,15 @@
 //! Output protocol (identical to the C++ probe, one line per frame): label,
 //! frame, position(3), quaternion(x y z w) of the moving body. Scenes:
 //! H2SUS (suspension catch, 240 frames), H2STE (steering spin absorbed by the
-//! linear locks, 120), UNIV (locked-axis spin corrected, 60). Strip CR, then
+//! linear locks, 120), UNIV (locked-axis spin corrected, 60), GEAR (rigid
+//! gear coupling, 120, both bodies printed as GEARA/GEARB). Strip CR, then
 //! compare with `python tools/mbdiff.py`.
 //!
 //! Run:
 //!     cargo run --profile release-debug -p bullet-physics --example hinge2_universal_probe
 //!     cargo run --profile release-debug -p bullet-physics --example hinge2_universal_probe --features f64
 
-use bullet_physics::dynamics::{PhysicsWorld, RigidBody};
+use bullet_physics::dynamics::{Constraint, PhysicsWorld, RigidBody};
 use bullet_physics::math::{Real, Vector3};
 use bullet_physics::shapes::CollisionShape;
 
@@ -25,6 +26,7 @@ const DT: Real = 1.0 / 60.0;
 const FRAMES_SUS: usize = 240;
 const FRAMES_STE: usize = 120;
 const FRAMES_UNIV: usize = 60;
+const FRAMES_GEAR: usize = 120;
 
 fn print_body(label: &str, frame: usize, body: &RigidBody) {
     let p = body.position;
@@ -97,6 +99,33 @@ fn main() {
         for f in 1..=FRAMES_UNIV {
             world.step_simulation(DT);
             print_body("UNIV", f, world.body(b));
+        }
+    }
+    // Scene 3: rigid gear — two identical flywheels, A spun up, ratio 2.
+    // The one-row solve settles at ω_A = 4.8 / ω_B = −2.4 (equal inertias):
+    // parallel axes spinning opposite. Both bodies' poses are printed
+    // (GEARA / GEARB) — the spin shows in the quaternions.
+    {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vector3::ZERO);
+        let a = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::sphere(0.5),
+            Vector3::ZERO,
+            2.0,
+        ));
+        let b = world.add_body(RigidBody::new_dynamic(
+            CollisionShape::sphere(0.5),
+            Vector3::new(3.0, 0.0, 0.0),
+            2.0,
+        ));
+        world.add_constraint(Constraint::gear(a, b, Vector3::Z, Vector3::Z, 2.0));
+        world.body_mut(a).angular_velocity = Vector3::new(0.0, 0.0, 6.0);
+        print_body("GEARA", 0, world.body(a));
+        print_body("GEARB", 0, world.body(b));
+        for f in 1..=FRAMES_GEAR {
+            world.step_simulation(DT);
+            print_body("GEARA", f, world.body(a));
+            print_body("GEARB", f, world.body(b));
         }
     }
 }

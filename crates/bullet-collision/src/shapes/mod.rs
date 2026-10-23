@@ -18,6 +18,7 @@ mod convex_hull;
 mod cylinder;
 mod heightfield;
 pub(crate) mod internal_edges;
+mod multi_sphere;
 mod plane;
 mod shape_hull;
 mod sphere;
@@ -31,6 +32,7 @@ pub use convex_hull::ConvexHull;
 pub use cylinder::Cylinder;
 pub use heightfield::{Heightfield, HeightfieldOptions, UpAxis};
 pub use internal_edges::{TriangleInfo, TriangleInfoMap};
+pub use multi_sphere::MultiSphere;
 pub use plane::Plane;
 pub use shape_hull::ShapeHull;
 pub use sphere::Sphere;
@@ -45,6 +47,7 @@ pub enum ShapeType {
     Cylinder,
     Cone,
     ConvexHull,
+    MultiSphere,
     Compound,
     Plane,
     TriangleMesh,
@@ -62,6 +65,10 @@ pub enum CollisionShape {
     Cylinder(Cylinder),
     Cone(Cone),
     ConvexHull(ConvexHull),
+    /// The convex hull of a sphere collection (Bullet's
+    /// `btMultiSphereShape`): the GJK support is the farthest sphere's
+    /// `pos + dir·radius`, so every generic convex query sees the hull.
+    MultiSphere(MultiSphere),
     Compound(Compound),
     Plane(Plane),
     TriangleMesh(TriangleMesh),
@@ -110,6 +117,13 @@ impl CollisionShape {
     #[inline]
     pub fn convex_hull(points: Vec<Vector3>) -> Self {
         Self::ConvexHull(ConvexHull::new(points))
+    }
+
+    /// The convex hull of a sphere collection (Bullet's
+    /// `btMultiSphereShape`); panics on an empty collection.
+    #[inline]
+    pub fn multi_sphere(spheres: &[(Vector3, Real)]) -> Self {
+        Self::MultiSphere(MultiSphere::new(spheres))
     }
 
     /// A compound shape from a list of positioned children.
@@ -189,6 +203,7 @@ impl CollisionShape {
             Self::Cylinder(_) => ShapeType::Cylinder,
             Self::Cone(_) => ShapeType::Cone,
             Self::ConvexHull(_) => ShapeType::ConvexHull,
+            Self::MultiSphere(_) => ShapeType::MultiSphere,
             Self::Compound(_) => ShapeType::Compound,
             Self::Plane(_) => ShapeType::Plane,
             Self::TriangleMesh(_) => ShapeType::TriangleMesh,
@@ -208,7 +223,8 @@ impl CollisionShape {
             | Self::Capsule(_)
             | Self::Cylinder(_)
             | Self::Cone(_)
-            | Self::ConvexHull(_) => true,
+            | Self::ConvexHull(_)
+            | Self::MultiSphere(_) => true,
             Self::Compound(c) => c.is_convex(),
             Self::UniformScaling(child, _) | Self::Convex2d(child) => child.is_convex(),
             Self::Plane(_) | Self::TriangleMesh(_) | Self::Heightfield(_) => false,
@@ -225,6 +241,7 @@ impl CollisionShape {
             Self::Cylinder(c) => c.margin(),
             Self::Cone(c) => c.margin(),
             Self::ConvexHull(h) => h.margin(),
+            Self::MultiSphere(m) => m.margin(),
             Self::Compound(c) => c.margin(),
             Self::Plane(p) => p.margin(),
             Self::UniformScaling(child, f) => child.margin() * f,
@@ -243,6 +260,7 @@ impl CollisionShape {
             Self::Cylinder(c) => c.local_aabb(),
             Self::Cone(c) => c.local_aabb(),
             Self::ConvexHull(h) => h.local_aabb(),
+            Self::MultiSphere(m) => m.local_aabb(),
             Self::Compound(c) => c.local_aabb(),
             Self::Plane(p) => p.local_aabb(),
             Self::UniformScaling(child, f) => scaled_local_aabb(&child.local_aabb(), f),
@@ -262,6 +280,7 @@ impl CollisionShape {
             Self::Cylinder(c) => c.support_local(dir),
             Self::Cone(c) => c.support_local(dir),
             Self::ConvexHull(h) => h.support_local(dir),
+            Self::MultiSphere(m) => m.support_local(dir),
             Self::Compound(c) => c.support_local(dir),
             Self::UniformScaling(child, f) => child.support_local(dir) * f,
             Self::Convex2d(child) => child.support_local(dir),
@@ -280,7 +299,8 @@ impl CollisionShape {
     /// componentwise-shrink approximation for boxes, cylinders, and cones
     /// (Bullet's implicit shapes store `halfExtents - margin`). Hulls, mesh
     /// triangles, and compounds carry no margin in this engine, so their
-    /// core is the full shape.
+    /// core is the full shape; the multi-sphere's core is margin-shrunk like
+    /// upstream.
     #[inline]
     pub fn core_support_local(&self, dir: Vector3) -> Vector3 {
         match self {
@@ -289,7 +309,9 @@ impl CollisionShape {
             Self::Capsule(c) => c.core_support_local(dir),
             Self::Cylinder(c) => c.core_support_local(dir),
             Self::Cone(c) => c.core_support_local(dir),
-            // Margin-free shapes: the core is the full shape.
+            // Multi-sphere's upstream without-margin support shrinks by the
+            // margin (the core is not the full shape).
+            Self::MultiSphere(m) => m.core_support_local(dir),
             Self::UniformScaling(child, f) => child.core_support_local(dir) * f,
             Self::Convex2d(child) => child.core_support_local(dir),
             other => other.support_local(dir),
@@ -333,6 +355,12 @@ impl CollisionShape {
             Self::Cylinder(c) => c.world_aabb(position, orientation),
             Self::Cone(c) => c.world_aabb(position, orientation),
             Self::ConvexHull(h) => h.world_aabb(position, orientation),
+            Self::MultiSphere(m) => crate::shapes::support_projected_aabb(
+                |u| m.support_local(u),
+                position,
+                orientation,
+            )
+            .expanded(m.margin()),
             Self::Compound(c) => c.world_aabb(position, orientation),
             Self::Plane(p) => p.world_aabb(position, orientation),
             Self::UniformScaling(child, f) => scaled_world_aabb(
@@ -373,6 +401,7 @@ impl CollisionShape {
             Self::Cylinder(c) => c.local_inertia(mass),
             Self::Cone(c) => c.local_inertia(mass),
             Self::ConvexHull(h) => h.local_inertia(mass),
+            Self::MultiSphere(m) => m.local_inertia(mass),
             Self::Compound(c) => c.local_inertia(mass),
             Self::Plane(p) => p.local_inertia(mass),
             Self::UniformScaling(child, f) => child.local_inertia(mass) * f,
