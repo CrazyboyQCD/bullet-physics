@@ -148,19 +148,19 @@ Scene: stack_1000 (f32), bodies: 1001, frames: 600, warmup: 30, repeats median
 
 | Engine | per-frame median (ms) | total median (ms) | last300 median (ms) |
 |---|---|---|---|
-| bullet | 1.183 | 709.9 | 92.4 |
-| rust | 1.226 | 735.6 | 57.6 |
-| rust/bullet | 1.04x | | |
+| bullet | 1.208 | 724.7 | 92.4 |
+| rust | 1.211 | 726.8 | 53.9 |
+| rust/bullet | 1.00x | | |
 
 Rust stage breakdown (cumulative over 600 frames):
 
 - integrate_velocities: 8.5 ms (1.2%)
-- update_aabbs: 39.4 ms (5.4%)
-- broadphase: 13.5 ms (1.9%)
-- islands: 66.0 ms (9.1%)
-- narrowphase: 273.7 ms (37.6%)
-- solve: 318.8 ms (43.8%)
-- integrate_positions: 7.5 ms (1.0%)
+- update_aabbs: 42.7 ms (5.8%)
+- broadphase: 13.7 ms (1.9%)
+- islands: 56.5 ms (7.7%)
+- narrowphase: 281.2 ms (38.4%)
+- solve: 322.2 ms (44.0%)
+- integrate_positions: 7.8 ms (1.1%)
 
 **Analysis (2026-09-01, handwritten)**: the first soft-body perf scene — pure soft-body core work (PBD links + faces + aerodynamics), zero contacts. The soft-body stages live inside the Rust `integrate_positions` stage (the world's 7s section, where `solve_constraints` runs; 55.1 ms = 82%) plus the wind/predict slice of `integrate_velocities` (17.6%); broadphase/solve are near-zero because the cloths hang pinned in the air with no ground below. Bullet's stage breakdown is not instrumented, but the ratio (0.63x) lands between the rigid-solver scenes (0.6-0.8x) and the best pure-algorithm scenes — the classic `btSoftBody` position pipeline (links/faces iteration + `applyForces`) is cost-for-cost comparable to ours, with our edge mainly in the per-node bookkeeping. The workload is a genuine steady state: the wind keeps every node moving all run (max node speed stays ~2-3 m/s in both engines' dumps), so this measures sustained soft-body simulation, not a settle.
 
@@ -242,6 +242,21 @@ them). Broad-phase stage 84 → 13.5 ms (9.9% → 1.9%), last300
 70 → 57.6 ms (−18%), per-frame median 1.246 → 1.21 ms (−3%, the freed
 time partly re-attributes into solve/narrow). Rust-side only; Bullet
 pays the same allocation in its pool path and stays in band.
+
+2026-10-23 (kinematic wake-walk guard, same day): the island pass's
+second pair walk (the moving-kinematic wake scan) ran over every pair
+of every step although its per-pair pretest can only fire when a body
+is a moving kinematic. A once-per-step body scan now gates the whole
+walk (behavior-identical: with no moving kinematic the loop was a
+no-op). Islands stage 70.6 → 56.5 ms (9.1% → 7.7%), last300
+57.6 → 53.9 ms, per-frame 1.226 → 1.211 ms; the ratio reads 1.00x
+against a Bullet side drifting down to 1.208. `kinematic_pusher`
+(guard always true) interleaves neutral within ±1%. Same session, two
+experiments were measured and rejected: a packed solver-body pool
+(gather/scatter of the four velocity vectors — +0.7%, the row loop is
+arithmetic-bound, the contiguous body array already caches) and an
+edge-sort `edges[k]` borrow hoist in AxisSweep3 (+0.6-1%, the codegen
+loss of the held reference outweighs the saved bounds checks).
 
 ## Scene: rain_500
 

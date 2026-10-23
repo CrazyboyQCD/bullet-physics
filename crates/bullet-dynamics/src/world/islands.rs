@@ -233,39 +233,49 @@ impl PhysicsWorld {
         // activates both bodies at contact-point creation; done here because
         // the island pass runs before the narrow phase, so the broadphase
         // pair is the overlap signal). An idle kinematic (zero velocities)
-        // keeps its resting contacts sleeping, like Bullet.
-        for &(pi, pj) in pairs {
-            // Cheap kinematic pretest first: the eligibility check below
-            // only runs for pairs that actually carry a moving kinematic
-            // side (a pair the dispatcher would reject never produced a
-            // manifold for Bullet's contact-time `activate()` to fire on).
-            let kinematic_side = [(pi, pj), (pj, pi)].into_iter().find_map(|(pa, _)| {
-                let ProxyOwner::Body(k) = proxy_owners[pa] else {
-                    return None;
+        // keeps its resting contacts sleeping, like Bullet. Scenes without
+        // a moving kinematic skip the walk entirely: the per-pair pretest
+        // below can never fire, so one body scan replaces two indexed
+        // proxy-owner loads on every pair of every contact-heavy step.
+        let any_moving_kinematic = bodies.iter().any(|b| {
+            b.is_kinematic()
+                && (b.linear_velocity.length_squared() != 0.0
+                    || b.angular_velocity.length_squared() != 0.0)
+        });
+        if any_moving_kinematic {
+            for &(pi, pj) in pairs {
+                // Cheap kinematic pretest first: the eligibility check below
+                // only runs for pairs that actually carry a moving kinematic
+                // side (a pair the dispatcher would reject never produced a
+                // manifold for Bullet's contact-time `activate()` to fire on).
+                let kinematic_side = [(pi, pj), (pj, pi)].into_iter().find_map(|(pa, _)| {
+                    let ProxyOwner::Body(k) = proxy_owners[pa] else {
+                        return None;
+                    };
+                    let kb = &bodies[k];
+                    if kb.is_kinematic()
+                        && (kb.linear_velocity.length_squared() != 0.0
+                            || kb.angular_velocity.length_squared() != 0.0)
+                    {
+                        Some(pa)
+                    } else {
+                        None
+                    }
+                });
+                let Some(pa) = kinematic_side else {
+                    continue;
                 };
-                let kb = &bodies[k];
-                if kb.is_kinematic()
-                    && (kb.linear_velocity.length_squared() != 0.0
-                        || kb.angular_velocity.length_squared() != 0.0)
-                {
-                    Some(pa)
-                } else {
-                    None
+                if !pair_eligible(pi, pj) {
+                    continue;
                 }
-            });
-            let Some(pa) = kinematic_side else {
-                continue;
-            };
-            if !pair_eligible(pi, pj) {
-                continue;
+                let pb = if pa == pi { pj } else { pi };
+                let node = match proxy_owners[pb] {
+                    ProxyOwner::Body(i) if bodies[i].participates_in_islands() => i,
+                    ProxyOwner::Collider(e) => num_bodies + collider_entries[e].mb,
+                    _ => continue,
+                };
+                island_awake[uf.find(node)] = true;
             }
-            let pb = if pa == pi { pj } else { pi };
-            let node = match proxy_owners[pb] {
-                ProxyOwner::Body(i) if bodies[i].participates_in_islands() => i,
-                ProxyOwner::Collider(e) => num_bodies + collider_entries[e].mb,
-                _ => continue,
-            };
-            island_awake[uf.find(node)] = true;
         }
 
         // Resolve every member's island state first (the decisions borrow
